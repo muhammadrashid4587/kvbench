@@ -97,7 +97,7 @@ def _result_with_per_op():
         doc.pop("generated")
         self.assertEqual(parsed, doc)
         self.assertEqual(parsed["tool"], "kvbench")
-        self.assertEqual(parsed["version"], "0.3.0")
+        self.assertEqual(parsed["version"], "0.4.0")
         self.assertEqual(parsed["command"], "kvbench --ops 100 --clients 2")
         self.assertEqual(parsed["workload"]["ops"], 100)
         self.assertEqual(parsed["workload"]["clients"], 2)
@@ -221,6 +221,45 @@ def _result_with_per_op():
         self.assertEqual(json_path_for("report", None), "report.json")
         self.assertEqual(json_path_for("report.md", "custom.json"),
                          "custom.json")
+
+
+class TestDurationReports(unittest.TestCase):
+    def test_duration_in_markdown(self):
+        workload = Workload(clients=2, keys=10, value_size=8,
+                            duration_s=10)
+        result = BenchmarkResult(
+            name="cinder (127.0.0.1:6379)",
+            ops=52341,
+            elapsed_s=10.02,
+            errors=0,
+            latencies_ns=[100_000] * 100,
+        )
+        text = render_markdown([result], workload, "kvbench --duration 10s")
+        self.assertIn("Duration: 10s", text)
+        self.assertNotIn("Total ops:", text)
+        self.assertIn("In duration mode the run stops after the "
+                      "requested", text)
+        # Throughput over the elapsed time is in the results table.
+        self.assertIn("5,224", text)  # 52341 / 10.02 ops/sec
+
+    def test_duration_in_json(self):
+        workload = Workload(clients=2, keys=10, value_size=8,
+                            duration_s=90)
+        parsed = json.loads(render_json([_result()], workload, "kvbench"))
+        self.assertEqual(parsed["workload"]["duration_s"], 90)
+        self.assertIsNone(parsed["workload"]["ops"])
+        row = parsed["results"][0]
+        self.assertEqual(row["ops"], 100)
+        self.assertAlmostEqual(row["ops_per_sec"], 10_000)
+
+    def test_ops_mode_has_no_duration(self):
+        parsed = json.loads(render_json([_result()], _workload(),
+                                        "kvbench"))
+        self.assertIsNone(parsed["workload"]["duration_s"])
+        self.assertEqual(parsed["workload"]["ops"], 100)
+        text = render_markdown([_result()], _workload(), "kvbench")
+        self.assertIn("Total ops: 100", text)
+        self.assertNotIn("In duration mode", text)
 
 
 if __name__ == "__main__":

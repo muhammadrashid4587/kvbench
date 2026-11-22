@@ -6,11 +6,15 @@ import sys
 from datetime import datetime, timezone
 
 from . import __version__
+from .bench import format_duration
 
 
 def _workload_dict(workload):
     return {
-        "ops": workload.ops,
+        # In duration mode there is no fixed op target: ops is null
+        # and the run length is under duration_s.
+        "ops": None if workload.duration_s is not None else workload.ops,
+        "duration_s": workload.duration_s,
         "clients": workload.clients,
         "keys": workload.keys,
         "value_size": workload.value_size,
@@ -148,6 +152,13 @@ def _time_series_lines(result):
 
 def render_markdown(results, workload, command_line):
     """Render one or more BenchmarkResults as a Markdown report."""
+    if workload.duration_s is not None:
+        scope_line = (
+            f"- Duration: {format_duration(workload.duration_s)} "
+            "(fixed wall-clock run; total ops vary)"
+        )
+    else:
+        scope_line = f"- Total ops: {workload.ops}"
     lines = [
         "# kvbench report",
         "",
@@ -158,7 +169,7 @@ def render_markdown(results, workload, command_line):
         "",
         "## Workload",
         "",
-        f"- Total ops: {workload.ops}",
+        scope_line,
         f"- Clients (threads): {workload.clients}",
         f"- Keyspace: {workload.keys} keys",
         f"- Value size: {workload.value_size} bytes",
@@ -207,6 +218,12 @@ def render_markdown(results, workload, command_line):
         "percentiles by operation (SET, GET, INCR), so a read-heavy "
         "mix shows whether reads or writes dominate the tail.",
     ]
+    if workload.duration_s is not None:
+        lines.append(
+            "- In duration mode the run stops after the requested "
+            "wall-clock time, so the total op count varies from run to "
+            "run; ops/sec is total ops divided by the actual elapsed time."
+        )
     if workload.pipeline > 1:
         lines.append(
             "- With a pipeline depth above 1, latencies are the batch "

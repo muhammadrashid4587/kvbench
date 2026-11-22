@@ -1,8 +1,10 @@
 """Tests for the kvbench workload runner and dict baseline."""
 
+import time
 import unittest
 
-from kvbench.bench import DictClient, DictStore, Workload, run_workload
+from kvbench.bench import DictClient, DictStore, Workload, \
+    format_duration, run_workload
 
 
 class TestDictBaseline(unittest.TestCase):
@@ -135,6 +137,51 @@ class TestDictBaseline(unittest.TestCase):
                      set_weight=0, get_weight=0, incr_weight=0)
         with self.assertRaises(ValueError):
             Workload(ops=10, clients=1, keys=10, pipeline=0)
+
+
+class TestDurationMode(unittest.TestCase):
+    def test_duration_run_stops_near_requested_time(self):
+        # A 0.5s run against the fast dict baseline should stop
+        # close to the deadline with a real op count and throughput.
+        workload = Workload(clients=2, keys=20, value_size=8,
+                            duration_s=0.5)
+        self.assertEqual(workload.ops, 0)  # no fixed op target
+        result = run_workload(DictClient, workload, "baseline (dict)")
+        self.assertGreater(result.ops, 0)
+        self.assertEqual(result.errors, 0)
+        self.assertEqual(result.summary["count"], result.ops)
+        self.assertGreater(result.ops_per_sec, 0)
+        # Elapsed is measured from thread start to join, so it lands
+        # just past the 0.5s deadline (in-flight batch at most).
+        self.assertGreaterEqual(result.elapsed_s, 0.4)
+        self.assertLess(result.elapsed_s, 2.0)
+
+    def test_duration_run_with_pipeline(self):
+        workload = Workload(clients=2, keys=20, value_size=8,
+                            duration_s=0.5, pipeline=10)
+        result = run_workload(DictClient, workload, "baseline (dict)")
+        self.assertGreater(result.ops, 0)
+        self.assertEqual(result.errors, 0)
+        self.assertGreaterEqual(result.elapsed_s, 0.4)
+        self.assertLess(result.elapsed_s, 2.0)
+
+    def test_duration_validation(self):
+        with self.assertRaises(ValueError):
+            Workload(duration_s=0)
+        with self.assertRaises(ValueError):
+            Workload(duration_s=-5)
+        # Clients and keys still need to be positive in duration mode.
+        with self.assertRaises(ValueError):
+            Workload(clients=0, duration_s=1)
+        with self.assertRaises(ValueError):
+            Workload(keys=0, duration_s=1)
+
+    def test_format_duration(self):
+        self.assertEqual(format_duration(10), "10s")
+        self.assertEqual(format_duration(10.0), "10s")
+        self.assertEqual(format_duration(1.5), "1.5s")
+        self.assertEqual(format_duration(120), "2m")
+        self.assertEqual(format_duration(90), "90s")
 
 
 if __name__ == "__main__":

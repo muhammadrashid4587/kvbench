@@ -5,14 +5,15 @@ server, so ``main()`` runs the same workload against two targets and
 both rows land in the report.
 """
 
+import json
 import os
 import socketserver
 import tempfile
 import threading
 import unittest
 
-from kvbench.cli import MIX_PRESETS, _parse_host_port, _parse_mix, \
-    build_parser, main
+from kvbench.cli import MIX_PRESETS, _parse_duration, _parse_host_port, \
+    _parse_mix, build_parser, main
 
 
 class _FakeRespHandler(socketserver.StreamRequestHandler):
@@ -95,6 +96,27 @@ class TestParseMix(unittest.TestCase):
                 _parse_mix(bad)
 
 
+class TestParseDuration(unittest.TestCase):
+    def test_bare_seconds(self):
+        self.assertEqual(_parse_duration("10"), 10.0)
+        self.assertEqual(_parse_duration("0.5"), 0.5)
+
+    def test_seconds_suffix(self):
+        self.assertEqual(_parse_duration("10s"), 10.0)
+        self.assertEqual(_parse_duration("1.5s"), 1.5)
+
+    def test_minutes_suffix(self):
+        self.assertEqual(_parse_duration("2m"), 120.0)
+        self.assertEqual(_parse_duration("0.5m"), 30.0)
+        self.assertEqual(_parse_duration("1.5m"), 90.0)
+
+    def test_invalid(self):
+        for bad in ("", "0", "0s", "0m", "-5s", "-1m", "10x", "s", "m",
+                    "abc", "10ss", "1h"):
+            with self.assertRaises(ValueError, msg=bad):
+                _parse_duration(bad)
+
+
 class TestParseHostPort(unittest.TestCase):
     def test_valid(self):
         self.assertEqual(_parse_host_port("127.0.0.1:6380"),
@@ -175,6 +197,53 @@ class TestCompareRun(unittest.TestCase):
         finally:
             server_a.shutdown()
             server_a.server_close()
+
+
+class TestDurationRun(unittest.TestCase):
+    def test_duration_run_reports_duration_and_throughput(self):
+        server = _start_server()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                output = os.path.join(tmp, "report.md")
+                code = main([
+                    "--host", "127.0.0.1",
+                    "--port", str(server.server_address[1]),
+                    "--duration", "0.5s", "--clients", "2",
+                    "--output", output,
+                ])
+                self.assertEqual(code, 0)
+                with open(output, encoding="utf-8") as f:
+                    text = f.read()
+                self.assertIn("Duration: 0.5s", text)
+                self.assertNotIn("Total ops:", text)
+                # The results table still carries the completed ops
+                # and the throughput over the elapsed time.
+                self.assertIn("| Backend | Ops | Ops/sec |", text)
+                with open(os.path.join(tmp, "report.json"),
+                          encoding="utf-8") as f:
+                    parsed = json.load(f)
+                self.assertEqual(parsed["workload"]["duration_s"], 0.5)
+                self.assertIsNone(parsed["workload"]["ops"])
+                row = parsed["results"][0]
+                self.assertGreater(row["ops"], 0)
+                self.assertGreater(row["ops_per_sec"], 0)
+                self.assertGreaterEqual(row["elapsed_s"], 0.4)
+                self.assertLess(row["elapsed_s"], 3.0)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_ops_and_duration_conflict(self):
+        code = main(["--ops", "100", "--duration", "1s"])
+        self.assertEqual(code, 2)
+
+    def test_bad_duration_rejected(self):
+        for bad in ("bogus", "0s", "1h"):
+            code = main(["--duration", bad])
+            self.assertEqual(code, 2, msg=bad)
+        # A leading dash would be read as an option flag, so pass it
+        # with "="; the parser must still reject the value itself.
+        self.assertEqual(main(["--duration=-5s"]), 2)
 
 
 if __name__ == "__main__":

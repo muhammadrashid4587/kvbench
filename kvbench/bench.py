@@ -19,6 +19,20 @@ from dataclasses import dataclass, field
 from .stats import histogram, summarize, time_series
 
 
+def format_duration(seconds):
+    """Format a duration in seconds as ``10s`` or ``2m``.
+
+    Whole minutes render as minutes (``120`` -> ``2m``), whole
+    seconds as seconds (``10`` -> ``10s``); anything else keeps its
+    fractional seconds (``1.5`` -> ``1.5s``).
+    """
+    if seconds >= 60 and seconds % 60 == 0:
+        return f"{int(seconds // 60)}m"
+    if seconds == int(seconds):
+        return f"{int(seconds)}s"
+    return f"{seconds:g}s"
+
+
 @dataclass
 class Workload:
     ops: int = 10_000
@@ -29,6 +43,11 @@ class Workload:
     get_weight: int = 40
     incr_weight: int = 10
     seed: int = 1234
+    # Fixed wall-clock run length in seconds, or None for a fixed op
+    # count. In duration mode ``ops`` is ignored (normalized to 0):
+    # workers run until the deadline and the total op count is
+    # whatever completed in that time.
+    duration_s: float = None
     # Human-readable name of the mix, when it came from a named
     # preset (``read-heavy`` etc.). Empty for an explicit weight
     # string; the report shows the preset name next to the weights.
@@ -42,8 +61,16 @@ class Workload:
     pipeline: int = 1
 
     def __post_init__(self):
-        if self.ops <= 0 or self.clients <= 0 or self.keys <= 0:
-            raise ValueError("ops, clients and keys must be positive")
+        if self.clients <= 0 or self.keys <= 0:
+            raise ValueError("clients and keys must be positive")
+        if self.duration_s is not None:
+            if self.duration_s <= 0:
+                raise ValueError("duration must be positive")
+            # Duration mode: the op count is whatever completes in
+            # the time budget, so there is no fixed target.
+            self.ops = 0
+        elif self.ops <= 0:
+            raise ValueError("ops must be positive")
         if self.pipeline < 1:
             raise ValueError("pipeline depth must be at least 1")
         total = self.set_weight + self.get_weight + self.incr_weight
@@ -183,6 +210,10 @@ def run_workload(client_factory, workload, name):
     ``client_factory`` is called once per thread and must return an
     object with ``command(*args)`` and ``close()``. Returns a
     :class:`BenchmarkResult`.
+
+    With ``workload.duration_s`` set, workers run until the shared
+    wall-clock deadline instead of a fixed op count, and the result's
+    ``ops`` is however many completed in that time.
     """
     per_thread = workload.ops // workload.clients
     remainder = workload.ops % workload.clients
@@ -213,9 +244,15 @@ def run_workload(client_factory, workload, name):
         local_errors = 0
         local_sample = ""
         try:
+            # ``remaining`` is None in duration mode: workers run
+            # until the shared deadline instead of a fixed op count.
             remaining = op_count
-            while remaining > 0:
-                batch_size = min(workload.pipeline, remaining)
+            while remaining is None or remaining > 0:
+                if deadline is not None and \
+                        time.perf_counter() >= deadline:
+                    break
+                batch_size = (workload.pipeline if remaining is None
+                              else min(workload.pipeline, remaining))
                 batch = []
                 for _ in range(batch_size):
                     op = _pick_op(rng, workload)
@@ -252,7 +289,8 @@ def run_workload(client_factory, workload, name):
                     local_errors += batch_size
                     if not local_sample:
                         local_sample = f"{type(exc).__name__}: {exc}"
-                    remaining -= batch_size
+                    if remaining is not None:
+                        remaining -= batch_size
                     continue
                 batch_ns = time.perf_counter_ns() - start
                 # Amortized per-op latency: the batch round trip divided
@@ -274,7 +312,8 @@ def run_workload(client_factory, workload, name):
                     local_lat.append(per_op_ns)
                     local_times.append(end_s)
                     local_by_op.setdefault(cmd[0], []).append(per_op_ns)
-                remaining -= batch_size
+                if remaining is not None:
+                    remaining -= batch_size
         finally:
             client.close()
         with lock:
@@ -288,8 +327,14 @@ def run_workload(client_factory, workload, name):
 
     threads = []
     start = time.perf_counter()
+    # In duration mode every worker runs until this deadline; the
+    # total op count is whatever completes in that time.
+    deadline = (start + workload.duration_s
+                if workload.duration_s is not None else None)
     for i in range(workload.clients):
-        count = per_thread + (1 if i < remainder else 0)
+        # None means "run until the deadline" for that worker.
+        count = None if deadline is not None else \
+            per_thread + (1 if i < remainder else 0)
         t = threading.Thread(target=worker, args=(i, count))
         t.start()
         threads.append(t)

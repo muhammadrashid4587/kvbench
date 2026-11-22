@@ -12,6 +12,11 @@ C. Pure Python 3 standard library, no dependencies.
   SET/GET/INCR mix across N threads, measuring per-op latency.
   With `--pipeline N` it sends N commands per round trip instead of
   one, so throughput under pipelining is measured the same way.
+  With `--duration 10s` (or `2m`) it runs for a fixed wall-clock
+  time instead of a fixed op count, and reports the total ops
+  completed and ops/sec over the actual elapsed time — useful for
+  soaking a server at steady load rather than racing a fixed
+  number of ops.
   The mix is set with `--mix`: explicit weights (`50:40:10`), a
   read:write ratio (`80:20`), or a named preset (`read-heavy`,
   `balanced`, `write-heavy`). The report splits ops/sec and latency
@@ -67,6 +72,9 @@ python -m kvbench.cli --ops 20000 --clients 4 --mix 80:20
 # pipelined mode: 10 commands per round trip
 python -m kvbench.cli --ops 20000 --clients 4 --pipeline 10
 
+# duration mode: run for 10 seconds instead of a fixed op count
+python -m kvbench.cli --duration 10s --clients 4
+
 # compare two servers with the same workload, one report
 python -m kvbench.cli --host 127.0.0.1 --port 6379 \
     --compare 127.0.0.1:6380 --ops 20000 --clients 4
@@ -79,7 +87,9 @@ its workload settings, and the JSON report carries it under
 `workload.pipeline`.
 
 Options: `--host` (default 127.0.0.1), `--port` (default 6379),
-`--ops` (default 10000), `--clients` (default 4), `--keys` (default
+`--ops` (default 10000), `--duration` (e.g. `10s` or `2m`; a fixed
+wall-clock run instead of a fixed op count — mutually exclusive
+with `--ops`), `--clients` (default 4), `--keys` (default
 1000), `--value-size` (default 32), `--mix` (default 50:40:10 — a
 `SET:GET:INCR` weight triple, a `READ:WRITE` ratio such as `80:20`,
 or a preset: `read-heavy` 15:80:5, `balanced` 45:45:10,
@@ -101,6 +111,12 @@ form. Use `--json path.json` to put it somewhere else.
 | Backend | Ops | Ops/sec | Mean (ms) | p50 (ms) | p95 (ms) | p99 (ms) | Errors |
 
 The baseline row is labelled `baseline (dict)`.
+
+In duration mode the workload section shows the run length
+(`Duration: 10s`) instead of a total op count, and the results table
+still shows the ops completed and ops/sec over the actual elapsed
+time. The JSON report carries the duration under
+`workload.duration_s` (with `workload.ops` null).
 
 Below the table, each backend gets a latency histogram section: the
 share of ops in each log-spaced bucket (`<= 0.1 ms`, `<= 0.25 ms`,
@@ -140,6 +156,9 @@ make test
 
 ## Roadmap
 
+- ~~Duration mode (`--duration 10s` / `2m`): run for a fixed
+  wall-clock time instead of a fixed op count, with the duration
+  and computed throughput in both reports.~~ Done in 0.4.0.
 - ~~Configurable read/write mix (`--mix read-heavy` / `80:20`) with
   per-operation stats in both reports.~~ Done in 0.3.0.
 - ~~Compare mode: run the same workload against a second server and

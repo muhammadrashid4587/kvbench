@@ -9,6 +9,9 @@ Usage:
     # same workload against a second server, side by side in one report
     python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
         --compare 127.0.0.1:6380 --ops 20000 --output report.md
+    # fixed wall-clock run instead of a fixed op count
+    python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
+        --duration 10s --clients 4 --output report.md
 """
 
 import argparse
@@ -16,7 +19,7 @@ import os
 import sys
 
 from . import __version__
-from .bench import DictClient, Workload, run_workload
+from .bench import DictClient, Workload, format_duration, run_workload
 from .report import write_json, write_report
 from .resp import RespClient
 
@@ -78,6 +81,33 @@ def _parse_mix(text):
     return values[0], values[1], values[2], ""
 
 
+def _parse_duration(text):
+    """Parse a ``--duration`` value into seconds (float).
+
+    Accepts a bare number of seconds (``10``), seconds with an
+    ``s`` suffix (``10s``), or minutes with an ``m`` suffix
+    (``2m``); fractional values such as ``1.5s`` or ``0.5m`` are
+    allowed. The value must be positive.
+    """
+    if not text:
+        raise ValueError(
+            "duration must be a positive length of time, e.g. 10s or 2m")
+    suffix = text[-1].lower()
+    if suffix in ("s", "m"):
+        number, multiplier = text[:-1], 60.0 if suffix == "m" else 1.0
+    else:
+        number, multiplier = text, 1.0
+    try:
+        value = float(number) * multiplier
+    except ValueError as exc:
+        raise ValueError(
+            "duration must be a positive length of time, e.g. 10s or 2m"
+        ) from exc
+    if value <= 0:
+        raise ValueError("duration must be positive")
+    return value
+
+
 def _parse_host_port(text):
     """Parse a HOST:PORT target, e.g. ``127.0.0.1:6380``."""
     if ":" not in text:
@@ -104,7 +134,12 @@ def build_parser():
     parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=6379)
-    parser.add_argument("--ops", type=int, default=10_000)
+    parser.add_argument("--ops", type=int, default=None,
+                        help="total ops to run (default 10000; "
+                        "mutually exclusive with --duration)")
+    parser.add_argument("--duration", default=None, metavar="DURATION",
+                        help="run for a fixed wall-clock time instead of "
+                        "a fixed op count, e.g. 10s or 2m")
     parser.add_argument("--clients", type=int, default=4)
     parser.add_argument("--keys", type=int, default=1_000)
     parser.add_argument("--value-size", type=int, default=32)
@@ -136,12 +171,19 @@ def main(argv=None):
     try:
         set_w, get_w, incr_w, mix_label = _parse_mix(args.mix)
         compare_targets = [_parse_host_port(t) for t in args.compare]
+        duration_s = (_parse_duration(args.duration)
+                      if args.duration else None)
+        if duration_s is not None and args.ops is not None:
+            raise ValueError(
+                "--ops and --duration are mutually exclusive: "
+                "pick a fixed op count or a fixed run time, not both")
     except ValueError as exc:
         print(f"kvbench: {exc}", file=sys.stderr)
         return 2
     try:
         workload = Workload(
-            ops=args.ops,
+            ops=(args.ops if args.ops is not None else
+                 (0 if duration_s is not None else 10_000)),
             clients=args.clients,
             keys=args.keys,
             value_size=args.value_size,
@@ -151,6 +193,7 @@ def main(argv=None):
             seed=args.seed,
             pipeline=args.pipeline,
             mix_label=mix_label,
+            duration_s=duration_s,
         )
     except ValueError as exc:
         print(f"kvbench: {exc}", file=sys.stderr)
@@ -161,7 +204,9 @@ def main(argv=None):
     def server_factory():
         return RespClient(args.host, args.port)
 
-    print(f"kvbench {__version__}: {workload.ops} ops, "
+    scope = (f"{format_duration(duration_s)} duration"
+             if duration_s is not None else f"{workload.ops} ops")
+    print(f"kvbench {__version__}: {scope}, "
           f"{workload.clients} clients, pipeline depth "
           f"{workload.pipeline} against {args.host}:{args.port}")
     try:
