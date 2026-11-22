@@ -34,17 +34,48 @@ def json_path_for(output_path, json_arg):
     return stem + ".json" if ext else output_path + ".json"
 
 
+# Named read/write mix presets, as SET:GET:INCR weights. Reads are
+# GETs, writes are SETs plus a small INCR share so counters still get
+# exercised; the default 50:40:10 sits between balanced and
+# write-heavy. ``--mix read-heavy`` is the same shape as
+# ``--mix 80:20`` (read:write), just with INCR kept in the mix.
+MIX_PRESETS = {
+    "read-heavy": (15, 80, 5),
+    "balanced": (45, 45, 10),
+    "write-heavy": (80, 15, 5),
+}
+
+
 def _parse_mix(text):
+    """Parse a ``--mix`` value into (set, get, incr, label).
+
+    Accepts three forms:
+
+    - ``SET:GET:INCR`` weights, e.g. ``50:40:10`` (label is "").
+    - ``READ:WRITE`` ratio, e.g. ``80:20`` — reads are GETs, writes
+      are SETs, INCR weight 0 (label is "").
+    - a preset name: ``read-heavy``, ``balanced``, ``write-heavy``
+      (label is the preset name, so the report can name the mix).
+    """
+    if text in MIX_PRESETS:
+        set_w, get_w, incr_w = MIX_PRESETS[text]
+        return set_w, get_w, incr_w, text
     parts = text.split(":")
-    if len(parts) != 3:
-        raise ValueError("mix must be SET:GET:INCR, e.g. 50:40:10")
+    if len(parts) not in (2, 3):
+        raise ValueError(
+            "mix must be SET:GET:INCR, READ:WRITE, or a preset "
+            "(read-heavy, balanced, write-heavy)")
     try:
         values = [int(p) for p in parts]
     except ValueError as exc:
         raise ValueError("mix weights must be integers") from exc
     if any(v < 0 for v in values) or sum(values) <= 0:
         raise ValueError("mix weights must be non-negative and sum > 0")
-    return values
+    if len(values) == 2:
+        # READ:WRITE — reads are GETs, writes are SETs, no INCRs.
+        read_w, write_w = values
+        return write_w, read_w, 0, ""
+    return values[0], values[1], values[2], ""
 
 
 def _parse_host_port(text):
@@ -78,7 +109,9 @@ def build_parser():
     parser.add_argument("--keys", type=int, default=1_000)
     parser.add_argument("--value-size", type=int, default=32)
     parser.add_argument("--mix", default="50:40:10",
-                        help="SET:GET:INCR weights, e.g. 50:40:10")
+                        help="SET:GET:INCR weights (e.g. 50:40:10), a "
+                        "READ:WRITE ratio (e.g. 80:20), or a preset: "
+                        "read-heavy, balanced, write-heavy")
     parser.add_argument("--pipeline", type=int, default=1,
                         help="commands sent per round trip "
                         "(1 = sequential, default 1)")
@@ -101,7 +134,7 @@ def build_parser():
 def main(argv=None):
     args = build_parser().parse_args(argv)
     try:
-        set_w, get_w, incr_w = _parse_mix(args.mix)
+        set_w, get_w, incr_w, mix_label = _parse_mix(args.mix)
         compare_targets = [_parse_host_port(t) for t in args.compare]
     except ValueError as exc:
         print(f"kvbench: {exc}", file=sys.stderr)
@@ -117,6 +150,7 @@ def main(argv=None):
             incr_weight=incr_w,
             seed=args.seed,
             pipeline=args.pipeline,
+            mix_label=mix_label,
         )
     except ValueError as exc:
         print(f"kvbench: {exc}", file=sys.stderr)

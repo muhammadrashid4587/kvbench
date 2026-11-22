@@ -23,7 +23,18 @@ def _result():
     )
 
 
-class TestReport(unittest.TestCase):
+def _result_with_per_op():
+    return BenchmarkResult(
+        name="cinder (127.0.0.1:6379)",
+        ops=100,
+        elapsed_s=0.01,
+        errors=0,
+        latencies_ns=[100_000] * 60 + [200_000] * 40,
+        latencies_by_op={
+            "SET": [100_000] * 60,
+            "GET": [200_000] * 40,
+        },
+    )
     def test_report_contains_results(self):
         workload = Workload(ops=100, clients=2, keys=10, value_size=8,
                             set_weight=50, get_weight=40, incr_weight=10)
@@ -86,7 +97,7 @@ class TestReport(unittest.TestCase):
         doc.pop("generated")
         self.assertEqual(parsed, doc)
         self.assertEqual(parsed["tool"], "kvbench")
-        self.assertEqual(parsed["version"], "0.2.4")
+        self.assertEqual(parsed["version"], "0.3.0")
         self.assertEqual(parsed["command"], "kvbench --ops 100 --clients 2")
         self.assertEqual(parsed["workload"]["ops"], 100)
         self.assertEqual(parsed["workload"]["clients"], 2)
@@ -157,6 +168,52 @@ class TestReport(unittest.TestCase):
         self.assertEqual(parsed["results"][0]["time_series"], [])
         text = render_markdown([_result()], _workload(), "kvbench")
         self.assertNotIn("## Latency over time", text)
+
+    def test_per_op_in_json(self):
+        parsed = json.loads(render_json([_result_with_per_op()],
+                                        _workload(), "kvbench"))
+        per_op = parsed["results"][0]["per_op"]
+        self.assertEqual(per_op["SET"]["count"], 60)
+        self.assertAlmostEqual(per_op["SET"]["mean_ms"], 0.1)
+        self.assertAlmostEqual(per_op["SET"]["ops_per_sec"], 6_000)
+        self.assertEqual(per_op["GET"]["count"], 40)
+        self.assertAlmostEqual(per_op["GET"]["mean_ms"], 0.2)
+        self.assertAlmostEqual(per_op["GET"]["ops_per_sec"], 4_000)
+        self.assertNotIn("INCR", per_op)  # never ran: left out
+
+    def test_per_op_in_markdown(self):
+        text = render_markdown([_result_with_per_op()], _workload(),
+                               "kvbench")
+        self.assertIn("## Per-operation stats", text)
+        self.assertIn(
+            "Per-operation stats — cinder (127.0.0.1:6379)", text)
+        self.assertIn("| Op | Ops | Ops/sec | Mean (ms) | p50 (ms) | "
+                      "p95 (ms) | p99 (ms) |", text)
+        self.assertIn("| SET | 60 | 6,000 | 0.100 |", text)
+        self.assertIn("| GET | 40 | 4,000 | 0.200 |", text)
+        self.assertNotIn("| INCR |", text)
+
+    def test_per_op_absent_without_split(self):
+        # Results built without per-op latencies (e.g. older callers)
+        # render no per-op section and an empty split in JSON.
+        parsed = json.loads(render_json([_result()], _workload(),
+                                        "kvbench"))
+        self.assertEqual(parsed["results"][0]["per_op"], {})
+        text = render_markdown([_result()], _workload(), "kvbench")
+        self.assertNotIn("## Per-operation stats", text)
+
+    def test_mix_label_in_reports(self):
+        workload = Workload(ops=100, clients=2, keys=10, value_size=8,
+                            set_weight=15, get_weight=80, incr_weight=5,
+                            mix_label="read-heavy")
+        text = render_markdown([_result()], workload, "kvbench")
+        self.assertIn("Mix: SET 15 / GET 80 / INCR 5 (read-heavy)", text)
+        parsed = json.loads(render_json([_result()], workload, "kvbench"))
+        self.assertEqual(parsed["workload"]["mix_label"], "read-heavy")
+        # No label for an explicit weight string.
+        parsed_plain = json.loads(render_json([_result()], _workload(),
+                                              "kvbench"))
+        self.assertIsNone(parsed_plain["workload"]["mix_label"])
 
     def test_json_path_for(self):
         self.assertEqual(json_path_for("report.md", None), "report.json")

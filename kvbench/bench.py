@@ -29,6 +29,10 @@ class Workload:
     get_weight: int = 40
     incr_weight: int = 10
     seed: int = 1234
+    # Human-readable name of the mix, when it came from a named
+    # preset (``read-heavy`` etc.). Empty for an explicit weight
+    # string; the report shows the preset name next to the weights.
+    mix_label: str = ""
     # Commands sent per round trip. 1 is the old sequential behaviour:
     # one command, wait for its reply, then the next. Above 1 the
     # runner sends ``pipeline`` commands at once and reads all their
@@ -60,6 +64,11 @@ class BenchmarkResult:
     # run started. Parallel to latencies_ns: one entry per successful
     # op, in the same order.
     times_s: list = field(default_factory=list)
+    # Per-op latencies (ns), keyed by op name ("SET", "GET", "INCR").
+    # Each list holds the same amortized per-op latencies as
+    # latencies_ns, split by operation, so the report can show
+    # per-type ops/sec and latency percentiles.
+    latencies_by_op: dict = field(default_factory=dict)
 
     @property
     def ops_per_sec(self):
@@ -68,6 +77,26 @@ class BenchmarkResult:
     @property
     def summary(self):
         return summarize(self.latencies_ns)
+
+    @property
+    def per_op_summary(self):
+        """Per-op latency summaries, in stable SET/GET/INCR order.
+
+        Each entry is the :func:`summarize` dict for that op plus its
+        own ``ops_per_sec`` (count / elapsed). Ops with no samples are
+        left out, so a read-only mix reports GET alone.
+        """
+        out = {}
+        for op in ("SET", "GET", "INCR"):
+            samples = self.latencies_by_op.get(op)
+            if not samples:
+                continue
+            entry = summarize(samples)
+            entry["ops_per_sec"] = (
+                len(samples) / self.elapsed_s if self.elapsed_s > 0 else 0.0
+            )
+            out[op] = entry
+        return out
 
     @property
     def histogram(self):
@@ -159,6 +188,7 @@ def run_workload(client_factory, workload, name):
     remainder = workload.ops % workload.clients
     latencies = []
     times = []
+    latencies_by_op = {}
     errors = 0
     error_sample = ""
     thread_errors = []
@@ -179,6 +209,7 @@ def run_workload(client_factory, workload, name):
             return
         local_lat = []
         local_times = []
+        local_by_op = {}
         local_errors = 0
         local_sample = ""
         try:
@@ -231,7 +262,9 @@ def run_workload(client_factory, workload, name):
                 # run started; every op in the batch shares it, so the
                 # per-second series buckets by batch completion.
                 end_s = time.perf_counter() - start
-                for reply in replies:
+                # Replies come back in batch order, so each reply pairs
+                # with its command's op for the per-op split.
+                for cmd, reply in zip(batch, replies):
                     if isinstance(reply, Exception):
                         local_errors += 1
                         if not local_sample:
@@ -240,12 +273,15 @@ def run_workload(client_factory, workload, name):
                         continue
                     local_lat.append(per_op_ns)
                     local_times.append(end_s)
+                    local_by_op.setdefault(cmd[0], []).append(per_op_ns)
                 remaining -= batch_size
         finally:
             client.close()
         with lock:
             latencies.extend(local_lat)
             times.extend(local_times)
+            for op, samples in local_by_op.items():
+                latencies_by_op.setdefault(op, []).extend(samples)
             errors += local_errors
             if local_sample and not error_sample:
                 error_sample = local_sample
@@ -271,4 +307,5 @@ def run_workload(client_factory, workload, name):
         error_sample=error_sample,
         latencies_ns=latencies,
         times_s=times,
+        latencies_by_op=latencies_by_op,
     )

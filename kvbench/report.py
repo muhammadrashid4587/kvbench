@@ -19,6 +19,7 @@ def _workload_dict(workload):
             "get": workload.get_weight,
             "incr": workload.incr_weight,
         },
+        "mix_label": workload.mix_label or None,
         "seed": workload.seed,
         "pipeline": workload.pipeline,
     }
@@ -33,6 +34,7 @@ def _result_dict(result):
         "errors": result.errors,
         "error_sample": result.error_sample,
         "summary": result.summary,
+        "per_op": result.per_op_summary,
         "histogram": result.histogram,
         "time_series": result.time_series,
     }
@@ -102,6 +104,28 @@ def _histogram_lines(result):
     return lines
 
 
+def _per_op_lines(result):
+    """Per-operation stats table for one result, or [] when empty."""
+    per_op = result.per_op_summary
+    if not per_op:
+        return []
+    lines = [
+        f"### Per-operation stats — {result.name}",
+        "",
+        "| Op | Ops | Ops/sec | Mean (ms) | p50 (ms) | p95 (ms) | "
+        "p99 (ms) |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for op, s in per_op.items():
+        lines.append(
+            f"| {op} | {s['count']} | {s['ops_per_sec']:,.0f} | "
+            f"{s['mean_ms']:.3f} | {s['p50_ms']:.3f} | "
+            f"{s['p95_ms']:.3f} | {s['p99_ms']:.3f} |"
+        )
+    lines.append("")
+    return lines
+
+
 def _time_series_lines(result):
     """Per-second ops/latency table for one result, or [] when empty."""
     series = result.time_series
@@ -139,7 +163,8 @@ def render_markdown(results, workload, command_line):
         f"- Keyspace: {workload.keys} keys",
         f"- Value size: {workload.value_size} bytes",
         f"- Mix: SET {workload.set_weight} / GET {workload.get_weight} / "
-        f"INCR {workload.incr_weight}",
+        f"INCR {workload.incr_weight}"
+        + (f" ({workload.mix_label})" if workload.mix_label else ""),
         f"- Pipeline depth: {workload.pipeline} command(s) per round trip",
         "",
         "## Results",
@@ -150,6 +175,11 @@ def render_markdown(results, workload, command_line):
     ]
     for result in results:
         lines.append(_row(result))
+    per_op_lines = []
+    for result in results:
+        per_op_lines += _per_op_lines(result)
+    if per_op_lines:
+        lines += ["", "## Per-operation stats", ""] + per_op_lines
     hist_lines = []
     for result in results:
         hist_lines += _histogram_lines(result)
@@ -173,6 +203,9 @@ def render_markdown(results, workload, command_line):
         "so they include network round-trip time for server backends.",
         "- The Latency over time section buckets ops by the second they "
         "completed; a second with 0 ops marks a stall.",
+        "- The Per-operation stats section splits ops/sec and latency "
+        "percentiles by operation (SET, GET, INCR), so a read-heavy "
+        "mix shows whether reads or writes dominate the tail.",
     ]
     if workload.pipeline > 1:
         lines.append(

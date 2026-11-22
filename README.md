@@ -12,6 +12,11 @@ C. Pure Python 3 standard library, no dependencies.
   SET/GET/INCR mix across N threads, measuring per-op latency.
   With `--pipeline N` it sends N commands per round trip instead of
   one, so throughput under pipelining is measured the same way.
+  The mix is set with `--mix`: explicit weights (`50:40:10`), a
+  read:write ratio (`80:20`), or a named preset (`read-heavy`,
+  `balanced`, `write-heavy`). The report splits ops/sec and latency
+  percentiles per operation (SET vs GET vs INCR), so a read-heavy
+  mix shows whether reads or writes dominate the tail.
 - Latency stats (`kvbench/stats.py`): ops/sec, mean, p50, p95, p99,
   plus a log-spaced latency histogram and a per-second time series
   (ops, mean and max latency per second) to spot stalls.
@@ -55,6 +60,10 @@ python -m kvbench.cli --host 127.0.0.1 --port 6379 --ops 20000 --clients 4 \
 # different mix and value size
 python -m kvbench.cli --ops 50000 --clients 8 --mix 80:15:5 --value-size 128
 
+# read-heavy preset, or an explicit 80:20 read:write ratio
+python -m kvbench.cli --ops 20000 --clients 4 --mix read-heavy
+python -m kvbench.cli --ops 20000 --clients 4 --mix 80:20
+
 # pipelined mode: 10 commands per round trip
 python -m kvbench.cli --ops 20000 --clients 4 --pipeline 10
 
@@ -71,11 +80,13 @@ its workload settings, and the JSON report carries it under
 
 Options: `--host` (default 127.0.0.1), `--port` (default 6379),
 `--ops` (default 10000), `--clients` (default 4), `--keys` (default
-1000), `--value-size` (default 32), `--mix SET:GET:INCR` (default
-50:40:10), `--pipeline` (default 1, sequential), `--seed` (default
-1234), `--baseline`, `--compare HOST:PORT` (repeatable: also run
-the same workload against another server and add it to the report),
-`--output` (default report.md), `--json`
+1000), `--value-size` (default 32), `--mix` (default 50:40:10 — a
+`SET:GET:INCR` weight triple, a `READ:WRITE` ratio such as `80:20`,
+or a preset: `read-heavy` 15:80:5, `balanced` 45:45:10,
+`write-heavy` 80:15:5), `--pipeline` (default 1, sequential),
+`--seed` (default 1234), `--baseline`, `--compare HOST:PORT`
+(repeatable: also run the same workload against another server and
+add it to the report), `--output` (default report.md), `--json`
 (default: same name as `--output` with a `.json` extension).
 
 Every run writes a JSON report alongside the Markdown one, with the
@@ -97,6 +108,12 @@ share of ops in each log-spaced bucket (`<= 0.1 ms`, `<= 0.25 ms`,
 `100 ms`, `250 ms`, `500 ms`, `1000 ms`, and an overflow bucket for
 anything slower), drawn as text bars. The JSON report carries the
 same buckets per result under `histogram`.
+
+Below the table, each backend gets a per-operation stats table:
+ops, ops/sec, mean, p50, p95 and p99 latency split by SET, GET and
+INCR. Ops that never ran (e.g. INCR in an `80:20` read:write mix)
+are left out. The JSON report carries the same split per result
+under `per_op`.
 
 Below the histograms, each backend gets a latency-over-time table:
 one row per second of the run with the ops completed in that second
@@ -123,6 +140,8 @@ make test
 
 ## Roadmap
 
+- ~~Configurable read/write mix (`--mix read-heavy` / `80:20`) with
+  per-operation stats in both reports.~~ Done in 0.3.0.
 - ~~Compare mode: run the same workload against a second server and
   put both in one report.~~ Done in 0.2.4.
 - ~~Latency over time (per-second buckets) to spot stalls.~~ Done in

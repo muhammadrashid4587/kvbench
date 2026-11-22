@@ -11,7 +11,8 @@ import tempfile
 import threading
 import unittest
 
-from kvbench.cli import _parse_host_port, build_parser, main
+from kvbench.cli import MIX_PRESETS, _parse_host_port, _parse_mix, \
+    build_parser, main
 
 
 class _FakeRespHandler(socketserver.StreamRequestHandler):
@@ -66,6 +67,32 @@ def _start_server():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server
+
+
+class TestParseMix(unittest.TestCase):
+    def test_three_part_weights(self):
+        self.assertEqual(_parse_mix("50:40:10"), (50, 40, 10, ""))
+        self.assertEqual(_parse_mix("80:15:5"), (80, 15, 5, ""))
+
+    def test_two_part_read_write_ratio(self):
+        # READ:WRITE — reads are GETs, writes are SETs, no INCRs.
+        self.assertEqual(_parse_mix("80:20"), (20, 80, 0, ""))
+        self.assertEqual(_parse_mix("0:100"), (100, 0, 0, ""))
+
+    def test_presets(self):
+        for name, weights in MIX_PRESETS.items():
+            self.assertEqual(_parse_mix(name), (*weights, name))
+        self.assertEqual(_parse_mix("read-heavy"), (15, 80, 5,
+                                                    "read-heavy"))
+        self.assertEqual(_parse_mix("balanced"), (45, 45, 10, "balanced"))
+        self.assertEqual(_parse_mix("write-heavy"), (80, 15, 5,
+                                                     "write-heavy"))
+
+    def test_invalid(self):
+        for bad in ("", "80", "50:40:10:0", "a:b:c", "50:-1:10",
+                    "0:0:0", "readheavy", "READ-HEAVY"):
+            with self.assertRaises(ValueError, msg=bad):
+                _parse_mix(bad)
 
 
 class TestParseHostPort(unittest.TestCase):

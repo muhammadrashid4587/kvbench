@@ -33,6 +33,50 @@ class TestDictBaseline(unittest.TestCase):
         self.assertGreater(result.ops_per_sec, 0)
         self.assertEqual(result.summary["count"], 200)
 
+    def test_mix_ratio_honored_within_tolerance(self):
+        # A 20:80:0 mix over 5000 ops should land near 20% SET /
+        # 80% GET, with no INCRs at all. Tolerance is wide (±5pp)
+        # against the ~0.6pp sampling error at this size.
+        workload = Workload(ops=5000, clients=4, keys=50, value_size=8,
+                            set_weight=20, get_weight=80, incr_weight=0)
+        result = run_workload(DictClient, workload, "baseline (dict)")
+        per_op = result.per_op_summary
+        self.assertEqual(set(per_op), {"SET", "GET"})
+        set_share = per_op["SET"]["count"] / result.ops
+        get_share = per_op["GET"]["count"] / result.ops
+        self.assertAlmostEqual(set_share, 0.20, delta=0.05)
+        self.assertAlmostEqual(get_share, 0.80, delta=0.05)
+        self.assertEqual(
+            per_op["SET"]["count"] + per_op["GET"]["count"], result.ops)
+
+    def test_per_op_stats_split_latencies(self):
+        workload = Workload(ops=2000, clients=4, keys=20, value_size=8,
+                            set_weight=50, get_weight=40, incr_weight=10)
+        result = run_workload(DictClient, workload, "baseline (dict)")
+        per_op = result.per_op_summary
+        self.assertEqual(set(per_op), {"SET", "GET", "INCR"})
+        total = sum(s["count"] for s in per_op.values())
+        self.assertEqual(total, result.ops)
+        self.assertEqual(total, result.summary["count"])
+        for op, s in per_op.items():
+            self.assertGreater(s["count"], 0)
+            self.assertGreater(s["ops_per_sec"], 0)
+            self.assertGreaterEqual(s["mean_ms"], 0)
+            self.assertGreaterEqual(s["p50_ms"], 0)
+            self.assertGreaterEqual(s["p95_ms"], s["p50_ms"])
+            self.assertGreaterEqual(s["p99_ms"], s["p95_ms"])
+        # Per-op ops/sec adds back up to the overall rate.
+        combined = sum(s["ops_per_sec"] for s in per_op.values())
+        self.assertAlmostEqual(combined, result.ops_per_sec, delta=1.0)
+
+    def test_per_op_empty_for_unrun_ops(self):
+        # A SET-only mix reports SET alone; no empty op rows.
+        workload = Workload(ops=200, clients=2, keys=20, value_size=8,
+                            set_weight=100, get_weight=0, incr_weight=0)
+        result = run_workload(DictClient, workload, "baseline (dict)")
+        self.assertEqual(set(result.per_op_summary), {"SET"})
+        self.assertEqual(result.per_op_summary["SET"]["count"], 200)
+
     def test_pipelined_run_with_uneven_split(self):
         # 203 ops across 4 clients with depth 10 leaves partial batches
         # on every thread; every op must still be counted exactly once.
