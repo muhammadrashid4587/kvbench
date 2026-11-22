@@ -1,9 +1,26 @@
-"""Tests for kvbench.report Markdown output."""
+"""Tests for kvbench.report Markdown and JSON output."""
 
+import json
 import unittest
 
 from kvbench.bench import BenchmarkResult, Workload
-from kvbench.report import render_markdown
+from kvbench.cli import json_path_for
+from kvbench.report import render_json, render_markdown, to_json_dict
+
+
+def _workload():
+    return Workload(ops=100, clients=2, keys=10, value_size=8,
+                    set_weight=50, get_weight=40, incr_weight=10)
+
+
+def _result():
+    return BenchmarkResult(
+        name="cinder (127.0.0.1:6379)",
+        ops=100,
+        elapsed_s=0.01,
+        errors=0,
+        latencies_ns=[100_000] * 100,
+    )
 
 
 class TestReport(unittest.TestCase):
@@ -41,6 +58,58 @@ class TestReport(unittest.TestCase):
         self.assertIn("First error from cinder: ConnectionError: refused",
                       text)
         self.assertIn("| 2 |", text)
+
+    def test_json_round_trip(self):
+        doc = to_json_dict([_result()], _workload(),
+                           "kvbench --ops 100 --clients 2")
+        text = render_json([_result()], _workload(),
+                           "kvbench --ops 100 --clients 2")
+        parsed = json.loads(text)
+        # to_json_dict and render_json run at different moments, so the
+        # generated timestamp legitimately differs; compare the rest.
+        self.assertIn("generated", parsed)
+        parsed.pop("generated")
+        doc.pop("generated")
+        self.assertEqual(parsed, doc)
+        self.assertEqual(parsed["tool"], "kvbench")
+        self.assertEqual(parsed["version"], "0.2.0")
+        self.assertEqual(parsed["command"], "kvbench --ops 100 --clients 2")
+        self.assertEqual(parsed["workload"]["ops"], 100)
+        self.assertEqual(parsed["workload"]["clients"], 2)
+        self.assertEqual(parsed["workload"]["keys"], 10)
+        self.assertEqual(parsed["workload"]["value_size"], 8)
+        self.assertEqual(parsed["workload"]["mix"],
+                         {"set": 50, "get": 40, "incr": 10})
+        self.assertEqual(parsed["workload"]["seed"], 1234)
+        row = parsed["results"][0]
+        self.assertEqual(row["name"], "cinder (127.0.0.1:6379)")
+        self.assertEqual(row["ops"], 100)
+        self.assertAlmostEqual(row["ops_per_sec"], 10_000)
+        self.assertEqual(row["errors"], 0)
+        self.assertEqual(row["error_sample"], "")
+        self.assertEqual(row["summary"]["count"], 100)
+        self.assertAlmostEqual(row["summary"]["mean_ms"], 0.1)
+        self.assertAlmostEqual(row["summary"]["p50_ms"], 0.1)
+        self.assertAlmostEqual(row["summary"]["p95_ms"], 0.1)
+        self.assertAlmostEqual(row["summary"]["p99_ms"], 0.1)
+
+    def test_json_error_sample(self):
+        result = BenchmarkResult(
+            name="cinder", ops=10, elapsed_s=0.01, errors=2,
+            error_sample="ConnectionError: refused",
+            latencies_ns=[100_000] * 8,
+        )
+        parsed = json.loads(render_json([result], _workload(), "kvbench"))
+        self.assertEqual(parsed["results"][0]["errors"], 2)
+        self.assertEqual(parsed["results"][0]["error_sample"],
+                         "ConnectionError: refused")
+
+    def test_json_path_for(self):
+        self.assertEqual(json_path_for("report.md", None), "report.json")
+        self.assertEqual(json_path_for("out/run.md", None), "out/run.json")
+        self.assertEqual(json_path_for("report", None), "report.json")
+        self.assertEqual(json_path_for("report.md", "custom.json"),
+                         "custom.json")
 
 
 if __name__ == "__main__":

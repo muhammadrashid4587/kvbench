@@ -1,8 +1,69 @@
-"""Markdown report writer."""
+"""Markdown and JSON report writers."""
 
+import json
 import platform
 import sys
 from datetime import datetime, timezone
+
+from . import __version__
+
+
+def _workload_dict(workload):
+    return {
+        "ops": workload.ops,
+        "clients": workload.clients,
+        "keys": workload.keys,
+        "value_size": workload.value_size,
+        "mix": {
+            "set": workload.set_weight,
+            "get": workload.get_weight,
+            "incr": workload.incr_weight,
+        },
+        "seed": workload.seed,
+    }
+
+
+def _result_dict(result):
+    return {
+        "name": result.name,
+        "ops": result.ops,
+        "elapsed_s": result.elapsed_s,
+        "ops_per_sec": result.ops_per_sec,
+        "errors": result.errors,
+        "error_sample": result.error_sample,
+        "summary": result.summary,
+    }
+
+
+def to_json_dict(results, workload, command_line):
+    """Build the JSON-serializable report document."""
+    return {
+        "tool": "kvbench",
+        "version": __version__,
+        "generated": datetime.now(timezone.utc).isoformat(),
+        "python": (
+            f"{sys.version.split()[0]} on {platform.system()} "
+            f"{platform.machine()} ({platform.python_implementation()})"
+        ),
+        "command": command_line,
+        "workload": _workload_dict(workload),
+        "results": [_result_dict(r) for r in results],
+    }
+
+
+def render_json(results, workload, command_line):
+    """Render the report as a JSON string."""
+    return json.dumps(
+        to_json_dict(results, workload, command_line), indent=2
+    ) + "\n"
+
+
+def write_json(results, workload, command_line, path):
+    """Write the JSON report to ``path`` and return its text."""
+    text = render_json(results, workload, command_line)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    return text
 
 
 def _row(result):

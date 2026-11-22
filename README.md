@@ -52,7 +52,13 @@ Options: `--host` (default 127.0.0.1), `--port` (default 6379),
 `--ops` (default 10000), `--clients` (default 4), `--keys` (default
 1000), `--value-size` (default 32), `--mix SET:GET:INCR` (default
 50:40:10), `--seed` (default 1234), `--baseline`, `--output` (default
-report.md).
+report.md), `--json` (default: same name as `--output` with a `.json`
+extension).
+
+Every run writes a JSON report alongside the Markdown one, with the
+same workload settings and per-backend results (ops, ops/sec, elapsed,
+errors, first error, and the full latency summary) in a machine-readable
+form. Use `--json path.json` to put it somewhere else.
 
 ## Report format
 
@@ -83,5 +89,5 @@ make test
 
 - Pipelined mode (N commands per round trip).
 - Percentile histograms in the report.
-- JSON output alongside Markdown.
+- ~~JSON output alongside Markdown.~~ Done in 0.2.0.
 - Latency over time (per-second buckets) to spot stalls.

@@ -9,12 +9,26 @@ Usage:
 """
 
 import argparse
+import os
 import sys
 
 from . import __version__
 from .bench import DictClient, Workload, run_workload
-from .report import write_report
+from .report import write_json, write_report
 from .resp import RespClient
+
+
+def json_path_for(output_path, json_arg):
+    """Resolve where the JSON report goes.
+
+    An explicit ``--json`` path wins; otherwise the JSON report sits
+    alongside the Markdown one, with the output extension swapped for
+    ``.json`` (``report.md`` -> ``report.json``; ``report`` -> ``report.json``).
+    """
+    if json_arg:
+        return json_arg
+    stem, ext = os.path.splitext(output_path)
+    return stem + ".json" if ext else output_path + ".json"
 
 
 def _parse_mix(text):
@@ -49,6 +63,9 @@ def build_parser():
                         help="also run the in-process dict baseline")
     parser.add_argument("--output", default="report.md",
                         help="where to write the Markdown report")
+    parser.add_argument("--json", default=None, metavar="PATH",
+                        help="where to write the JSON report "
+                        "(default: same name as --output, .json extension)")
     return parser
 
 
@@ -99,6 +116,9 @@ def main(argv=None):
 
     write_report(results, workload, command_line, args.output)
     print(f"report written to {args.output}")
+    json_path = json_path_for(args.output, args.json)
+    write_json(results, workload, command_line, json_path)
+    print(f"JSON report written to {json_path}")
     return 0
 
 
