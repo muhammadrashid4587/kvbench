@@ -10,6 +10,8 @@ C. Pure Python 3 standard library, no dependencies.
   Redis-compatible server over a socket.
 - A workload runner (`kvbench/bench.py`) that runs a configurable
   SET/GET/INCR mix across N threads, measuring per-op latency.
+  With `--pipeline N` it sends N commands per round trip instead of
+  one, so throughput under pipelining is measured the same way.
 - Latency stats (`kvbench/stats.py`): ops/sec, mean, p50, p95, p99,
   plus a log-spaced latency histogram.
 - A Markdown report writer (`kvbench/report.py`).
@@ -24,7 +26,8 @@ C. Pure Python 3 standard library, no dependencies.
 - Not a correctness tester for Redis semantics. It checks that commands
   succeed, not that every edge case matches Redis.
 - Not a load generator for production. It opens one connection per
-  thread and does one round trip per operation — no pipelining.
+  thread; the pipeline depth is configurable, but there is no
+  connection pooling or TLS.
 
 ## Usage
 
@@ -47,14 +50,23 @@ python -m kvbench.cli --host 127.0.0.1 --port 6379 --ops 20000 --clients 4 \
 
 # different mix and value size
 python -m kvbench.cli --ops 50000 --clients 8 --mix 80:15:5 --value-size 128
+
+# pipelined mode: 10 commands per round trip
+python -m kvbench.cli --ops 20000 --clients 4 --pipeline 10
 ```
+
+Pipelined latencies are the batch round-trip time divided by the batch
+size, so they measure amortized per-op cost under pipelining, not the
+latency of any single reply. The report records the pipeline depth in
+its workload settings, and the JSON report carries it under
+`workload.pipeline`.
 
 Options: `--host` (default 127.0.0.1), `--port` (default 6379),
 `--ops` (default 10000), `--clients` (default 4), `--keys` (default
 1000), `--value-size` (default 32), `--mix SET:GET:INCR` (default
-50:40:10), `--seed` (default 1234), `--baseline`, `--output` (default
-report.md), `--json` (default: same name as `--output` with a `.json`
-extension).
+50:40:10), `--pipeline` (default 1, sequential), `--seed` (default
+1234), `--baseline`, `--output` (default report.md), `--json`
+(default: same name as `--output` with a `.json` extension).
 
 Every run writes a JSON report alongside the Markdown one, with the
 same workload settings and per-backend results (ops, ops/sec, elapsed,
@@ -95,7 +107,7 @@ make test
 
 ## Roadmap
 
-- Pipelined mode (N commands per round trip).
+- ~~Pipelined mode (N commands per round trip).~~ Done in 0.2.2.
 - ~~Percentile histograms in the report.~~ Done in 0.2.1.
 - ~~JSON output alongside Markdown.~~ Done in 0.2.0.
 - Latency over time (per-second buckets) to spot stalls.

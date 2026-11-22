@@ -29,10 +29,19 @@ class Workload:
     get_weight: int = 40
     incr_weight: int = 10
     seed: int = 1234
+    # Commands sent per round trip. 1 is the old sequential behaviour:
+    # one command, wait for its reply, then the next. Above 1 the
+    # runner sends ``pipeline`` commands at once and reads all their
+    # replies, so the per-op latencies are the batch round-trip time
+    # divided by the batch size — amortized per-op cost, not the
+    # latency of any single reply.
+    pipeline: int = 1
 
     def __post_init__(self):
         if self.ops <= 0 or self.clients <= 0 or self.keys <= 0:
             raise ValueError("ops, clients and keys must be positive")
+        if self.pipeline < 1:
+            raise ValueError("pipeline depth must be at least 1")
         total = self.set_weight + self.get_weight + self.incr_weight
         if total <= 0:
             raise ValueError("at least one op weight must be positive")
@@ -100,6 +109,20 @@ class DictClient:
     def command(self, *args):
         return self._store.command(*args)
 
+    def pipeline(self, commands):
+        """Run several commands, one entry per command.
+
+        Mirrors :meth:`kvbench.resp.RespClient.pipeline`: a reply, or
+        the exception for that command, per entry.
+        """
+        replies = []
+        for cmd in commands:
+            try:
+                replies.append(self.command(*cmd))
+            except Exception as exc:  # noqa: BLE001 - returned, not raised
+                replies.append(exc)
+        return replies
+
     def close(self):
         pass
 
@@ -136,29 +159,60 @@ def run_workload(client_factory, workload, name):
         local_errors = 0
         local_sample = ""
         try:
-            for _ in range(op_count):
-                op = _pick_op(rng, workload)
-                # Counters live in their own keyspace: INCR on a key
-                # previously SET to a non-numeric value would error,
-                # exactly as it does on a real Redis server.
-                if op == "INCR":
-                    key = f"kvbench:counter:{rng.randrange(workload.keys)}"
-                else:
-                    key = f"kvbench:{rng.randrange(workload.keys)}"
+            remaining = op_count
+            while remaining > 0:
+                batch_size = min(workload.pipeline, remaining)
+                batch = []
+                for _ in range(batch_size):
+                    op = _pick_op(rng, workload)
+                    # Counters live in their own keyspace: INCR on a key
+                    # previously SET to a non-numeric value would error,
+                    # exactly as it does on a real Redis server.
+                    if op == "INCR":
+                        key = (f"kvbench:counter:"
+                               f"{rng.randrange(workload.keys)}")
+                        batch.append(("INCR", key))
+                    else:
+                        key = f"kvbench:{rng.randrange(workload.keys)}"
+                        if op == "SET":
+                            batch.append(("SET", key, value))
+                        else:
+                            batch.append(("GET", key))
                 start = time.perf_counter_ns()
                 try:
-                    if op == "SET":
-                        client.command("SET", key, value)
-                    elif op == "GET":
-                        client.command("GET", key)
+                    run_batch = getattr(client, "pipeline", None)
+                    if run_batch is not None:
+                        replies = run_batch(batch)
                     else:
-                        client.command("INCR", key)
+                        # No pipeline support: run the batch one op at
+                        # a time, capturing per-op errors the same way.
+                        replies = []
+                        for cmd in batch:
+                            try:
+                                replies.append(client.command(*cmd))
+                            except Exception as exc:  # noqa: BLE001
+                                replies.append(exc)
                 except Exception as exc:  # noqa: BLE001 - count and continue
-                    local_errors += 1
+                    # The whole batch failed (e.g. transport error):
+                    # every op in it counts as an error.
+                    local_errors += batch_size
                     if not local_sample:
                         local_sample = f"{type(exc).__name__}: {exc}"
+                    remaining -= batch_size
                     continue
-                local_lat.append(time.perf_counter_ns() - start)
+                batch_ns = time.perf_counter_ns() - start
+                # Amortized per-op latency: the batch round trip divided
+                # by the batch size (see Workload.pipeline).
+                per_op_ns = batch_ns // batch_size
+                for reply in replies:
+                    if isinstance(reply, Exception):
+                        local_errors += 1
+                        if not local_sample:
+                            local_sample = (f"{type(reply).__name__}: "
+                                            f"{reply}")
+                        continue
+                    local_lat.append(per_op_ns)
+                remaining -= batch_size
         finally:
             client.close()
         with lock:

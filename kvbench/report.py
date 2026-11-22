@@ -20,6 +20,7 @@ def _workload_dict(workload):
             "incr": workload.incr_weight,
         },
         "seed": workload.seed,
+        "pipeline": workload.pipeline,
     }
 
 
@@ -118,6 +119,7 @@ def render_markdown(results, workload, command_line):
         f"- Value size: {workload.value_size} bytes",
         f"- Mix: SET {workload.set_weight} / GET {workload.get_weight} / "
         f"INCR {workload.incr_weight}",
+        f"- Pipeline depth: {workload.pipeline} command(s) per round trip",
         "",
         "## Results",
         "",
@@ -144,6 +146,12 @@ def render_markdown(results, workload, command_line):
         "- Latencies are measured per operation around the client call, "
         "so they include network round-trip time for server backends.",
     ]
+    if workload.pipeline > 1:
+        lines.append(
+            "- With a pipeline depth above 1, latencies are the batch "
+            "round-trip time divided by the batch size: amortized per-op "
+            "cost, not the latency of any single reply."
+        )
     for result in results:
         if result.error_sample:
             lines.append(

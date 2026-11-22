@@ -51,6 +51,29 @@ class RespClient:
         self._sock.sendall(_encode_command(*args))
         return self._read_reply()
 
+    def pipeline(self, commands):
+        """Send several commands at once and read all replies in order.
+
+        ``commands`` is an iterable of argument tuples. Returns one
+        entry per command: the parsed reply, or the RespError for that
+        reply. Errors are returned, not raised, so the reply stream
+        stays aligned and the remaining replies still arrive. A
+        transport failure (e.g. the connection dropping) still raises.
+        """
+        commands = list(commands)
+        if not commands:
+            return []
+        self._sock.sendall(
+            b"".join(_encode_command(*cmd) for cmd in commands)
+        )
+        replies = []
+        for _ in commands:
+            try:
+                replies.append(self._read_reply())
+            except RespError as exc:
+                replies.append(exc)
+        return replies
+
     def _read_line(self):
         line = self._rfile.readline()
         if not line:

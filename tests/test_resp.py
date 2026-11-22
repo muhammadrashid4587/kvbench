@@ -88,6 +88,34 @@ class TestRespClient(unittest.TestCase):
             with self.assertRaises(RespError):
                 client.command("BOOM")
 
+    def test_pipeline_returns_replies_in_order(self):
+        with RespClient("127.0.0.1", self.port) as client:
+            replies = client.pipeline([
+                ("SET", "k1", "v1"),
+                ("SET", "k2", "v2"),
+                ("GET", "k1"),
+                ("INCR", "counter"),
+                ("GET", "k2"),
+            ])
+            self.assertEqual(replies, ["OK", "OK", "v1", 1, "v2"])
+
+    def test_pipeline_error_is_returned_not_raised(self):
+        # An error reply mid-batch must not break the stream: the
+        # remaining replies still arrive, in order.
+        with RespClient("127.0.0.1", self.port) as client:
+            replies = client.pipeline([
+                ("SET", "k", "v"),
+                ("BOOM",),
+                ("GET", "k"),
+            ])
+            self.assertEqual(replies[0], "OK")
+            self.assertIsInstance(replies[1], RespError)
+            self.assertEqual(replies[2], "v")
+
+    def test_pipeline_empty(self):
+        with RespClient("127.0.0.1", self.port) as client:
+            self.assertEqual(client.pipeline([]), [])
+
 
 if __name__ == "__main__":
     unittest.main()

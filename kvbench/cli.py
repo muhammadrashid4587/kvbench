@@ -58,6 +58,9 @@ def build_parser():
     parser.add_argument("--value-size", type=int, default=32)
     parser.add_argument("--mix", default="50:40:10",
                         help="SET:GET:INCR weights, e.g. 50:40:10")
+    parser.add_argument("--pipeline", type=int, default=1,
+                        help="commands sent per round trip "
+                        "(1 = sequential, default 1)")
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--baseline", action="store_true",
                         help="also run the in-process dict baseline")
@@ -76,16 +79,21 @@ def main(argv=None):
     except ValueError as exc:
         print(f"kvbench: {exc}", file=sys.stderr)
         return 2
-    workload = Workload(
-        ops=args.ops,
-        clients=args.clients,
-        keys=args.keys,
-        value_size=args.value_size,
-        set_weight=set_w,
-        get_weight=get_w,
-        incr_weight=incr_w,
-        seed=args.seed,
-    )
+    try:
+        workload = Workload(
+            ops=args.ops,
+            clients=args.clients,
+            keys=args.keys,
+            value_size=args.value_size,
+            set_weight=set_w,
+            get_weight=get_w,
+            incr_weight=incr_w,
+            seed=args.seed,
+            pipeline=args.pipeline,
+        )
+    except ValueError as exc:
+        print(f"kvbench: {exc}", file=sys.stderr)
+        return 2
     command_line = " ".join(sys.argv)
     results = []
 
@@ -93,7 +101,8 @@ def main(argv=None):
         return RespClient(args.host, args.port)
 
     print(f"kvbench {__version__}: {workload.ops} ops, "
-          f"{workload.clients} clients against {args.host}:{args.port}")
+          f"{workload.clients} clients, pipeline depth "
+          f"{workload.pipeline} against {args.host}:{args.port}")
     try:
         result = run_workload(server_factory, workload,
                               f"cinder ({args.host}:{args.port})")

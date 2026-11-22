@@ -86,7 +86,7 @@ class TestReport(unittest.TestCase):
         doc.pop("generated")
         self.assertEqual(parsed, doc)
         self.assertEqual(parsed["tool"], "kvbench")
-        self.assertEqual(parsed["version"], "0.2.1")
+        self.assertEqual(parsed["version"], "0.2.2")
         self.assertEqual(parsed["command"], "kvbench --ops 100 --clients 2")
         self.assertEqual(parsed["workload"]["ops"], 100)
         self.assertEqual(parsed["workload"]["clients"], 2)
@@ -95,6 +95,7 @@ class TestReport(unittest.TestCase):
         self.assertEqual(parsed["workload"]["mix"],
                          {"set": 50, "get": 40, "incr": 10})
         self.assertEqual(parsed["workload"]["seed"], 1234)
+        self.assertEqual(parsed["workload"]["pipeline"], 1)
         row = parsed["results"][0]
         self.assertEqual(row["name"], "cinder (127.0.0.1:6379)")
         self.assertEqual(row["ops"], 100)
@@ -117,6 +118,15 @@ class TestReport(unittest.TestCase):
         self.assertEqual(parsed["results"][0]["errors"], 2)
         self.assertEqual(parsed["results"][0]["error_sample"],
                          "ConnectionError: refused")
+
+    def test_pipeline_in_reports(self):
+        workload = Workload(ops=100, clients=2, keys=10, value_size=8,
+                            pipeline=10)
+        text = render_markdown([_result()], workload, "kvbench")
+        self.assertIn("Pipeline depth: 10 command(s) per round trip", text)
+        self.assertIn("amortized per-op", text)
+        parsed = json.loads(render_json([_result()], workload, "kvbench"))
+        self.assertEqual(parsed["workload"]["pipeline"], 10)
 
     def test_json_path_for(self):
         self.assertEqual(json_path_for("report.md", None), "report.json")
