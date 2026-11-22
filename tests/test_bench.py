@@ -62,6 +62,17 @@ class TestDictBaseline(unittest.TestCase):
         self.assertIsInstance(replies[1], ValueError)
         self.assertEqual(replies[2], "v")
 
+    def test_client_factory_failure_surfaces(self):
+        # A client that cannot connect used to die silently inside the
+        # worker thread and produce a 0-op result; the caller must see
+        # the failure instead.
+        def failing_factory():
+            raise ConnectionError("connection refused")
+
+        workload = Workload(ops=10, clients=2, keys=5)
+        with self.assertRaises(ConnectionError):
+            run_workload(failing_factory, workload, "unreachable")
+
     def test_time_series_counts_all_ops(self):
         workload = Workload(ops=200, clients=4, keys=20, value_size=8)
         result = run_workload(DictClient, workload, "baseline (dict)")

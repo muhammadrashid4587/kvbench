@@ -19,6 +19,9 @@ C. Pure Python 3 standard library, no dependencies.
 - A baseline mode that runs the exact same workload against an
   in-process Python dict, so the report can compare the server with a
   no-network upper bound on the same machine.
+- A compare mode (`--compare HOST:PORT`, repeatable) that runs the
+  same workload against a second server — cinder vs real Redis, or
+  two cinder builds — and puts both in one report, side by side.
 
 ## What it is not
 
@@ -54,6 +57,10 @@ python -m kvbench.cli --ops 50000 --clients 8 --mix 80:15:5 --value-size 128
 
 # pipelined mode: 10 commands per round trip
 python -m kvbench.cli --ops 20000 --clients 4 --pipeline 10
+
+# compare two servers with the same workload, one report
+python -m kvbench.cli --host 127.0.0.1 --port 6379 \
+    --compare 127.0.0.1:6380 --ops 20000 --clients 4
 ```
 
 Pipelined latencies are the batch round-trip time divided by the batch
@@ -66,7 +73,9 @@ Options: `--host` (default 127.0.0.1), `--port` (default 6379),
 `--ops` (default 10000), `--clients` (default 4), `--keys` (default
 1000), `--value-size` (default 32), `--mix SET:GET:INCR` (default
 50:40:10), `--pipeline` (default 1, sequential), `--seed` (default
-1234), `--baseline`, `--output` (default report.md), `--json`
+1234), `--baseline`, `--compare HOST:PORT` (repeatable: also run
+the same workload against another server and add it to the report),
+`--output` (default report.md), `--json`
 (default: same name as `--output` with a `.json` extension).
 
 Every run writes a JSON report alongside the Markdown one, with the
@@ -114,6 +123,8 @@ make test
 
 ## Roadmap
 
+- ~~Compare mode: run the same workload against a second server and
+  put both in one report.~~ Done in 0.2.4.
 - ~~Latency over time (per-second buckets) to spot stalls.~~ Done in
   0.2.3.
 - ~~Pipelined mode (N commands per round trip).~~ Done in 0.2.2.

@@ -161,13 +161,22 @@ def run_workload(client_factory, workload, name):
     times = []
     errors = 0
     error_sample = ""
+    thread_errors = []
     lock = threading.Lock()
 
     def worker(thread_index, op_count):
         nonlocal errors, error_sample
         rng = random.Random(workload.seed + thread_index)
         value = "x" * workload.value_size
-        client = client_factory()
+        try:
+            client = client_factory()
+        except Exception as exc:  # noqa: BLE001 - surfaced after join
+            # A failed client (e.g. connection refused) used to die
+            # silently inside the thread and produce a 0-op result.
+            # Record it so run_workload can raise it to the caller.
+            with lock:
+                thread_errors.append(exc)
+            return
         local_lat = []
         local_times = []
         local_errors = 0
@@ -250,6 +259,8 @@ def run_workload(client_factory, workload, name):
         threads.append(t)
     for t in threads:
         t.join()
+    if thread_errors:
+        raise thread_errors[0]
     elapsed = time.perf_counter() - start
 
     return BenchmarkResult(

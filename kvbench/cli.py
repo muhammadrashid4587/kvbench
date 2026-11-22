@@ -6,6 +6,9 @@ Usage:
     python -m kvbench.cli --baseline --ops 20000 --output report.md
     python -m kvbench.cli --host 127.0.0.1 --port 6379 --baseline \\
         --ops 20000 --output report.md
+    # same workload against a second server, side by side in one report
+    python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
+        --compare 127.0.0.1:6380 --ops 20000 --output report.md
 """
 
 import argparse
@@ -44,6 +47,24 @@ def _parse_mix(text):
     return values
 
 
+def _parse_host_port(text):
+    """Parse a HOST:PORT target, e.g. ``127.0.0.1:6380``."""
+    if ":" not in text:
+        raise ValueError(
+            "compare target must be HOST:PORT, e.g. 127.0.0.1:6380")
+    host, _, port_text = text.rpartition(":")
+    if not host or not port_text:
+        raise ValueError(
+            "compare target must be HOST:PORT, e.g. 127.0.0.1:6380")
+    try:
+        port = int(port_text)
+    except ValueError as exc:
+        raise ValueError("compare port must be an integer") from exc
+    if not 0 < port < 65536:
+        raise ValueError("compare port must be between 1 and 65535")
+    return host, port
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="kvbench",
@@ -64,6 +85,11 @@ def build_parser():
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--baseline", action="store_true",
                         help="also run the in-process dict baseline")
+    parser.add_argument("--compare", action="append", default=[],
+                        metavar="HOST:PORT",
+                        help="also run the same workload against another "
+                        "server and add it to the report; repeatable, "
+                        "e.g. --compare 127.0.0.1:6380")
     parser.add_argument("--output", default="report.md",
                         help="where to write the Markdown report")
     parser.add_argument("--json", default=None, metavar="PATH",
@@ -76,6 +102,7 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     try:
         set_w, get_w, incr_w = _parse_mix(args.mix)
+        compare_targets = [_parse_host_port(t) for t in args.compare]
     except ValueError as exc:
         print(f"kvbench: {exc}", file=sys.stderr)
         return 2
@@ -115,6 +142,25 @@ def main(argv=None):
           f"p50 {result.summary['p50_ms']:.3f} ms, "
           f"p95 {result.summary['p95_ms']:.3f} ms, "
           f"errors {result.errors}")
+
+    for host, port in compare_targets:
+        def compare_factory(host=host, port=port):
+            return RespClient(host, port)
+
+        print(f"kvbench {__version__}: same workload against "
+              f"{host}:{port}")
+        try:
+            compared = run_workload(compare_factory, workload,
+                                    f"compare ({host}:{port})")
+        except (ConnectionError, OSError) as exc:
+            print(f"kvbench: cannot reach {host}:{port}: {exc}",
+                  file=sys.stderr)
+            return 1
+        results.append(compared)
+        print(f"  {compared.name}: {compared.ops_per_sec:,.0f} ops/sec, "
+              f"p50 {compared.summary['p50_ms']:.3f} ms, "
+              f"p95 {compared.summary['p95_ms']:.3f} ms, "
+              f"errors {compared.errors}")
 
     if args.baseline:
         baseline = run_workload(DictClient, workload, "baseline (dict)")
