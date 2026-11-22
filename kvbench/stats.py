@@ -41,3 +41,42 @@ def summarize(latencies_ns):
         "min_ms": ordered[0] / 1_000_000,
         "max_ms": ordered[-1] / 1_000_000,
     }
+
+
+# Log-spaced bucket upper edges in ms. Latencies above the last edge
+# land in the overflow bucket, whose upper_ms is None.
+HISTOGRAM_EDGES_MS = (
+    0.1, 0.25, 0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000,
+)
+
+
+def histogram(latencies_ns):
+    """Bucket latencies (ns) into log-spaced ms buckets.
+
+    Returns a list of ``{"upper_ms": float | None, "count": int}``
+    dicts, one per edge plus a final overflow bucket (``upper_ms`` is
+    ``None``). Empty trailing buckets are dropped so a fast run does
+    not print a wall of zeroes; the overflow bucket is kept only when
+    it holds samples.
+    """
+    counts = [0] * (len(HISTOGRAM_EDGES_MS) + 1)
+    for latency_ns in latencies_ns:
+        ms = latency_ns / 1_000_000
+        placed = False
+        for i, edge in enumerate(HISTOGRAM_EDGES_MS):
+            if ms <= edge:
+                counts[i] += 1
+                placed = True
+                break
+        if not placed:
+            counts[-1] += 1
+    buckets = [
+        {"upper_ms": edge, "count": counts[i]}
+        for i, edge in enumerate(HISTOGRAM_EDGES_MS)
+    ]
+    buckets.append({"upper_ms": None, "count": counts[-1]})
+    # Drop empty trailing buckets (the overflow bucket counts as
+    # non-empty only when it holds samples).
+    while buckets and buckets[-1]["count"] == 0:
+        buckets.pop()
+    return buckets

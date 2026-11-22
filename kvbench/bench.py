@@ -16,7 +16,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from .stats import summarize
+from .stats import histogram, summarize
 
 
 @dataclass
@@ -55,6 +55,10 @@ class BenchmarkResult:
     @property
     def summary(self):
         return summarize(self.latencies_ns)
+
+    @property
+    def histogram(self):
+        return histogram(self.latencies_ns)
 
 
 class DictStore:

@@ -2,7 +2,7 @@
 
 import unittest
 
-from kvbench.stats import percentile, summarize
+from kvbench.stats import histogram, percentile, summarize
 
 
 class TestPercentile(unittest.TestCase):
@@ -50,6 +50,31 @@ class TestSummarize(unittest.TestCase):
         s = summarize([])
         self.assertEqual(s["count"], 0)
         self.assertEqual(s["mean_ms"], 0.0)
+
+
+class TestHistogram(unittest.TestCase):
+    def test_known_latencies(self):
+        # 0.05, 0.1, 0.2, 0.6, 2.0 ms and one 2000 ms outlier.
+        lat = [50_000, 100_000, 200_000, 600_000, 2_000_000,
+               2_000_000_000]
+        buckets = histogram(lat)
+        by_upper = {b["upper_ms"]: b["count"] for b in buckets}
+        self.assertEqual(by_upper[0.1], 2)   # 0.05 and 0.1 ms
+        self.assertEqual(by_upper[0.25], 1)  # 0.2 ms
+        self.assertEqual(by_upper[0.5], 0)
+        self.assertEqual(by_upper[1], 1)     # 0.6 ms
+        self.assertEqual(by_upper[2], 1)     # 2.0 ms, edge inclusive
+        self.assertEqual(by_upper[None], 1)  # overflow: 2000 ms
+        self.assertEqual(sum(by_upper.values()), 6)
+
+    def test_trailing_empty_buckets_dropped(self):
+        # All samples fast: only buckets up to the last non-empty one.
+        buckets = histogram([100_000] * 10)
+        self.assertEqual(len(buckets), 1)
+        self.assertEqual(buckets[0], {"upper_ms": 0.1, "count": 10})
+
+    def test_empty(self):
+        self.assertEqual(histogram([]), [])
 
 
 if __name__ == "__main__":

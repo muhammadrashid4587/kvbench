@@ -10,7 +10,8 @@ C. Pure Python 3 standard library, no dependencies.
   Redis-compatible server over a socket.
 - A workload runner (`kvbench/bench.py`) that runs a configurable
   SET/GET/INCR mix across N threads, measuring per-op latency.
-- Latency stats (`kvbench/stats.py`): ops/sec, mean, p50, p95, p99.
+- Latency stats (`kvbench/stats.py`): ops/sec, mean, p50, p95, p99,
+  plus a log-spaced latency histogram.
 - A Markdown report writer (`kvbench/report.py`).
 - A baseline mode that runs the exact same workload against an
   in-process Python dict, so the report can compare the server with a
@@ -68,6 +69,13 @@ form. Use `--json path.json` to put it somewhere else.
 
 The baseline row is labelled `baseline (dict)`.
 
+Below the table, each backend gets a latency histogram section: the
+share of ops in each log-spaced bucket (`<= 0.1 ms`, `<= 0.25 ms`,
+`<= 0.5 ms`, `1 ms`, `2 ms`, `5 ms`, `10 ms`, `25 ms`, `50 ms`,
+`100 ms`, `250 ms`, `500 ms`, `1000 ms`, and an overflow bucket for
+anything slower), drawn as text bars. The JSON report carries the
+same buckets per result under `histogram`.
+
 ## Reproducing numbers
 
 Numbers are machine-dependent. To reproduce a report, run the exact
@@ -88,6 +96,6 @@ make test
 ## Roadmap
 
 - Pipelined mode (N commands per round trip).
-- Percentile histograms in the report.
+- ~~Percentile histograms in the report.~~ Done in 0.2.1.
 - ~~JSON output alongside Markdown.~~ Done in 0.2.0.
 - Latency over time (per-second buckets) to spot stalls.

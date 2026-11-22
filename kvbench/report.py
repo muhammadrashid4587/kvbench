@@ -32,6 +32,7 @@ def _result_dict(result):
         "errors": result.errors,
         "error_sample": result.error_sample,
         "summary": result.summary,
+        "histogram": result.histogram,
     }
 
 
@@ -75,6 +76,30 @@ def _row(result):
     )
 
 
+def _histogram_lines(result):
+    """Text-bar histogram lines for one result, or [] when empty."""
+    buckets = result.histogram
+    if not buckets:
+        return []
+    total = result.summary["count"]
+    lines = [f"### Latency histogram — {result.name}", ""]
+    for bucket in buckets:
+        label = (
+            "> 1000 ms"
+            if bucket["upper_ms"] is None
+            else f"<= {bucket['upper_ms']:g} ms"
+        )
+        # Scale the bar to the largest bucket so the shape reads at a
+        # glance; cap the width so long runs stay readable.
+        width = round(bucket["count"] / max(b["count"] for b in buckets) * 40)
+        lines.append(
+            f"- {label}: {bucket['count']} "
+            f"({bucket['count'] / total * 100:.1f}%) {'#' * width}"
+        )
+    lines.append("")
+    return lines
+
+
 def render_markdown(results, workload, command_line):
     """Render one or more BenchmarkResults as a Markdown report."""
     lines = [
@@ -102,8 +127,12 @@ def render_markdown(results, workload, command_line):
     ]
     for result in results:
         lines.append(_row(result))
+    hist_lines = []
+    for result in results:
+        hist_lines += _histogram_lines(result)
+    if hist_lines:
+        lines += ["", "## Latency histograms", ""] + hist_lines
     lines += [
-        "",
         "## Notes",
         "",
         "- Numbers are machine-dependent. Reproduce them with the command "

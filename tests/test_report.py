@@ -47,6 +47,20 @@ class TestReport(unittest.TestCase):
         self.assertIn("machine-dependent", text)
         self.assertIn("baseline (dict)", text)  # the notes mention it
 
+    def test_histogram_in_markdown(self):
+        workload = _workload()
+        result = _result()
+        text = render_markdown([result], workload, "kvbench")
+        self.assertIn("## Latency histograms", text)
+        self.assertIn("Latency histogram — cinder (127.0.0.1:6379)", text)
+        self.assertIn("<= 0.1 ms: 100 (100.0%)", text)
+
+    def test_histogram_in_json(self):
+        parsed = json.loads(render_json([_result()], _workload(),
+                                        "kvbench"))
+        hist = parsed["results"][0]["histogram"]
+        self.assertEqual(hist, [{"upper_ms": 0.1, "count": 100}])
+
     def test_error_sample_listed(self):
         workload = Workload(ops=10, clients=1, keys=5)
         result = BenchmarkResult(
@@ -72,7 +86,7 @@ class TestReport(unittest.TestCase):
         doc.pop("generated")
         self.assertEqual(parsed, doc)
         self.assertEqual(parsed["tool"], "kvbench")
-        self.assertEqual(parsed["version"], "0.2.0")
+        self.assertEqual(parsed["version"], "0.2.1")
         self.assertEqual(parsed["command"], "kvbench --ops 100 --clients 2")
         self.assertEqual(parsed["workload"]["ops"], 100)
         self.assertEqual(parsed["workload"]["clients"], 2)
