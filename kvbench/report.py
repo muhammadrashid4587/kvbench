@@ -34,6 +34,7 @@ def _result_dict(result):
         "error_sample": result.error_sample,
         "summary": result.summary,
         "histogram": result.histogram,
+        "time_series": result.time_series,
     }
 
 
@@ -101,6 +102,26 @@ def _histogram_lines(result):
     return lines
 
 
+def _time_series_lines(result):
+    """Per-second ops/latency table for one result, or [] when empty."""
+    series = result.time_series
+    if not series:
+        return []
+    lines = [
+        f"### Latency over time — {result.name}",
+        "",
+        "| Second | Ops | Mean (ms) | Max (ms) |",
+        "| ---: | ---: | ---: | ---: |",
+    ]
+    for bucket in series:
+        lines.append(
+            f"| {bucket['second']} | {bucket['ops']} | "
+            f"{bucket['mean_ms']:.3f} | {bucket['max_ms']:.3f} |"
+        )
+    lines.append("")
+    return lines
+
+
 def render_markdown(results, workload, command_line):
     """Render one or more BenchmarkResults as a Markdown report."""
     lines = [
@@ -134,6 +155,11 @@ def render_markdown(results, workload, command_line):
         hist_lines += _histogram_lines(result)
     if hist_lines:
         lines += ["", "## Latency histograms", ""] + hist_lines
+    ts_lines = []
+    for result in results:
+        ts_lines += _time_series_lines(result)
+    if ts_lines:
+        lines += ["", "## Latency over time", ""] + ts_lines
     lines += [
         "## Notes",
         "",
@@ -145,6 +171,8 @@ def render_markdown(results, workload, command_line):
         "with a real server.",
         "- Latencies are measured per operation around the client call, "
         "so they include network round-trip time for server backends.",
+        "- The Latency over time section buckets ops by the second they "
+        "completed; a second with 0 ops marks a stall.",
     ]
     if workload.pipeline > 1:
         lines.append(

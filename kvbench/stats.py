@@ -43,6 +43,38 @@ def summarize(latencies_ns):
     }
 
 
+def time_series(latencies_ns, times_s):
+    """Per-second latency buckets, to spot stalls over a run.
+
+    ``times_s`` holds one completion time per latency, in seconds
+    since the run started. Returns a list of ``{"second": int,
+    "ops": int, "mean_ms": float, "max_ms": float}`` dicts, one per
+    second from 0 through the last second that holds a sample.
+    Seconds with no ops are kept (ops 0, mean/max 0.0): a stall shows
+    up as an empty second instead of disappearing from the series.
+    """
+    if not latencies_ns:
+        return []
+    if len(latencies_ns) != len(times_s):
+        raise ValueError("latencies and times must have the same length")
+    last_second = max(0, int(max(times_s)))
+    buckets = [{"second": s, "ops": 0, "mean_ms": 0.0, "max_ms": 0.0}
+               for s in range(last_second + 1)]
+    totals_ns = [0] * (last_second + 1)
+    for latency_ns, t in zip(latencies_ns, times_s):
+        second = max(0, int(t))
+        bucket = buckets[second]
+        bucket["ops"] += 1
+        totals_ns[second] += latency_ns
+        ms = latency_ns / 1_000_000
+        if ms > bucket["max_ms"]:
+            bucket["max_ms"] = ms
+    for bucket, total_ns in zip(buckets, totals_ns):
+        if bucket["ops"]:
+            bucket["mean_ms"] = total_ns / bucket["ops"] / 1_000_000
+    return buckets
+
+
 # Log-spaced bucket upper edges in ms. Latencies above the last edge
 # land in the overflow bucket, whose upper_ms is None.
 HISTOGRAM_EDGES_MS = (

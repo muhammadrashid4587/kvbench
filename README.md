@@ -13,7 +13,8 @@ C. Pure Python 3 standard library, no dependencies.
   With `--pipeline N` it sends N commands per round trip instead of
   one, so throughput under pipelining is measured the same way.
 - Latency stats (`kvbench/stats.py`): ops/sec, mean, p50, p95, p99,
-  plus a log-spaced latency histogram.
+  plus a log-spaced latency histogram and a per-second time series
+  (ops, mean and max latency per second) to spot stalls.
 - A Markdown report writer (`kvbench/report.py`).
 - A baseline mode that runs the exact same workload against an
   in-process Python dict, so the report can compare the server with a
@@ -88,6 +89,12 @@ share of ops in each log-spaced bucket (`<= 0.1 ms`, `<= 0.25 ms`,
 anything slower), drawn as text bars. The JSON report carries the
 same buckets per result under `histogram`.
 
+Below the histograms, each backend gets a latency-over-time table:
+one row per second of the run with the ops completed in that second
+and their mean and max latency. A second with 0 ops marks a stall —
+the workload made no progress in that second. The JSON report
+carries the same series per result under `time_series`.
+
 ## Reproducing numbers
 
 Numbers are machine-dependent. To reproduce a report, run the exact
@@ -107,7 +114,8 @@ make test
 
 ## Roadmap
 
+- ~~Latency over time (per-second buckets) to spot stalls.~~ Done in
+  0.2.3.
 - ~~Pipelined mode (N commands per round trip).~~ Done in 0.2.2.
 - ~~Percentile histograms in the report.~~ Done in 0.2.1.
 - ~~JSON output alongside Markdown.~~ Done in 0.2.0.
-- Latency over time (per-second buckets) to spot stalls.

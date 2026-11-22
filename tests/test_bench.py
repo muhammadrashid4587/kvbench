@@ -62,7 +62,17 @@ class TestDictBaseline(unittest.TestCase):
         self.assertIsInstance(replies[1], ValueError)
         self.assertEqual(replies[2], "v")
 
-    def test_invalid_workload(self):
+    def test_time_series_counts_all_ops(self):
+        workload = Workload(ops=200, clients=4, keys=20, value_size=8)
+        result = run_workload(DictClient, workload, "baseline (dict)")
+        series = result.time_series
+        self.assertGreater(len(series), 0)
+        self.assertEqual(series[0]["second"], 0)
+        self.assertEqual(sum(b["ops"] for b in series), 200)
+        self.assertEqual(len(result.times_s), 200)
+        # Bucket indices are contiguous from second 0.
+        self.assertEqual([b["second"] for b in series],
+                         list(range(len(series))))
         with self.assertRaises(ValueError):
             Workload(ops=0, clients=1, keys=10)
         with self.assertRaises(ValueError):

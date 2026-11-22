@@ -86,7 +86,7 @@ class TestReport(unittest.TestCase):
         doc.pop("generated")
         self.assertEqual(parsed, doc)
         self.assertEqual(parsed["tool"], "kvbench")
-        self.assertEqual(parsed["version"], "0.2.2")
+        self.assertEqual(parsed["version"], "0.2.3")
         self.assertEqual(parsed["command"], "kvbench --ops 100 --clients 2")
         self.assertEqual(parsed["workload"]["ops"], 100)
         self.assertEqual(parsed["workload"]["clients"], 2)
@@ -127,6 +127,36 @@ class TestReport(unittest.TestCase):
         self.assertIn("amortized per-op", text)
         parsed = json.loads(render_json([_result()], workload, "kvbench"))
         self.assertEqual(parsed["workload"]["pipeline"], 10)
+
+    def test_time_series_in_reports(self):
+        workload = _workload()
+        result = BenchmarkResult(
+            name="cinder", ops=3, elapsed_s=2.5, errors=0,
+            latencies_ns=[1_000_000, 2_000_000, 4_000_000],
+            times_s=[0.2, 0.9, 2.3],
+        )
+        parsed = json.loads(render_json([result], workload, "kvbench"))
+        series = parsed["results"][0]["time_series"]
+        self.assertEqual(len(series), 3)
+        self.assertEqual(series[0]["ops"], 2)
+        self.assertAlmostEqual(series[0]["mean_ms"], 1.5)
+        self.assertEqual(series[1]["ops"], 0)  # empty second kept
+        self.assertEqual(series[2]["ops"], 1)
+        text = render_markdown([result], workload, "kvbench")
+        self.assertIn("## Latency over time", text)
+        self.assertIn("Latency over time — cinder", text)
+        self.assertIn("| 0 | 2 | 1.500 | 2.000 |", text)
+        self.assertIn("| 1 | 0 | 0.000 | 0.000 |", text)
+        self.assertIn("a second with 0 ops marks a stall", text)
+
+    def test_time_series_empty_without_times(self):
+        # Results built without times (e.g. older callers) render no
+        # time-series section and an empty series in JSON.
+        parsed = json.loads(render_json([_result()], _workload(),
+                                        "kvbench"))
+        self.assertEqual(parsed["results"][0]["time_series"], [])
+        text = render_markdown([_result()], _workload(), "kvbench")
+        self.assertNotIn("## Latency over time", text)
 
     def test_json_path_for(self):
         self.assertEqual(json_path_for("report.md", None), "report.json")

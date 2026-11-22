@@ -16,7 +16,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from .stats import histogram, summarize
+from .stats import histogram, summarize, time_series
 
 
 @dataclass
@@ -56,6 +56,10 @@ class BenchmarkResult:
     errors: int = 0
     error_sample: str = ""
     latencies_ns: list = field(default_factory=list)
+    # Completion time of each op in latencies_ns, in seconds since the
+    # run started. Parallel to latencies_ns: one entry per successful
+    # op, in the same order.
+    times_s: list = field(default_factory=list)
 
     @property
     def ops_per_sec(self):
@@ -68,6 +72,14 @@ class BenchmarkResult:
     @property
     def histogram(self):
         return histogram(self.latencies_ns)
+
+    @property
+    def time_series(self):
+        # Results built without completion times (e.g. older callers)
+        # have no series rather than an error.
+        if not self.times_s:
+            return []
+        return time_series(self.latencies_ns, self.times_s)
 
 
 class DictStore:
@@ -146,6 +158,7 @@ def run_workload(client_factory, workload, name):
     per_thread = workload.ops // workload.clients
     remainder = workload.ops % workload.clients
     latencies = []
+    times = []
     errors = 0
     error_sample = ""
     lock = threading.Lock()
@@ -156,6 +169,7 @@ def run_workload(client_factory, workload, name):
         value = "x" * workload.value_size
         client = client_factory()
         local_lat = []
+        local_times = []
         local_errors = 0
         local_sample = ""
         try:
@@ -204,6 +218,10 @@ def run_workload(client_factory, workload, name):
                 # Amortized per-op latency: the batch round trip divided
                 # by the batch size (see Workload.pipeline).
                 per_op_ns = batch_ns // batch_size
+                # Completion time of this batch, in seconds since the
+                # run started; every op in the batch shares it, so the
+                # per-second series buckets by batch completion.
+                end_s = time.perf_counter() - start
                 for reply in replies:
                     if isinstance(reply, Exception):
                         local_errors += 1
@@ -212,11 +230,13 @@ def run_workload(client_factory, workload, name):
                                             f"{reply}")
                         continue
                     local_lat.append(per_op_ns)
+                    local_times.append(end_s)
                 remaining -= batch_size
         finally:
             client.close()
         with lock:
             latencies.extend(local_lat)
+            times.extend(local_times)
             errors += local_errors
             if local_sample and not error_sample:
                 error_sample = local_sample
@@ -239,4 +259,5 @@ def run_workload(client_factory, workload, name):
         errors=errors,
         error_sample=error_sample,
         latencies_ns=latencies,
+        times_s=times,
     )

@@ -2,7 +2,7 @@
 
 import unittest
 
-from kvbench.stats import histogram, percentile, summarize
+from kvbench.stats import histogram, percentile, summarize, time_series
 
 
 class TestPercentile(unittest.TestCase):
@@ -75,6 +75,31 @@ class TestHistogram(unittest.TestCase):
 
     def test_empty(self):
         self.assertEqual(histogram([]), [])
+
+
+class TestTimeSeries(unittest.TestCase):
+    def test_known_times(self):
+        # 1 ms and 2 ms ops in second 0, one 4 ms op in second 2:
+        # second 1 is empty and must still appear.
+        series = time_series(
+            [1_000_000, 2_000_000, 4_000_000], [0.2, 0.9, 2.3])
+        self.assertEqual(len(series), 3)
+        self.assertEqual(series[0],
+                         {"second": 0, "ops": 2, "mean_ms": 1.5,
+                          "max_ms": 2.0})
+        self.assertEqual(series[1],
+                         {"second": 1, "ops": 0, "mean_ms": 0.0,
+                          "max_ms": 0.0})
+        self.assertEqual(series[2],
+                         {"second": 2, "ops": 1, "mean_ms": 4.0,
+                          "max_ms": 4.0})
+
+    def test_empty(self):
+        self.assertEqual(time_series([], []), [])
+
+    def test_mismatched_lengths_raise(self):
+        with self.assertRaises(ValueError):
+            time_series([1_000_000], [0.1, 0.2])
 
 
 if __name__ == "__main__":
