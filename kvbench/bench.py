@@ -98,6 +98,11 @@ class Workload:
     # the reports can record what the run was gated on.
     slo_p99_ms: float = None
     slo_error_rate_pct: float = None
+    # Per-operation SLO thresholds: op name ("SET"/"GET"/"INCR") to a
+    # (p99_ms, error_rate_pct) pair, either of which may be None.
+    # Empty means no per-op gate; the global thresholds above still
+    # apply. Validated the same way as the global thresholds.
+    slo_per_op: dict = field(default_factory=dict)
 
     def __post_init__(self):
         if self.clients <= 0 or self.keys <= 0:
@@ -133,6 +138,22 @@ class Workload:
                 0 <= self.slo_error_rate_pct <= 100):
             raise ValueError(
                 "SLO error-rate threshold must be between 0 and 100")
+        for op, thresholds in self.slo_per_op.items():
+            if op not in ("SET", "GET", "INCR"):
+                raise ValueError(
+                    "per-op SLO op must be SET, GET or INCR")
+            p99_ms, error_rate_pct = thresholds
+            if p99_ms is not None and p99_ms < 0:
+                raise ValueError(
+                    "per-op SLO p99 threshold must be non-negative")
+            if error_rate_pct is not None and not (
+                    0 <= error_rate_pct <= 100):
+                raise ValueError(
+                    "per-op SLO error-rate threshold must be "
+                    "between 0 and 100")
+            if p99_ms is None and error_rate_pct is None:
+                raise ValueError(
+                    "per-op SLO must set at least one threshold")
         total = self.set_weight + self.get_weight + self.incr_weight
         if total <= 0:
             raise ValueError("at least one op weight must be positive")
@@ -156,6 +177,11 @@ class BenchmarkResult:
     # latencies_ns, split by operation, so the report can show
     # per-type ops/sec and latency percentiles.
     latencies_by_op: dict = field(default_factory=dict)
+    # Per-op error counts, keyed by op name ("SET", "GET", "INCR").
+    # Together with latencies_by_op this gives each op's attempted
+    # count (successes plus errors), so the SLO gate can cap the
+    # error rate per operation type, not just overall.
+    errors_by_op: dict = field(default_factory=dict)
     # Per-key latencies (ns), keyed by the full key string
     # ("kvbench:0", "kvbench:counter:3", ...). Each list holds the
     # same amortized per-op latencies as latencies_ns, split by key,
@@ -384,6 +410,7 @@ def run_workload(client_factory, workload, name):
     hot_ops = 0
     warmup_ops = 0
     errors = 0
+    errors_by_op = {}
     error_sample = ""
     thread_errors = []
     lock = threading.Lock()
@@ -411,7 +438,8 @@ def run_workload(client_factory, workload, name):
         def run_phase(count, phase_deadline, collect, time_base):
             """Run batches until ``count`` is exhausted or the
             deadline is reached; return (latencies, times, by_op,
-            by_key, hot, hot_lat, cold_lat, errors, sample, ops_run).
+            by_key, hot, hot_lat, cold_lat, errors, errors_by_op,
+            sample, ops_run).
 
             With ``collect`` False this is a warmup phase: batches
             still run against the backend, but no latencies, times,
@@ -428,6 +456,7 @@ def run_workload(client_factory, workload, name):
             local_hot_lat = []
             local_cold_lat = []
             local_errors = 0
+            local_errors_by_op = {}
             local_sample = ""
             done = 0
             # ``remaining`` is None in duration mode and in warmup:
@@ -478,10 +507,14 @@ def run_workload(client_factory, workload, name):
                                 replies.append(exc)
                 except Exception as exc:  # noqa: BLE001 - count and continue
                     # The whole batch failed (e.g. transport error):
-                    # every op in it counts as an error.
+                    # every op in it counts as an error, split by op
+                    # so the per-op error rate stays honest.
                     done += batch_size
                     if collect:
                         local_errors += batch_size
+                        for cmd in batch:
+                            local_errors_by_op[cmd[0]] = \
+                                local_errors_by_op.get(cmd[0], 0) + 1
                         if not local_sample:
                             local_sample = f"{type(exc).__name__}: {exc}"
                     if remaining is not None:
@@ -502,6 +535,8 @@ def run_workload(client_factory, workload, name):
                     if isinstance(reply, Exception):
                         if collect:
                             local_errors += 1
+                            local_errors_by_op[cmd[0]] = \
+                                local_errors_by_op.get(cmd[0], 0) + 1
                             if not local_sample:
                                 local_sample = (f"{type(reply).__name__}: "
                                                 f"{reply}")
@@ -522,19 +557,20 @@ def run_workload(client_factory, workload, name):
                     remaining -= batch_size
             return (local_lat, local_times, local_by_op, local_by_key,
                     local_hot, local_hot_lat, local_cold_lat,
-                    local_errors, local_sample, done)
+                    local_errors, local_errors_by_op, local_sample,
+                    done)
 
         try:
             local_warmup = 0
             if warmup_deadline is not None:
-                (_, _, _, _, _, _, _, _, _, local_warmup) = run_phase(
+                (_, _, _, _, _, _, _, _, _, _, local_warmup) = run_phase(
                     None, warmup_deadline, collect=False, time_base=start)
                 # Re-seed so the measured phase draws the same keys
                 # and op mix as a run with no warmup at all.
                 rng = random.Random(workload.seed + thread_index)
             (local_lat, local_times, local_by_op, local_by_key,
              local_hot, local_hot_lat, local_cold_lat, local_errors,
-             local_sample, _) = run_phase(
+             local_errors_by_op, local_sample, _) = run_phase(
                 op_count, deadline, collect=True,
                 time_base=measure_start)
         finally:
@@ -555,6 +591,8 @@ def run_workload(client_factory, workload, name):
             hot_ops += local_hot
             warmup_ops += local_warmup
             errors += local_errors
+            for op, count in local_errors_by_op.items():
+                errors_by_op[op] = errors_by_op.get(op, 0) + count
             if local_sample and not error_sample:
                 error_sample = local_sample
 
@@ -591,6 +629,7 @@ def run_workload(client_factory, workload, name):
         latencies_ns=latencies,
         times_s=times,
         latencies_by_op=latencies_by_op,
+        errors_by_op=errors_by_op,
         latencies_by_key=latencies_by_key,
         latencies_by_client=latencies_by_client,
         hot_latencies_ns=hot_latencies,

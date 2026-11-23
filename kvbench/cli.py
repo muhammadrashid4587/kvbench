@@ -39,6 +39,11 @@ Usage:
     # more than 1% of ops error
     python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
         --ops 20000 --clients 4 --slo-p99-ms 1 --slo-error-rate 1
+    # per-operation SLO gate: SET ops get their own p99 and error
+    # rate budgets, on top of the global gate
+    python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
+        --ops 20000 --clients 4 --slo-op SET:5,0.1 \\
+        --slo-op GET:2,0.1
 """
 
 import argparse
@@ -196,6 +201,51 @@ def _parse_client_sweep(text):
     return sorted(set(counts))
 
 
+def _parse_slo_op(text):
+    """Parse a ``--slo-op`` value into (op, p99_ms, error_rate_pct).
+
+    Form is ``OP:P99,ERR``, e.g. ``SET:5,0.1`` — SET ops breach
+    when their p99 is above 5 ms or their error rate is above 0.1%.
+    Either threshold may be left empty (``SET:5,`` gates p99 only,
+    ``SET:,0.1`` gates the error rate only), but at least one must
+    be set. The op name is case-insensitive and must be SET, GET or
+    INCR; the p99 threshold must be non-negative and the error-rate
+    threshold between 0 and 100.
+    """
+    if not text or ":" not in text:
+        raise ValueError(
+            "slo-op must be OP:P99,ERR, e.g. SET:5,0.1")
+    op, _, rest = text.partition(":")
+    op = op.strip().upper()
+    if op not in ("SET", "GET", "INCR"):
+        raise ValueError(
+            "slo-op op must be SET, GET or INCR")
+    parts = rest.split(",")
+    if len(parts) != 2:
+        raise ValueError(
+            "slo-op must be OP:P99,ERR, e.g. SET:5,0.1")
+    p99_text, rate_text = parts[0].strip(), parts[1].strip()
+    if not p99_text and not rate_text:
+        raise ValueError(
+            "slo-op must set at least one threshold, e.g. SET:5,0.1")
+    p99_ms = None
+    error_rate_pct = None
+    try:
+        if p99_text:
+            p99_ms = float(p99_text)
+        if rate_text:
+            error_rate_pct = float(rate_text)
+    except ValueError as exc:
+        raise ValueError(
+            "slo-op thresholds must be numbers, e.g. SET:5,0.1") from exc
+    if p99_ms is not None and p99_ms < 0:
+        raise ValueError("slo-op p99 threshold must be non-negative")
+    if error_rate_pct is not None and not (0 <= error_rate_pct <= 100):
+        raise ValueError(
+            "slo-op error-rate threshold must be between 0 and 100")
+    return op, p99_ms, error_rate_pct
+
+
 def _parse_host_port(text):
     """Parse a HOST:PORT target, e.g. ``127.0.0.1:6380``."""
     if ":" not in text:
@@ -316,6 +366,15 @@ def build_parser():
                         help="SLO gate: fail the run (exit 4) when any "
                         "backend's error rate is above PCT percent of "
                         "attempted ops")
+    parser.add_argument("--slo-op", action="append", default=[],
+                        metavar="OP:P99,ERR",
+                        help="per-operation SLO gate: fail the run "
+                        "(exit 4) when one operation type breaches its "
+                        "own thresholds, e.g. --slo-op SET:5,0.1 gates "
+                        "SET ops on p99 5 ms and error rate 0.1%%; "
+                        "either threshold may be left empty "
+                        "(SET:5, gates p99 only); repeatable, a later "
+                        "entry for the same op replaces the earlier one")
     return parser
 
 
@@ -353,6 +412,11 @@ def main(argv=None):
                 and args.regression_threshold < 0:
             raise ValueError(
                 "--regression-threshold must be non-negative")
+        slo_per_op = {}
+        for text in args.slo_op:
+            op, p99_ms, error_rate_pct = _parse_slo_op(text)
+            # A later entry for the same op replaces the earlier one.
+            slo_per_op[op] = (p99_ms, error_rate_pct)
     except ValueError as exc:
         print(f"kvbench: {exc}", file=sys.stderr)
         return 2
@@ -387,6 +451,7 @@ def main(argv=None):
             sweep_clients=client_counts,
             slo_p99_ms=args.slo_p99_ms,
             slo_error_rate_pct=args.slo_error_rate,
+            slo_per_op=slo_per_op,
         )
     except ValueError as exc:
         print(f"kvbench: {exc}", file=sys.stderr)
@@ -505,7 +570,8 @@ def main(argv=None):
             args.compare_file, args.regression_threshold)
     # The SLO gate is evaluated before the reports are written, so
     # the verdict lands in both reports even when the run fails.
-    slo = evaluate_slo(results, args.slo_p99_ms, args.slo_error_rate)
+    slo = evaluate_slo(results, args.slo_p99_ms, args.slo_error_rate,
+                       slo_per_op)
     write_report(results, workload, command_line, args.output,
                  comparison, slo)
     print(f"report written to {args.output}")

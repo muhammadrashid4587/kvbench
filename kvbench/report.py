@@ -47,6 +47,13 @@ def _workload_dict(workload):
         # SLO gate thresholds for this run, or null when not set.
         "slo_p99_ms": workload.slo_p99_ms,
         "slo_error_rate_pct": workload.slo_error_rate_pct,
+        # Per-operation SLO thresholds for this run: op name to
+        # {"p99_ms", "error_rate_pct"}, or null when not set.
+        "slo_per_op": (
+            {op: {"p99_ms": thresholds[0],
+                  "error_rate_pct": thresholds[1]}
+             for op, thresholds in workload.slo_per_op.items()}
+            if workload.slo_per_op else None),
     }
 
 
@@ -482,6 +489,17 @@ def _slo_lines(slo):
         thresholds.append(
             "error rate at most "
             f"{slo['error_rate_threshold_pct']:g}%")
+    if slo.get("per_op_thresholds"):
+        for op, op_thresholds in slo["per_op_thresholds"].items():
+            op_parts = []
+            if op_thresholds["p99_ms"] is not None:
+                op_parts.append(
+                    f"p99 at most {op_thresholds['p99_ms']:g} ms")
+            if op_thresholds["error_rate_pct"] is not None:
+                op_parts.append(
+                    "error rate at most "
+                    f"{op_thresholds['error_rate_pct']:g}%")
+            thresholds.append(f"{op}: " + "; ".join(op_parts))
     lines = [
         "## SLO gate",
         "",
@@ -504,6 +522,30 @@ def _slo_lines(slo):
             f"{err_limit} | {entry['verdict']} |"
         )
     lines.append("")
+    # Per-operation verdicts: one row per op that ran and was gated,
+    # so a slow SET shows up even when the overall p99 is fine.
+    per_op_rows = []
+    for entry in slo["entries"]:
+        for per_op in entry.get("per_op", []):
+            p99_limit = (
+                f"{per_op['p99_threshold_ms']:g}"
+                if per_op["p99_threshold_ms"] is not None else "—")
+            err_limit = (
+                f"{per_op['error_rate_threshold_pct']:g}%"
+                if per_op["error_rate_threshold_pct"] is not None
+                else "—")
+            per_op_rows.append(
+                f"| {entry['name']} | {per_op['op']} | "
+                f"{per_op['ops']} | {per_op['p99_ms']:.3f} | "
+                f"{p99_limit} | {per_op['error_rate_pct']:.2f}% | "
+                f"{err_limit} | {per_op['verdict']} |"
+            )
+    if per_op_rows:
+        lines += [
+            "| Backend | Op | Ops | p99 (ms) | p99 limit (ms) | "
+            "Error rate | Error limit | Verdict |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
+        ] + per_op_rows + [""]
     if slo["breaches"]:
         lines.append(
             f"SLO gate: FAILED — {slo['breaches']} backend(s) "
@@ -749,7 +791,8 @@ def render_markdown(results, workload, command_line, comparison=None,
             )
     if slo is not None:
         # Name only the thresholds that were set: the gate applies
-        # to whichever of the two was given, or both.
+        # to whichever of the two was given, or both, plus any
+        # per-operation thresholds.
         slo_thresholds = []
         if slo["p99_threshold_ms"] is not None:
             slo_thresholds.append(
@@ -758,6 +801,18 @@ def render_markdown(results, workload, command_line, comparison=None,
             slo_thresholds.append(
                 "error rate at most "
                 f"{slo['error_rate_threshold_pct']:g}%")
+        if slo.get("per_op_thresholds"):
+            for op, op_thresholds in slo["per_op_thresholds"].items():
+                op_parts = []
+                if op_thresholds["p99_ms"] is not None:
+                    op_parts.append(
+                        f"p99 at most {op_thresholds['p99_ms']:g} ms")
+                if op_thresholds["error_rate_pct"] is not None:
+                    op_parts.append(
+                        "error rate at most "
+                        f"{op_thresholds['error_rate_pct']:g}%")
+                slo_thresholds.append(
+                    f"{op} " + " and ".join(op_parts))
         lines.append(
             "- The SLO gate section checks each backend against "
             + " and ".join(slo_thresholds)

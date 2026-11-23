@@ -108,6 +108,67 @@ class TestDictBaseline(unittest.TestCase):
         self.assertIsInstance(replies[1], ValueError)
         self.assertEqual(replies[2], "v")
 
+    def test_errors_split_by_op(self):
+        # A client that fails every SET (but serves GET/INCR) must
+        # record the failures per op, so a per-op error-rate SLO can
+        # gate on SET alone. SET attempts are errors, GET/INCR
+        # attempts are successes, and the per-op counts add back up
+        # to the global error count.
+        class FailingSetClient:
+            def __init__(self):
+                self._inner = DictClient()
+
+            def command(self, *args):
+                if args[0] == "SET":
+                    raise RuntimeError("SET rejected")
+                return self._inner.command(*args)
+
+            def pipeline(self, commands):
+                replies = []
+                for cmd in commands:
+                    try:
+                        replies.append(self.command(*cmd))
+                    except Exception as exc:  # noqa: BLE001
+                        replies.append(exc)
+                return replies
+
+            def close(self):
+                pass
+
+        workload = Workload(ops=200, clients=2, keys=20, value_size=8,
+                            set_weight=50, get_weight=40, incr_weight=10)
+        result = run_workload(FailingSetClient, workload, "flaky")
+        self.assertGreater(result.errors, 0)
+        self.assertEqual(sum(result.errors_by_op.values()),
+                         result.errors)
+        self.assertEqual(set(result.errors_by_op), {"SET"})
+        attempted_set = (result.per_op_summary.get("SET", {})
+                         .get("count", 0) + result.errors_by_op["SET"])
+        self.assertGreater(attempted_set, 0)
+        self.assertEqual(result.errors, attempted_set)
+
+    def test_whole_batch_failure_split_by_op(self):
+        # A client whose pipeline raises outright fails every op in
+        # the batch; the failures still split by op.
+        class DeadClient:
+            def command(self, *args):
+                raise ConnectionError("gone")
+
+            def pipeline(self, commands):
+                raise ConnectionError("gone")
+
+            def close(self):
+                pass
+
+        workload = Workload(ops=40, clients=2, keys=20, value_size=8,
+                            set_weight=50, get_weight=40, incr_weight=10,
+                            pipeline=4)
+        result = run_workload(DeadClient, workload, "dead")
+        self.assertEqual(result.errors, 40)
+        self.assertEqual(sum(result.errors_by_op.values()), 40)
+        self.assertEqual(set(result.errors_by_op),
+                         {"SET", "GET", "INCR"})
+
     def test_client_factory_failure_surfaces(self):
         # A client that cannot connect used to die silently inside the
         # worker thread and produce a 0-op result; the caller must see

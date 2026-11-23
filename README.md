@@ -67,7 +67,12 @@ C. Pure Python 3 standard library, no dependencies.
   and fail the run (exit code 4) when a backend breaches either
   threshold, with the gate verdict in both reports — so a
   benchmark in CI stays green only while the server stays fast
-  and reliable enough.
+  and reliable enough. With `--slo-op OP:P99,ERR` (repeatable)
+  each operation type carries its own p99 and error-rate
+  thresholds — e.g. `--slo-op SET:5,0.1` gates SET ops on p99
+  5 ms and error rate 0.1% — with per-op verdicts in both
+  reports, on top of the global gate, so a slow write fails the
+  run even when the overall p99 is fine.
 - A baseline mode that runs the exact same workload against an
   in-process Python dict, so the report can compare the server with a
   no-network upper bound on the same machine.
@@ -154,6 +159,12 @@ python -m kvbench.cli --ops 20000 --clients 4 \
 python -m kvbench.cli --ops 20000 --clients 4 \
     --slo-p99-ms 1 --slo-error-rate 1
 
+# per-operation SLOs: SET ops get their own p99 and error-rate
+# budgets, on top of the global gate — either threshold may be
+# left empty (SET:5, gates p99 only)
+python -m kvbench.cli --ops 20000 --clients 4 \
+    --slo-op SET:5,0.1 --slo-op GET:2,0.1
+
 # also write a per-second throughput CSV for plotting
 python -m kvbench.cli --ops 20000 --clients 4 --duration 10s \
     --csv timeseries.csv
@@ -210,7 +221,13 @@ rose by more than that many percent, versus the baseline file),
 `--slo-p99-ms` (SLO gate: exit 4 when any backend's measured p99
 latency is above that many milliseconds),
 `--slo-error-rate` (SLO gate: exit 4 when any backend's error rate
-is above that many percent of attempted ops).
+is above that many percent of attempted ops),
+`--slo-op OP:P99,ERR` (repeatable: per-operation SLO gate — gate
+one operation type on its own p99 and error-rate thresholds, e.g.
+`SET:5,0.1` means SET ops breach when their p99 is above 5 ms or
+their error rate is above 0.1%; either threshold may be left empty,
+e.g. `SET:5,` gates p99 only; a later entry for the same op
+replaces the earlier one).
 
 Every run writes a JSON report alongside the Markdown one, with the
 same workload settings and per-backend results (ops, ops/sec, elapsed,
@@ -274,11 +291,22 @@ needs to breach one of them to fail. Exactly at the threshold
 still passes, so a threshold of 0 only fails when something
 actually went wrong.
 
+With `--slo-op OP:P99,ERR` (repeatable) each operation type gets
+its own budgets on top of the global gate: `SET:5,0.1` gates SET
+ops on p99 5 ms and error rate 0.1%, so a slow write fails the run
+even when the overall p99 is fine. Either threshold may be left
+empty (`SET:5,` gates p99 only, `SET:,0.1` gates the error rate
+only); a later entry for the same op replaces the earlier one.
+An op that never ran in the mix has no per-op verdict — there is
+nothing to gate.
+
 Both reports carry the gate: the Markdown report gains an SLO
 gate section with the thresholds, the measured p99 and error rate
-per backend, and a `pass`/`breach` verdict, and the JSON report
-carries the same gate under `slo` (with the thresholds also
-recorded under `workload`). The gate is evaluated after the
+per backend, and a `pass`/`breach` verdict, plus a per-operation
+table with the same verdicts per op when `--slo-op` was given,
+and the JSON report carries the same gate under `slo` (with the
+thresholds also recorded under `workload`, and the per-op entries
+under each backend's `per_op`). The gate is evaluated after the
 reports are written, so a breached run still leaves a report
 showing the verdict — and then the process exits 4, a distinct
 code from the regression gate's 3. A run that breaches both gates
@@ -401,6 +429,11 @@ make test
 
 ## Roadmap
 
+- ~~Per-operation SLOs (`--slo-op OP:P99,ERR`, repeatable): each
+  operation type carries its own p99 and error-rate thresholds on
+  top of the global SLO gate, with per-op verdicts in both the
+  Markdown and JSON reports, and a breach fails the run (exit 4)
+  even when the overall p99 is fine.~~ Done in 0.15.0.
 - ~~SLO gate (`--slo-p99-ms` / `--slo-error-rate`): fail the run
   (exit 4) when a backend's measured p99 latency or error rate
   breaches the threshold, with the gate verdict in both the
