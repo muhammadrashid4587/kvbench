@@ -30,6 +30,11 @@ Usage:
     python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
         --ops 20000 --clients 4 --history
     python -m kvbench.cli --show-history
+    # compare this run against a previous run's JSON report, side
+    # by side, and fail the run when it regressed past 5%
+    python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
+        --ops 20000 --clients 4 --compare-file report.json \\
+        --regression-threshold 5
 """
 
 import argparse
@@ -39,9 +44,11 @@ import sys
 from . import __version__
 from .bench import DictClient, Workload, format_duration, \
     run_client_sweep, run_keyspace_sweep, run_workload
+from .compare import compare_results, format_verdict, load_baseline
 from .history import DEFAULT_HISTORY_FILE, format_history, \
     load_history, record_run
-from .report import render_csv, write_csv, write_json, write_report
+from .report import _workload_dict, render_csv, write_csv, write_json, \
+    write_report
 from .resp import RespClient
 
 
@@ -282,6 +289,18 @@ def build_parser():
     parser.add_argument("--history-limit", type=int, default=20,
                         help="how many recent runs --show-history prints "
                         "(default 20)")
+    parser.add_argument("--compare-file", default=None, metavar="PATH",
+                        help="compare this run against a previous run's "
+                        "JSON report (e.g. report.json): ops/sec and "
+                        "p99 side by side per backend, with the "
+                        "percentage change and a verdict in both "
+                        "reports")
+    parser.add_argument("--regression-threshold", type=float, default=None,
+                        metavar="PCT",
+                        help="with --compare-file, fail the run (exit 3) "
+                        "when any backend's ops/sec fell by more than "
+                        "PCT percent, or its p99 rose by more than PCT "
+                        "percent, versus the baseline file")
     return parser
 
 
@@ -309,9 +328,28 @@ def main(argv=None):
             raise ValueError(
                 "--ops and --duration are mutually exclusive: "
                 "pick a fixed op count or a fixed run time, not both")
+        if args.regression_threshold is not None \
+                and args.compare_file is None:
+            raise ValueError(
+                "--regression-threshold needs --compare-file: "
+                "there is nothing to compare against without a "
+                "baseline report")
+        if args.regression_threshold is not None \
+                and args.regression_threshold < 0:
+            raise ValueError(
+                "--regression-threshold must be non-negative")
     except ValueError as exc:
         print(f"kvbench: {exc}", file=sys.stderr)
         return 2
+    # Load the baseline report before running anything: a bad path
+    # fails fast instead of after a benchmark that took minutes.
+    baseline_doc = None
+    if args.compare_file:
+        try:
+            baseline_doc = load_baseline(args.compare_file)
+        except ValueError as exc:
+            print(f"kvbench: {exc}", file=sys.stderr)
+            return 1
     try:
         workload = Workload(
             ops=(args.ops if args.ops is not None else
@@ -443,10 +481,16 @@ def main(argv=None):
         _run_sweep(DictClient, baseline)
         _run_client_sweep(DictClient, baseline)
 
-    write_report(results, workload, command_line, args.output)
+    comparison = None
+    if baseline_doc is not None:
+        comparison = compare_results(
+            results, baseline_doc, _workload_dict(workload),
+            args.compare_file, args.regression_threshold)
+    write_report(results, workload, command_line, args.output,
+                 comparison)
     print(f"report written to {args.output}")
     json_path = json_path_for(args.output, args.json)
-    write_json(results, workload, command_line, json_path)
+    write_json(results, workload, command_line, json_path, comparison)
     print(f"JSON report written to {json_path}")
     if args.csv:
         write_csv(results, args.csv)
@@ -454,6 +498,24 @@ def main(argv=None):
     if args.history:
         count = record_run(history_path, results, workload, command_line)
         print(f"recorded {count} run(s) in history file {history_path}")
+    if comparison is not None:
+        for entry in comparison["entries"]:
+            print("  " + format_verdict(entry,
+                                         comparison["threshold_pct"]))
+        if not comparison["workload_matches"]:
+            print(
+                "kvbench: warning: the workload differs from the "
+                "baseline run ("
+                + ", ".join(comparison["workload_differences"])
+                + "), so the comparison is approximate",
+                file=sys.stderr)
+        if comparison["regressions"]:
+            print(
+                f"kvbench: {comparison['regressions']} backend(s) "
+                "regressed beyond the "
+                f"{comparison['threshold_pct']:g}% threshold",
+                file=sys.stderr)
+            return 3
     return 0
 
 

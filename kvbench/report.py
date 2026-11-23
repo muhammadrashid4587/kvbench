@@ -81,9 +81,9 @@ def _result_dict(result, top_n=5):
     }
 
 
-def to_json_dict(results, workload, command_line):
+def to_json_dict(results, workload, command_line, comparison=None):
     """Build the JSON-serializable report document."""
-    return {
+    doc = {
         "tool": "kvbench",
         "version": __version__,
         "generated": datetime.now(timezone.utc).isoformat(),
@@ -95,18 +95,22 @@ def to_json_dict(results, workload, command_line):
         "workload": _workload_dict(workload),
         "results": [_result_dict(r, workload.hot_keys) for r in results],
     }
+    if comparison is not None:
+        doc["comparison"] = comparison
+    return doc
 
 
-def render_json(results, workload, command_line):
+def render_json(results, workload, command_line, comparison=None):
     """Render the report as a JSON string."""
     return json.dumps(
-        to_json_dict(results, workload, command_line), indent=2
+        to_json_dict(results, workload, command_line, comparison),
+        indent=2,
     ) + "\n"
 
 
-def write_json(results, workload, command_line, path):
+def write_json(results, workload, command_line, path, comparison=None):
     """Write the JSON report to ``path`` and return its text."""
-    text = render_json(results, workload, command_line)
+    text = render_json(results, workload, command_line, comparison)
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
     return text
@@ -371,7 +375,88 @@ def _time_series_lines(result):
     return lines
 
 
-def render_markdown(results, workload, command_line):
+def _comparison_lines(comparison):
+    """Side-by-side comparison section, or [] when no comparison.
+
+    One row per backend matched by name, with the current and
+    baseline ops/sec and p99 and the percentage change of each,
+    plus a verdict line per backend. Backends present in only one
+    of the two runs are named rather than silently dropped, and a
+    workload that differs from the baseline run's is flagged: the
+    numbers still print, but the comparison is approximate.
+    """
+    if not comparison:
+        return []
+    lines = [
+        "## Comparison with previous run",
+        "",
+        f"Baseline: `{comparison['file']}`",
+    ]
+    if comparison.get("baseline_generated"):
+        lines.append(
+            f"Baseline generated: {comparison['baseline_generated']}")
+    if not comparison["workload_matches"]:
+        lines.append(
+            "Warning: the workload differs from the baseline run "
+            f"({', '.join(comparison['workload_differences'])}), so "
+            "this comparison is approximate — re-run with the same "
+            "workload for an apples-to-apples comparison."
+        )
+    lines.append("")
+    if comparison["entries"]:
+        lines += [
+            "| Backend | Ops/sec now | Ops/sec prev | Ops/sec Δ | "
+            "p99 now (ms) | p99 prev (ms) | p99 Δ | Verdict |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        ]
+        for entry in comparison["entries"]:
+            ops_delta = entry["ops_sec_delta_pct"]
+            p99_delta = entry["p99_delta_pct"]
+            ops_delta_text = (f"{ops_delta:+.1f}%"
+                              if ops_delta is not None else "n/a")
+            p99_delta_text = (f"{p99_delta:+.1f}%"
+                              if p99_delta is not None else "n/a")
+            lines.append(
+                f"| {entry['name']} | "
+                f"{entry['ops_per_sec']:,.0f} | "
+                f"{entry['baseline_ops_per_sec']:,.0f} | "
+                f"{ops_delta_text} | "
+                f"{entry['p99_ms']:.3f} | "
+                f"{entry['baseline_p99_ms']:.3f} | "
+                f"{p99_delta_text} | {entry['verdict']} |"
+            )
+        lines.append("")
+    for name in comparison["unmatched_baseline"]:
+        lines.append(
+            f"- `{name}` is in the baseline run but not in this run, "
+            "so it has no comparison."
+        )
+    for name in comparison["unmatched_current"]:
+        lines.append(
+            f"- `{name}` is in this run but not in the baseline run, "
+            "so it has no comparison."
+        )
+    if comparison["unmatched_baseline"] or \
+            comparison["unmatched_current"]:
+        lines.append("")
+    if comparison["threshold_pct"] is not None:
+        if comparison["regressions"]:
+            lines.append(
+                f"Regression gate: {comparison['regressions']} backend(s) "
+                "regressed beyond the "
+                f"{comparison['threshold_pct']:g}% threshold — "
+                "ops/sec down, or p99 up, by more than that."
+            )
+        else:
+            lines.append(
+                "Regression gate: no backend regressed beyond the "
+                f"{comparison['threshold_pct']:g}% threshold."
+            )
+        lines.append("")
+    return lines
+
+
+def render_markdown(results, workload, command_line, comparison=None):
     """Render one or more BenchmarkResults as a Markdown report."""
     if workload.duration_s is not None:
         scope_line = (
@@ -453,6 +538,9 @@ def render_markdown(results, workload, command_line):
     ]
     for result in results:
         lines.append(_row(result))
+    comparison_lines = _comparison_lines(comparison)
+    if comparison_lines:
+        lines += [""] + comparison_lines
     sweep_lines = []
     for result in results:
         sweep_lines += _sweep_lines(result)
@@ -571,6 +659,29 @@ def render_markdown(results, workload, command_line):
             "clients stops helping and the server saturates; the main "
             "results table above uses the base client count."
         )
+    if comparison is not None:
+        lines.append(
+            "- The Comparison with previous run section compares "
+            "this run against an earlier JSON report "
+            f"(`{comparison['file']}`): ops/sec and p99 side by "
+            "side per backend, with the percentage change and a "
+            "verdict. Backends are matched by name; a backend in "
+            "only one of the two runs has no comparison."
+        )
+        if not comparison["workload_matches"]:
+            lines.append(
+                "- The baseline run used a different workload "
+                f"({', '.join(comparison['workload_differences'])}), "
+                "so the comparison is approximate."
+            )
+        if comparison["threshold_pct"] is not None:
+            lines.append(
+                "- The regression gate treats a backend as "
+                "regressed when its ops/sec fell by more than "
+                f"{comparison['threshold_pct']:g}%, or its p99 rose "
+                f"by more than {comparison['threshold_pct']:g}%, "
+                "versus the baseline run."
+            )
     for result in results:
         if result.error_sample:
             lines.append(
@@ -580,9 +691,9 @@ def render_markdown(results, workload, command_line):
     return "\n".join(lines)
 
 
-def write_report(results, workload, command_line, path):
+def write_report(results, workload, command_line, path, comparison=None):
     """Write the Markdown report to ``path`` and return its text."""
-    text = render_markdown(results, workload, command_line)
+    text = render_markdown(results, workload, command_line, comparison)
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
     return text

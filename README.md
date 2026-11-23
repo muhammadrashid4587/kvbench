@@ -138,6 +138,11 @@ python -m kvbench.cli --ops 20000 --sweep-clients 1,2,4,8
 python -m kvbench.cli --ops 20000 --clients 4 --history
 python -m kvbench.cli --show-history
 
+# compare this run against a previous run's JSON report, side by
+# side, and fail the run when it regressed past 5%
+python -m kvbench.cli --ops 20000 --clients 4 \
+    --compare-file report.json --regression-threshold 5
+
 # also write a per-second throughput CSV for plotting
 python -m kvbench.cli --ops 20000 --clients 4 --duration 10s \
     --csv timeseries.csv
@@ -184,7 +189,13 @@ be compared against it), `--history-file` (where the history lives,
 default `~/.kvbench/history.jsonl`), `--show-history` (print the
 recorded run history and exit, no benchmark is run),
 `--history-limit` (how many recent runs `--show-history` prints,
-default 20).
+default 20),
+`--compare-file` (compare this run against a previous run's JSON
+report — ops/sec and p99 side by side per backend, with the
+percentage change and a verdict in both reports; see below),
+`--regression-threshold` (with `--compare-file`, exit 3 when any
+backend's ops/sec fell by more than that many percent, or its p99
+rose by more than that many percent, versus the baseline file).
 
 Every run writes a JSON report alongside the Markdown one, with the
 same workload settings and per-backend results (ops, ops/sec, elapsed,
@@ -207,6 +218,34 @@ versus the previous run of the same backend, so a cinder speedup —
 or a regression — reads at a glance. The history file is plain
 JSONL, one record per line, and a corrupt line is skipped on load
 rather than failing the trend view.
+
+## Comparing against a previous run
+
+With `--compare-file PATH` the run is compared against a previous
+run's JSON report (the `--json` output of an earlier run, usually
+the last one): each backend is matched by name, and both reports
+gain a Comparison with previous run section with ops/sec and p99
+side by side, the percentage change of each, and a verdict per
+backend — `faster`, `slower`, `about the same` (within 1%), or
+`regression` when a threshold was given and passed. Backends in
+only one of the two runs are named rather than silently dropped,
+and when the workload differs from the baseline run's (ops,
+clients, keys, mix, pipeline, ...) the reports warn that the
+comparison is approximate, so a comparison only means something
+when both runs used the same workload. The JSON report carries the
+same comparison under `comparison`, with the baseline file, its
+generation time, the workload differences, and the per-backend
+entries.
+
+With `--regression-threshold PCT` the comparison becomes a gate:
+the run exits 3 when any backend's ops/sec fell by more than PCT
+percent, or its p99 rose by more than PCT percent, versus the
+baseline file — after the reports are written, so the regression
+is visible in them. A missing or unreadable baseline file fails
+the run before any benchmark starts. `--regression-threshold`
+without `--compare-file` is rejected. Small runs are noisy on a
+shared machine, so use a threshold well above run-to-run jitter
+for the workload you gate on.
 
 ## Report format
 
@@ -317,6 +356,11 @@ make test
 
 ## Roadmap
 
+- ~~Compare against a previous run (`--compare-file PATH`):
+  load an earlier run's JSON report and compare the current run
+  against it side by side (ops/sec and p99 deltas, verdict lines),
+  with `--regression-threshold PCT` failing the run when a backend
+  regresses past the threshold.~~ Done in 0.13.0.
 - ~~Throughput-over-time CSV export (`--csv PATH`): one row per
   backend per second with ops, ops/sec, mean and max latency, so
   throughput over time plots directly without parsing the
