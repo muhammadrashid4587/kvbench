@@ -12,8 +12,8 @@ import tempfile
 import threading
 import unittest
 
-from kvbench.cli import MIX_PRESETS, _parse_duration, _parse_host_port, \
-    _parse_keyspace_sweep, _parse_mix, build_parser, main
+from kvbench.cli import MIX_PRESETS, _parse_client_sweep, _parse_duration, \
+    _parse_host_port, _parse_keyspace_sweep, _parse_mix, build_parser, main
 
 
 class _FakeRespHandler(socketserver.StreamRequestHandler):
@@ -335,6 +335,77 @@ class TestSweepRun(unittest.TestCase):
     def test_bad_sweep_rejected(self):
         for bad in ("bogus", "0", "10,abc", "10,,20"):
             code = main(["--sweep-keyspace", bad, "--ops", "10"])
+            self.assertEqual(code, 2, msg=bad)
+
+
+class TestParseClientSweep(unittest.TestCase):
+    def test_comma_list(self):
+        self.assertEqual(_parse_client_sweep("1,2,4,8"), [1, 2, 4, 8])
+
+    def test_single_count(self):
+        self.assertEqual(_parse_client_sweep("4"), [4])
+
+    def test_sorted_and_deduped(self):
+        self.assertEqual(_parse_client_sweep("4,1,4"), [1, 4])
+        self.assertEqual(_parse_client_sweep(" 2 , 8 "), [2, 8])
+
+    def test_invalid(self):
+        for bad in ("", "0", "-2", "1,abc", "1,,2", "1.5", "2,0", ",4"):
+            with self.assertRaises(ValueError, msg=bad):
+                _parse_client_sweep(bad)
+
+
+class TestClientSweepFlag(unittest.TestCase):
+    def test_defaults_no_sweep(self):
+        args = build_parser().parse_args([])
+        self.assertIsNone(args.sweep_clients)
+
+    def test_sweep_value_kept(self):
+        args = build_parser().parse_args(
+            ["--sweep-clients", "1,2,4"])
+        self.assertEqual(args.sweep_clients, "1,2,4")
+
+
+class TestClientSweepRun(unittest.TestCase):
+    def test_client_sweep_run_reports_per_count(self):
+        server = _start_server()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                output = os.path.join(tmp, "report.md")
+                code = main([
+                    "--host", "127.0.0.1",
+                    "--port", str(server.server_address[1]),
+                    "--ops", "200", "--clients", "2",
+                    "--sweep-clients", "1,4",
+                    "--output", output,
+                ])
+                self.assertEqual(code, 0)
+                with open(output, encoding="utf-8") as f:
+                    text = f.read()
+                self.assertIn("Client sweep: 1, 4 clients", text)
+                self.assertIn("## Client sweep", text)
+                self.assertIn("| 1 | 200 |", text)
+                self.assertIn("| 4 | 200 |", text)
+                self.assertIn("how concurrency affects throughput", text)
+                with open(os.path.join(tmp, "report.json"),
+                          encoding="utf-8") as f:
+                    parsed = json.load(f)
+                self.assertEqual(parsed["workload"]["sweep_clients"],
+                                 [1, 4])
+                sweep = parsed["results"][0]["client_sweep"]
+                self.assertEqual(len(sweep), 2)
+                self.assertEqual(sweep[0]["clients"], 1)
+                self.assertEqual(sweep[0]["ops"], 200)
+                self.assertGreater(sweep[0]["ops_per_sec"], 0)
+                self.assertGreaterEqual(sweep[0]["p99_ms"], 0)
+                self.assertEqual(sweep[1]["clients"], 4)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_bad_client_sweep_rejected(self):
+        for bad in ("bogus", "0", "1,abc", "1,,2"):
+            code = main(["--sweep-clients", bad, "--ops", "10"])
             self.assertEqual(code, 2, msg=bad)
 
 

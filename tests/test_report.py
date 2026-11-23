@@ -115,7 +115,7 @@ class TestReport(unittest.TestCase):
         doc.pop("generated")
         self.assertEqual(parsed, doc)
         self.assertEqual(parsed["tool"], "kvbench")
-        self.assertEqual(parsed["version"], "0.9.0")
+        self.assertEqual(parsed["version"], "0.10.0")
         self.assertEqual(parsed["command"], "kvbench --ops 100 --clients 2")
         self.assertEqual(parsed["workload"]["ops"], 100)
         self.assertEqual(parsed["workload"]["clients"], 2)
@@ -384,6 +384,47 @@ class TestReport(unittest.TestCase):
         parsed = json.loads(render_json([_result()], workload, "kvbench"))
         self.assertIsNone(parsed["workload"]["sweep_keyspace"])
         self.assertEqual(parsed["results"][0]["keyspace_sweep"], [])
+
+    def test_client_sweep_in_markdown_and_json(self):
+        workload = Workload(ops=100, clients=2, keys=10, value_size=8,
+                            sweep_clients=[1, 4])
+        result = BenchmarkResult(
+            name="cinder", ops=100, elapsed_s=0.01, errors=0,
+            latencies_ns=[100_000] * 100,
+            client_sweep=[
+                {"clients": 1, "ops": 100, "ops_per_sec": 8_000,
+                 "mean_ms": 0.12, "p99_ms": 0.15},
+                {"clients": 4, "ops": 100, "ops_per_sec": 10_000,
+                 "mean_ms": 0.1, "p99_ms": 0.12},
+            ],
+        )
+        text = render_markdown([result], workload, "kvbench")
+        self.assertIn("Client sweep: 1, 4 clients", text)
+        self.assertIn("## Client sweep", text)
+        self.assertIn("Client sweep — cinder", text)
+        self.assertIn("| Clients | Ops | Ops/sec | Mean (ms) | p99 (ms) |",
+                      text)
+        self.assertIn("| 1 | 100 | 8,000 | 0.120 | 0.150 |", text)
+        self.assertIn("| 4 | 100 | 10,000 | 0.100 | 0.120 |", text)
+        self.assertIn("how concurrency affects throughput", text)
+        parsed = json.loads(render_json([result], workload, "kvbench"))
+        self.assertEqual(parsed["workload"]["sweep_clients"], [1, 4])
+        sweep = parsed["results"][0]["client_sweep"]
+        self.assertEqual(len(sweep), 2)
+        self.assertEqual(sweep[0]["clients"], 1)
+        self.assertAlmostEqual(sweep[0]["ops_per_sec"], 8_000)
+        self.assertAlmostEqual(sweep[0]["p99_ms"], 0.15)
+        self.assertEqual(sweep[1]["clients"], 4)
+
+    def test_no_client_sweep_omits_section(self):
+        workload = _workload()
+        text = render_markdown([_result()], workload, "kvbench")
+        self.assertNotIn("## Client sweep", text)
+        self.assertNotIn("Client sweep:", text)
+        self.assertNotIn("how concurrency affects throughput", text)
+        parsed = json.loads(render_json([_result()], workload, "kvbench"))
+        self.assertIsNone(parsed["workload"]["sweep_clients"])
+        self.assertEqual(parsed["results"][0]["client_sweep"], [])
 
     def test_json_path_for(self):
         self.assertEqual(json_path_for("report.md", None), "report.json")

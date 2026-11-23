@@ -47,6 +47,10 @@ C. Pure Python 3 standard library, no dependencies.
   and p99 per size, so a run shows how keyspace size affects
   throughput — a hash-table resize or a cache that stops fitting
   shows up as a step down in the sweep table.
+  With `--sweep-clients 1,2,4,8` the same workload is re-run once
+  per client count, and the reports show ops/sec and p99 per
+  count, so a run shows how concurrency affects throughput — where
+  adding clients stops helping and the server saturates.
 - Latency stats (`kvbench/stats.py`): ops/sec, mean, p50, p95, p99,
   plus a log-spaced latency histogram and a per-second time series
   (ops, mean and max latency per second) to spot stalls.
@@ -118,6 +122,10 @@ python -m kvbench.cli --ops 20000 --clients 4 --warmup 2s
 python -m kvbench.cli --ops 20000 --clients 4 \
     --sweep-keyspace 100,1000,10000,100000
 
+# sweep the client count: the same workload re-run at 1, 2, 4
+# and 8 clients, with ops/sec and p99 per count
+python -m kvbench.cli --ops 20000 --sweep-clients 1,2,4,8
+
 # record the run in the history file, then look at the ops/sec
 # trend over time (default file: ~/.kvbench/history.jsonl)
 python -m kvbench.cli --ops 20000 --clients 4 --history
@@ -152,6 +160,9 @@ warmup ends),
 add it to the report), `--sweep-keyspace` (comma-separated keyspace
 sizes, e.g. `100,1000,10000,100000`: re-run the same workload once
 per size and report ops/sec and p99 per size in both reports),
+`--sweep-clients` (comma-separated client counts, e.g. `1,2,4,8`:
+re-run the same workload once per count and report ops/sec and p99
+per count in both reports),
 `--output` (default report.md), `--json`
 (default: same name as `--output` with a `.json` extension),
 `--history` (record this run in the history file so later runs can
@@ -211,6 +222,14 @@ keyspace size on throughput reads at a glance. The JSON report
 carries the same rows per result under `keyspace_sweep`, and the
 workload section carries the swept sizes under `sweep_keyspace`.
 
+With `--sweep-clients` the report has a Client sweep section right
+below the Keyspace sweep (or the results table, when there is no
+keyspace sweep): one table per backend with a row per swept count
+— clients, ops, ops/sec, mean and p99 — so the effect of
+concurrency on throughput reads at a glance. The JSON report
+carries the same rows per result under `client_sweep`, and the
+workload section carries the swept counts under `sweep_clients`.
+
 Below the table, each backend gets a per-operation stats table:
 ops, ops/sec, mean, p50, p95 and p99 latency split by SET, GET and
 INCR. Ops that never ran (e.g. INCR in an `80:20` read:write mix)
@@ -260,6 +279,9 @@ make test
 
 ## Roadmap
 
+- ~~Client-count sweep (`--sweep-clients 1,2,4,8`): re-run the
+  same workload at several client counts, with ops/sec and p99
+  per count in both reports.~~ Done in 0.10.0.
 - ~~Run history (`--history` / `--show-history`): record each run
   in a local JSONL history file (`~/.kvbench/history.jsonl`) and
   show the ops/sec trend over time, with the change versus the

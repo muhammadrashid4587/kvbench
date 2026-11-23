@@ -39,6 +39,9 @@ def _workload_dict(workload):
         # Keyspace sizes swept in this run, or null when no sweep.
         "sweep_keyspace": (list(workload.sweep_keyspace)
                            if workload.sweep_keyspace else None),
+        # Client counts swept in this run, or null when no sweep.
+        "sweep_clients": (list(workload.sweep_clients)
+                          if workload.sweep_clients else None),
     }
 
 
@@ -66,6 +69,9 @@ def _result_dict(result, top_n=5):
         # Keyspace sweep: one per-size summary per swept size
         # (keys, ops, ops/sec, mean and p99); [] when no sweep ran.
         "keyspace_sweep": result.sweep,
+        # Client-count sweep: one per-count summary per swept count
+        # (clients, ops, ops/sec, mean and p99); [] when no sweep ran.
+        "client_sweep": result.client_sweep,
     }
 
 
@@ -196,6 +202,26 @@ def _sweep_lines(result):
     return lines
 
 
+def _client_sweep_lines(result):
+    """Client-count sweep table for one result, or [] when no sweep ran."""
+    if not result.client_sweep:
+        return []
+    lines = [
+        f"### Client sweep — {result.name}",
+        "",
+        "| Clients | Ops | Ops/sec | Mean (ms) | p99 (ms) |",
+        "| ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for entry in result.client_sweep:
+        lines.append(
+            f"| {entry['clients']} | {entry['ops']} | "
+            f"{entry['ops_per_sec']:,.0f} | {entry['mean_ms']:.3f} | "
+            f"{entry['p99_ms']:.3f} |"
+        )
+    lines.append("")
+    return lines
+
+
 def _time_series_lines(result):
     """Per-second ops/latency table for one result, or [] when empty."""
     series = result.time_series
@@ -252,6 +278,16 @@ def render_markdown(results, workload, command_line):
         )
     else:
         sweep_line = None
+    if workload.sweep_clients:
+        client_sweep_line = (
+            "- Client sweep: "
+            + ", ".join(str(c) for c in workload.sweep_clients)
+            + " clients (the same workload re-run once per client "
+            "count; per-count ops/sec and p99 are in the Client "
+            "sweep section below)"
+        )
+    else:
+        client_sweep_line = None
     lines = [
         "# kvbench report",
         "",
@@ -276,6 +312,8 @@ def render_markdown(results, workload, command_line):
         lines.append(warmup_line)
     if sweep_line is not None:
         lines.append(sweep_line)
+    if client_sweep_line is not None:
+        lines.append(client_sweep_line)
     lines += [
         "",
         "## Results",
@@ -291,6 +329,11 @@ def render_markdown(results, workload, command_line):
         sweep_lines += _sweep_lines(result)
     if sweep_lines:
         lines += ["", "## Keyspace sweep", ""] + sweep_lines
+    client_sweep_lines = []
+    for result in results:
+        client_sweep_lines += _client_sweep_lines(result)
+    if client_sweep_lines:
+        lines += ["", "## Client sweep", ""] + client_sweep_lines
     per_op_lines = []
     for result in results:
         per_op_lines += _per_op_lines(result)
@@ -378,6 +421,14 @@ def render_markdown(results, workload, command_line):
             "once per keyspace size, so ops/sec and p99 per size show "
             "how keyspace size affects throughput; the main results "
             "table above uses the base keyspace size."
+        )
+    if workload.sweep_clients:
+        lines.append(
+            "- The Client sweep section re-runs the same workload "
+            "once per client count, so ops/sec and p99 per count show "
+            "how concurrency affects throughput — where adding "
+            "clients stops helping and the server saturates; the main "
+            "results table above uses the base client count."
         )
     for result in results:
         if result.error_sample:

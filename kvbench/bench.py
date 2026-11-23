@@ -85,6 +85,12 @@ class Workload:
     # ops/sec and p99 land in the reports, so a run shows how
     # keyspace size affects throughput. Empty means no sweep.
     sweep_keyspace: list = field(default_factory=list)
+    # Client counts for a sweep: when non-empty the same workload is
+    # re-run once per count (see run_client_sweep) and the per-count
+    # ops/sec and p99 land in the reports, so a run shows how
+    # concurrency affects throughput — where adding clients stops
+    # helping and the server saturates. Empty means no sweep.
+    sweep_clients: list = field(default_factory=list)
 
     def __post_init__(self):
         if self.clients <= 0 or self.keys <= 0:
@@ -109,6 +115,9 @@ class Workload:
         if any(not isinstance(size, int) or size <= 0
                for size in self.sweep_keyspace):
             raise ValueError("sweep keyspace sizes must be positive integers")
+        if any(not isinstance(count, int) or count <= 0
+               for count in self.sweep_clients):
+            raise ValueError("sweep client counts must be positive integers")
         if self.pipeline < 1:
             raise ValueError("pipeline depth must be at least 1")
         total = self.set_weight + self.get_weight + self.incr_weight
@@ -159,6 +168,12 @@ class BenchmarkResult:
     # given). The full latency samples of the sweep runs are not
     # kept — only these summaries.
     sweep: list = field(default_factory=list)
+    # Client-count sweep results for this backend: one entry per
+    # swept count, in ascending count order, each with the count
+    # (``clients``), the ops completed, and the ops/sec, mean and
+    # p99 latency of that run. Empty when no sweep ran
+    # (``--sweep-clients`` not given). Same shape as ``sweep``.
+    client_sweep: list = field(default_factory=list)
 
     @property
     def hot_hit_rate(self):
@@ -550,6 +565,39 @@ def run_keyspace_sweep(client_factory, workload, sizes):
         summary = result.summary
         out.append({
             "keys": size,
+            "ops": result.ops,
+            "ops_per_sec": result.ops_per_sec,
+            "mean_ms": summary["mean_ms"],
+            "p99_ms": summary["p99_ms"],
+        })
+    return out
+
+
+def run_client_sweep(client_factory, workload, counts):
+    """Run the same workload once per client count in ``counts``.
+
+    Each run is a fresh copy of ``workload`` with ``clients``
+    replaced by that count; everything else (ops, keys, mix,
+    distribution, pipeline, warmup, seed) is identical, so the
+    per-count numbers isolate the effect of concurrency on
+    throughput — where adding clients stops helping and the server
+    saturates. Returns a list of ``{"clients", "ops", "ops_per_sec",
+    "mean_ms", "p99_ms"}`` dicts, in the order ``counts`` was
+    given. If a run cannot reach the backend the sweep stops there
+    and the counts completed so far are returned — the caller
+    reports the shortfall.
+    """
+    out = []
+    for count in counts:
+        swept = replace(workload, clients=count)
+        try:
+            result = run_workload(client_factory, swept,
+                                  f"sweep ({count} clients)")
+        except (ConnectionError, OSError):
+            break
+        summary = result.summary
+        out.append({
+            "clients": count,
             "ops": result.ops,
             "ops_per_sec": result.ops_per_sec,
             "mean_ms": summary["mean_ms"],

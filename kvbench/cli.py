@@ -21,6 +21,10 @@ Usage:
     python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
         --ops 20000 --clients 4 \\
         --sweep-keyspace 100,1000,10000,100000 --output report.md
+    # sweep the client count: the same workload re-run at 1, 2, 4
+    # and 8 clients, with ops/sec and p99 per count
+    python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
+        --ops 20000 --sweep-clients 1,2,4,8 --output report.md
     # record the run in the history file, then compare later runs
     # against it (ops/sec trend over time)
     python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
@@ -34,7 +38,7 @@ import sys
 
 from . import __version__
 from .bench import DictClient, Workload, format_duration, \
-    run_keyspace_sweep, run_workload
+    run_client_sweep, run_keyspace_sweep, run_workload
 from .history import DEFAULT_HISTORY_FILE, format_history, \
     load_history, record_run
 from .report import write_json, write_report
@@ -153,6 +157,33 @@ def _parse_keyspace_sweep(text):
     return sorted(set(sizes))
 
 
+def _parse_client_sweep(text):
+    """Parse a ``--sweep-clients`` value into a sorted list of
+    distinct positive ints, e.g. ``1,2,4,8`` -> [1, 2, 4, 8].
+    Duplicates are dropped and the counts are sorted, so
+    ``4,1,4`` sweeps 1 then 4.
+    """
+    if not text:
+        raise ValueError(
+            "sweep-clients must list client counts, e.g. 1,2,4,8")
+    counts = []
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            raise ValueError(
+                "sweep-clients counts must be comma-separated "
+                "integers, e.g. 1,2,4,8")
+        try:
+            count = int(part)
+        except ValueError as exc:
+            raise ValueError(
+                "sweep-clients counts must be integers") from exc
+        if count <= 0:
+            raise ValueError("sweep-clients counts must be positive")
+        counts.append(count)
+    return sorted(set(counts))
+
+
 def _parse_host_port(text):
     """Parse a HOST:PORT target, e.g. ``127.0.0.1:6380``."""
     if ":" not in text:
@@ -217,6 +248,10 @@ def build_parser():
                         help="re-run the same workload once per "
                         "keyspace size, e.g. 100,1000,10000, and "
                         "report ops/sec and p99 per size")
+    parser.add_argument("--sweep-clients", default=None, metavar="COUNTS",
+                        help="re-run the same workload once per "
+                        "client count, e.g. 1,2,4,8, and report "
+                        "ops/sec and p99 per count")
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--baseline", action="store_true",
                         help="also run the in-process dict baseline")
@@ -264,6 +299,8 @@ def main(argv=None):
                     if args.warmup else 0.0)
         sweep_sizes = (_parse_keyspace_sweep(args.sweep_keyspace)
                        if args.sweep_keyspace else [])
+        client_counts = (_parse_client_sweep(args.sweep_clients)
+                         if args.sweep_clients else [])
         if duration_s is not None and args.ops is not None:
             raise ValueError(
                 "--ops and --duration are mutually exclusive: "
@@ -290,6 +327,7 @@ def main(argv=None):
             zipf_skew=args.zipf_skew,
             hot_keys=args.hot_keys,
             sweep_keyspace=sweep_sizes,
+            sweep_clients=client_counts,
         )
     except ValueError as exc:
         print(f"kvbench: {exc}", file=sys.stderr)
@@ -322,6 +360,29 @@ def main(argv=None):
                   f"after {len(result.sweep)} of {len(sweep_sizes)} "
                   "sizes (backend unreachable)", file=sys.stderr)
 
+    def _run_client_sweep(factory, result):
+        """Re-run the workload once per swept client count and
+        attach the per-count summaries to ``result``.
+
+        Prints one line per count. A sweep that stops early (the
+        backend went away mid-sweep) keeps the counts that
+        completed and says so on stderr instead of failing the
+        whole run — the main result already landed.
+        """
+        if not client_counts:
+            return
+        result.client_sweep = run_client_sweep(
+            factory, workload, client_counts)
+        for entry in result.client_sweep:
+            print(f"  client sweep {entry['clients']} clients: "
+                  f"{entry['ops_per_sec']:,.0f} ops/sec, "
+                  f"p99 {entry['p99_ms']:.3f} ms")
+        if len(result.client_sweep) < len(client_counts):
+            print(f"kvbench: client sweep on {result.name} stopped "
+                  f"after {len(result.client_sweep)} of "
+                  f"{len(client_counts)} counts (backend unreachable)",
+                  file=sys.stderr)
+
     def server_factory():
         return RespClient(args.host, args.port)
 
@@ -345,6 +406,7 @@ def main(argv=None):
           f"p95 {result.summary['p95_ms']:.3f} ms, "
           f"errors {result.errors}{_warmup_note(result)}")
     _run_sweep(server_factory, result)
+    _run_client_sweep(server_factory, result)
 
     for host, port in compare_targets:
         def compare_factory(host=host, port=port):
@@ -365,6 +427,7 @@ def main(argv=None):
               f"p95 {compared.summary['p95_ms']:.3f} ms, "
               f"errors {compared.errors}{_warmup_note(compared)}")
         _run_sweep(compare_factory, compared)
+        _run_client_sweep(compare_factory, compared)
 
     if args.baseline:
         baseline = run_workload(DictClient, workload, "baseline (dict)")
@@ -374,6 +437,7 @@ def main(argv=None):
               f"p95 {baseline.summary['p95_ms']:.3f} ms"
               f"{_warmup_note(baseline)}")
         _run_sweep(DictClient, baseline)
+        _run_client_sweep(DictClient, baseline)
 
     write_report(results, workload, command_line, args.output)
     print(f"report written to {args.output}")
