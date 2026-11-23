@@ -150,6 +150,15 @@ def build_parser():
     parser.add_argument("--pipeline", type=int, default=1,
                         help="commands sent per round trip "
                         "(1 = sequential, default 1)")
+    parser.add_argument("--distribution", default="uniform",
+                        choices=["uniform", "zipfian"],
+                        help="how keys are picked: uniform (every key "
+                        "equally likely) or zipfian (a skewed Zipfian "
+                        "distribution where a hot set takes most of "
+                        "the traffic)")
+    parser.add_argument("--zipf-skew", type=float, default=1.0,
+                        help="Zipf exponent for --distribution zipfian "
+                        "(0 = uniform, 1.0 = classic YCSB default)")
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--baseline", action="store_true",
                         help="also run the in-process dict baseline")
@@ -194,6 +203,8 @@ def main(argv=None):
             pipeline=args.pipeline,
             mix_label=mix_label,
             duration_s=duration_s,
+            distribution=args.distribution,
+            zipf_skew=args.zipf_skew,
         )
     except ValueError as exc:
         print(f"kvbench: {exc}", file=sys.stderr)

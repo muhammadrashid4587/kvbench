@@ -139,6 +139,31 @@ def _result_with_per_op():
         parsed = json.loads(render_json([_result()], workload, "kvbench"))
         self.assertEqual(parsed["workload"]["pipeline"], 10)
 
+    def test_zipfian_in_reports(self):
+        workload = Workload(ops=100, clients=2, keys=1000, value_size=8,
+                            distribution="zipfian", zipf_skew=1.0)
+        result = BenchmarkResult(
+            name="cinder", ops=100, elapsed_s=1.0, errors=0,
+            latencies_ns=[100_000] * 100, hot_ops=39)
+        text = render_markdown([result], workload, "kvbench")
+        self.assertIn("Key distribution: zipfian (skew 1", text)
+        self.assertIn("hottest 1% of keys take ~39% of ops", text)
+        self.assertIn("Hot-set hit rate on cinder: 39.0%", text)
+        parsed = json.loads(render_json([result], workload, "kvbench"))
+        self.assertEqual(parsed["workload"]["distribution"], "zipfian")
+        self.assertEqual(parsed["workload"]["zipf_skew"], 1.0)
+        self.assertAlmostEqual(parsed["results"][0]["hot_hit_rate"], 0.39)
+
+    def test_uniform_distribution_in_reports(self):
+        workload = _workload()
+        text = render_markdown([_result()], workload, "kvbench")
+        self.assertIn("Key distribution: uniform", text)
+        self.assertNotIn("Hot-set hit rate", text)
+        parsed = json.loads(render_json([_result()], workload, "kvbench"))
+        self.assertEqual(parsed["workload"]["distribution"], "uniform")
+        self.assertIsNone(parsed["workload"]["zipf_skew"])
+        self.assertEqual(parsed["results"][0]["hot_hit_rate"], 0.0)
+
     def test_time_series_in_reports(self):
         workload = _workload()
         result = BenchmarkResult(

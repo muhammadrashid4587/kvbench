@@ -139,6 +139,37 @@ class TestDictBaseline(unittest.TestCase):
             Workload(ops=10, clients=1, keys=10, pipeline=0)
 
 
+class TestZipfianDistribution(unittest.TestCase):
+    def test_zipfian_run_reports_hot_hit_rate(self):
+        # Zipfian with skew 1.0 over 1000 keys: the hottest 1% should
+        # take ~39% of ops. 20000 ops give ~0.3pp sampling error, so
+        # a ±5pp band is generous.
+        workload = Workload(ops=20000, clients=4, keys=1000,
+                            value_size=8, distribution="zipfian",
+                            zipf_skew=1.0)
+        result = run_workload(DictClient, workload, "baseline (dict)")
+        self.assertEqual(result.ops, 20000)
+        self.assertEqual(result.errors, 0)
+        self.assertAlmostEqual(result.hot_hit_rate, 0.39, delta=0.05)
+        self.assertEqual(result.hot_ops,
+                         round(result.hot_hit_rate * result.ops))
+
+    def test_uniform_run_hot_rate_is_about_one_percent(self):
+        # Uniform picking lands ~1% of ops on the hottest 1% of keys.
+        workload = Workload(ops=20000, clients=4, keys=1000,
+                            value_size=8)
+        result = run_workload(DictClient, workload, "baseline (dict)")
+        self.assertAlmostEqual(result.hot_hit_rate, 0.01, delta=0.005)
+
+    def test_zipfian_validation(self):
+        with self.assertRaises(ValueError):
+            Workload(ops=10, clients=1, keys=10,
+                     distribution="normal")
+        with self.assertRaises(ValueError):
+            Workload(ops=10, clients=1, keys=10,
+                     distribution="zipfian", zipf_skew=-1.0)
+
+
 class TestDurationMode(unittest.TestCase):
     def test_duration_run_stops_near_requested_time(self):
         # A 0.5s run against the fast dict baseline should stop

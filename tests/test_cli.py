@@ -144,6 +144,23 @@ class TestCompareFlag(unittest.TestCase):
         self.assertEqual(args.compare, [])
 
 
+class TestDistributionFlag(unittest.TestCase):
+    def test_defaults_are_uniform(self):
+        args = build_parser().parse_args([])
+        self.assertEqual(args.distribution, "uniform")
+        self.assertEqual(args.zipf_skew, 1.0)
+
+    def test_zipfian_with_skew(self):
+        args = build_parser().parse_args(
+            ["--distribution", "zipfian", "--zipf-skew", "1.5"])
+        self.assertEqual(args.distribution, "zipfian")
+        self.assertEqual(args.zipf_skew, 1.5)
+
+    def test_bad_distribution_rejected(self):
+        with self.assertRaises(SystemExit):
+            build_parser().parse_args(["--distribution", "normal"])
+
+
 class TestCompareRun(unittest.TestCase):
     def test_two_servers_in_one_report(self):
         server_a = _start_server()

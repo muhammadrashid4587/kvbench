@@ -16,6 +16,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+from .distribution import ZipfianSampler
 from .stats import histogram, summarize, time_series
 
 
@@ -59,10 +60,24 @@ class Workload:
     # divided by the batch size — amortized per-op cost, not the
     # latency of any single reply.
     pipeline: int = 1
+    # How keys are picked: "uniform" (every key equally likely, the
+    # old behaviour) or "zipfian" (a skewed Zipfian distribution where
+    # a small hot set takes most of the traffic, like a real workload).
+    distribution: str = "uniform"
+    # Zipf exponent for the zipfian distribution: rank r is picked
+    # with probability proportional to 1 / (r + 1) ** zipf_skew.
+    # 0 degenerates to uniform; 1.0 is the classic YCSB default.
+    # Ignored unless distribution is "zipfian".
+    zipf_skew: float = 1.0
 
     def __post_init__(self):
         if self.clients <= 0 or self.keys <= 0:
             raise ValueError("clients and keys must be positive")
+        if self.distribution not in ("uniform", "zipfian"):
+            raise ValueError(
+                "distribution must be 'uniform' or 'zipfian'")
+        if self.zipf_skew < 0:
+            raise ValueError("zipf skew must be non-negative")
         if self.duration_s is not None:
             if self.duration_s <= 0:
                 raise ValueError("duration must be positive")
@@ -96,6 +111,17 @@ class BenchmarkResult:
     # latencies_ns, split by operation, so the report can show
     # per-type ops/sec and latency percentiles.
     latencies_by_op: dict = field(default_factory=dict)
+    # Successful ops whose key was in the hot set: the hottest 1% of
+    # the keyspace. Under a uniform distribution this is ~1% of ops;
+    # under zipfian it is the measured hot-set hit rate, so a report
+    # can show whether the skewed traffic actually landed on hot keys.
+    hot_ops: int = 0
+
+    @property
+    def hot_hit_rate(self):
+        """Share of successful ops that hit the hottest 1% of keys."""
+        total = len(self.latencies_ns)
+        return self.hot_ops / total if total > 0 else 0.0
 
     @property
     def ops_per_sec(self):
@@ -220,14 +246,21 @@ def run_workload(client_factory, workload, name):
     latencies = []
     times = []
     latencies_by_op = {}
+    hot_ops = 0
     errors = 0
     error_sample = ""
     thread_errors = []
     lock = threading.Lock()
+    # Hot set: the hottest 1% of the keyspace (at least one key).
+    hot_count = max(1, workload.keys // 100)
 
     def worker(thread_index, op_count):
-        nonlocal errors, error_sample
+        nonlocal errors, error_sample, hot_ops
         rng = random.Random(workload.seed + thread_index)
+        # One sampler per thread: cheap to build, and sharing one
+        # across threads would need a lock on every pick.
+        sampler = (ZipfianSampler(workload.keys, workload.zipf_skew)
+                   if workload.distribution == "zipfian" else None)
         value = "x" * workload.value_size
         try:
             client = client_factory()
@@ -241,6 +274,7 @@ def run_workload(client_factory, workload, name):
         local_lat = []
         local_times = []
         local_by_op = {}
+        local_hot = 0
         local_errors = 0
         local_sample = ""
         try:
@@ -254,17 +288,23 @@ def run_workload(client_factory, workload, name):
                 batch_size = (workload.pipeline if remaining is None
                               else min(workload.pipeline, remaining))
                 batch = []
+                batch_hot = []
                 for _ in range(batch_size):
                     op = _pick_op(rng, workload)
+                    # Zipfian picks a rank; uniform picks a flat
+                    # random key. Either way the hot flag is whether
+                    # the rank is in the hottest 1% of the keyspace.
+                    rank = (sampler.pick(rng) if sampler is not None
+                            else rng.randrange(workload.keys))
+                    batch_hot.append(rank < hot_count)
                     # Counters live in their own keyspace: INCR on a key
                     # previously SET to a non-numeric value would error,
                     # exactly as it does on a real Redis server.
                     if op == "INCR":
-                        key = (f"kvbench:counter:"
-                               f"{rng.randrange(workload.keys)}")
+                        key = f"kvbench:counter:{rank}"
                         batch.append(("INCR", key))
                     else:
-                        key = f"kvbench:{rng.randrange(workload.keys)}"
+                        key = f"kvbench:{rank}"
                         if op == "SET":
                             batch.append(("SET", key, value))
                         else:
@@ -302,7 +342,7 @@ def run_workload(client_factory, workload, name):
                 end_s = time.perf_counter() - start
                 # Replies come back in batch order, so each reply pairs
                 # with its command's op for the per-op split.
-                for cmd, reply in zip(batch, replies):
+                for cmd, is_hot, reply in zip(batch, batch_hot, replies):
                     if isinstance(reply, Exception):
                         local_errors += 1
                         if not local_sample:
@@ -312,6 +352,8 @@ def run_workload(client_factory, workload, name):
                     local_lat.append(per_op_ns)
                     local_times.append(end_s)
                     local_by_op.setdefault(cmd[0], []).append(per_op_ns)
+                    if is_hot:
+                        local_hot += 1
                 if remaining is not None:
                     remaining -= batch_size
         finally:
@@ -321,6 +363,7 @@ def run_workload(client_factory, workload, name):
             times.extend(local_times)
             for op, samples in local_by_op.items():
                 latencies_by_op.setdefault(op, []).extend(samples)
+            hot_ops += local_hot
             errors += local_errors
             if local_sample and not error_sample:
                 error_sample = local_sample
@@ -353,4 +396,5 @@ def run_workload(client_factory, workload, name):
         latencies_ns=latencies,
         times_s=times,
         latencies_by_op=latencies_by_op,
+        hot_ops=hot_ops,
     )

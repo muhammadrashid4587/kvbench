@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 from . import __version__
 from .bench import format_duration
+from .distribution import ZipfianSampler
 
 
 def _workload_dict(workload):
@@ -26,6 +27,10 @@ def _workload_dict(workload):
         "mix_label": workload.mix_label or None,
         "seed": workload.seed,
         "pipeline": workload.pipeline,
+        "distribution": workload.distribution,
+        # The skew only means anything for zipfian; null otherwise.
+        "zipf_skew": (workload.zipf_skew
+                      if workload.distribution == "zipfian" else None),
     }
 
 
@@ -41,6 +46,9 @@ def _result_dict(result):
         "per_op": result.per_op_summary,
         "histogram": result.histogram,
         "time_series": result.time_series,
+        # Share of successful ops that hit the hottest 1% of keys
+        # (~0.01 under uniform; much higher under zipfian).
+        "hot_hit_rate": result.hot_hit_rate,
     }
 
 
@@ -159,6 +167,15 @@ def render_markdown(results, workload, command_line):
         )
     else:
         scope_line = f"- Total ops: {workload.ops}"
+    if workload.distribution == "zipfian":
+        sampler = ZipfianSampler(workload.keys, workload.zipf_skew)
+        distribution_line = (
+            f"- Key distribution: zipfian (skew {workload.zipf_skew:g}; "
+            f"the hottest 1% of keys take ~"
+            f"{sampler.hot_share() * 100:.0f}% of ops)"
+        )
+    else:
+        distribution_line = "- Key distribution: uniform"
     lines = [
         "# kvbench report",
         "",
@@ -172,6 +189,7 @@ def render_markdown(results, workload, command_line):
         scope_line,
         f"- Clients (threads): {workload.clients}",
         f"- Keyspace: {workload.keys} keys",
+        distribution_line,
         f"- Value size: {workload.value_size} bytes",
         f"- Mix: SET {workload.set_weight} / GET {workload.get_weight} / "
         f"INCR {workload.incr_weight}"
@@ -230,6 +248,13 @@ def render_markdown(results, workload, command_line):
             "round-trip time divided by the batch size: amortized per-op "
             "cost, not the latency of any single reply."
         )
+    if workload.distribution == "zipfian":
+        for result in results:
+            lines.append(
+                f"- Hot-set hit rate on {result.name}: "
+                f"{result.hot_hit_rate * 100:.1f}% of ops hit the "
+                "hottest 1% of keys."
+            )
     for result in results:
         if result.error_sample:
             lines.append(

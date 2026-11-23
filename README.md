@@ -22,6 +22,13 @@ C. Pure Python 3 standard library, no dependencies.
   `balanced`, `write-heavy`). The report splits ops/sec and latency
   percentiles per operation (SET vs GET vs INCR), so a read-heavy
   mix shows whether reads or writes dominate the tail.
+  Keys are picked uniformly by default, or with `--distribution
+  zipfian` from a Zipfian distribution (`--zipf-skew`, default 1.0):
+  a small hot set of keys takes most of the traffic, like a real
+  workload — with 1000 keys the hottest 1% take about 39% of ops.
+  The report records the expected hot-set share and the measured
+  hot-set hit rate per backend, so a run shows whether the skewed
+  traffic actually landed on hot keys.
 - Latency stats (`kvbench/stats.py`): ops/sec, mean, p50, p95, p99,
   plus a log-spaced latency histogram and a per-second time series
   (ops, mean and max latency per second) to spot stalls.
@@ -78,6 +85,11 @@ python -m kvbench.cli --duration 10s --clients 4
 # compare two servers with the same workload, one report
 python -m kvbench.cli --host 127.0.0.1 --port 6379 \
     --compare 127.0.0.1:6380 --ops 20000 --clients 4
+
+# skewed workload: Zipfian key distribution, hottest 1% of keys
+# take most of the traffic (skew 1.0 is the classic YCSB default)
+python -m kvbench.cli --ops 20000 --clients 4 \
+    --distribution zipfian --zipf-skew 1.0
 ```
 
 Pipelined latencies are the batch round-trip time divided by the batch
@@ -94,6 +106,9 @@ with `--ops`), `--clients` (default 4), `--keys` (default
 `SET:GET:INCR` weight triple, a `READ:WRITE` ratio such as `80:20`,
 or a preset: `read-heavy` 15:80:5, `balanced` 45:45:10,
 `write-heavy` 80:15:5), `--pipeline` (default 1, sequential),
+`--distribution` (`uniform` or `zipfian`, default `uniform`),
+`--zipf-skew` (default 1.0, the Zipf exponent for zipfian key
+picking; 0 is uniform),
 `--seed` (default 1234), `--baseline`, `--compare HOST:PORT`
 (repeatable: also run the same workload against another server and
 add it to the report), `--output` (default report.md), `--json`
@@ -102,7 +117,11 @@ add it to the report), `--output` (default report.md), `--json`
 Every run writes a JSON report alongside the Markdown one, with the
 same workload settings and per-backend results (ops, ops/sec, elapsed,
 errors, first error, and the full latency summary) in a machine-readable
-form. Use `--json path.json` to put it somewhere else.
+form. Use `--json path.json` to put it somewhere else. The JSON
+workload section carries the key distribution (`distribution` and
+`zipf_skew`, null for uniform), and each result carries its measured
+hot-set hit rate (`hot_hit_rate`: the share of ops that hit the
+hottest 1% of keys).
 
 ## Report format
 
@@ -137,6 +156,11 @@ and their mean and max latency. A second with 0 ops marks a stall —
 the workload made no progress in that second. The JSON report
 carries the same series per result under `time_series`.
 
+With `--distribution zipfian` the workload section shows the skew
+and the expected hot-set share, and the notes list the measured
+hot-set hit rate per backend: the share of ops that hit the hottest
+1% of keys.
+
 ## Reproducing numbers
 
 Numbers are machine-dependent. To reproduce a report, run the exact
@@ -156,6 +180,10 @@ make test
 
 ## Roadmap
 
+- ~~Zipfian key distribution (`--distribution zipfian` /
+  `--zipf-skew`): skewed traffic where a hot set of keys takes most
+  of the ops, with the expected and measured hot-set hit rate in
+  both reports.~~ Done in 0.5.0.
 - ~~Duration mode (`--duration 10s` / `2m`): run for a fixed
   wall-clock time instead of a fixed op count, with the duration
   and computed throughput in both reports.~~ Done in 0.4.0.
