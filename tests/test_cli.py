@@ -13,7 +13,7 @@ import threading
 import unittest
 
 from kvbench.cli import MIX_PRESETS, _parse_duration, _parse_host_port, \
-    _parse_mix, build_parser, main
+    _parse_keyspace_sweep, _parse_mix, build_parser, main
 
 
 class _FakeRespHandler(socketserver.StreamRequestHandler):
@@ -261,6 +261,81 @@ class TestDurationRun(unittest.TestCase):
         # A leading dash would be read as an option flag, so pass it
         # with "="; the parser must still reject the value itself.
         self.assertEqual(main(["--duration=-5s"]), 2)
+
+
+class TestParseKeyspaceSweep(unittest.TestCase):
+    def test_comma_list(self):
+        self.assertEqual(_parse_keyspace_sweep("100,1000,10000,100000"),
+                         [100, 1000, 10000, 100000])
+
+    def test_single_size(self):
+        self.assertEqual(_parse_keyspace_sweep("100"), [100])
+
+    def test_sorted_and_deduped(self):
+        self.assertEqual(_parse_keyspace_sweep("1000,100,1000"),
+                         [100, 1000])
+        self.assertEqual(_parse_keyspace_sweep(" 100 , 200 "),
+                         [100, 200])
+
+    def test_invalid(self):
+        for bad in ("", "0", "-5", "10,abc", "10,,20", "10.5", "10,0",
+                    ",100"):
+            with self.assertRaises(ValueError, msg=bad):
+                _parse_keyspace_sweep(bad)
+
+
+class TestSweepFlag(unittest.TestCase):
+    def test_defaults_no_sweep(self):
+        args = build_parser().parse_args([])
+        self.assertIsNone(args.sweep_keyspace)
+
+    def test_sweep_value_kept(self):
+        args = build_parser().parse_args(
+            ["--sweep-keyspace", "100,1000"])
+        self.assertEqual(args.sweep_keyspace, "100,1000")
+
+
+class TestSweepRun(unittest.TestCase):
+    def test_sweep_run_reports_per_size(self):
+        server = _start_server()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                output = os.path.join(tmp, "report.md")
+                code = main([
+                    "--host", "127.0.0.1",
+                    "--port", str(server.server_address[1]),
+                    "--ops", "200", "--clients", "2",
+                    "--sweep-keyspace", "10,100",
+                    "--output", output,
+                ])
+                self.assertEqual(code, 0)
+                with open(output, encoding="utf-8") as f:
+                    text = f.read()
+                self.assertIn("Keyspace sweep: 10, 100 keys", text)
+                self.assertIn("## Keyspace sweep", text)
+                self.assertIn("| 10 | 200 |", text)
+                self.assertIn("| 100 | 200 |", text)
+                self.assertIn("how keyspace size affects throughput", text)
+                with open(os.path.join(tmp, "report.json"),
+                          encoding="utf-8") as f:
+                    parsed = json.load(f)
+                self.assertEqual(parsed["workload"]["sweep_keyspace"],
+                                 [10, 100])
+                sweep = parsed["results"][0]["keyspace_sweep"]
+                self.assertEqual(len(sweep), 2)
+                self.assertEqual(sweep[0]["keys"], 10)
+                self.assertEqual(sweep[0]["ops"], 200)
+                self.assertGreater(sweep[0]["ops_per_sec"], 0)
+                self.assertGreaterEqual(sweep[0]["p99_ms"], 0)
+                self.assertEqual(sweep[1]["keys"], 100)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_bad_sweep_rejected(self):
+        for bad in ("bogus", "0", "10,abc", "10,,20"):
+            code = main(["--sweep-keyspace", bad, "--ops", "10"])
+            self.assertEqual(code, 2, msg=bad)
 
 
 class TestWarmupFlag(unittest.TestCase):

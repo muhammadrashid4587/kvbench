@@ -42,6 +42,11 @@ C. Pure Python 3 standard library, no dependencies.
   Under a zipfian distribution these are the keys the skew
   concentrates on; counters report under their own key
   (`kvbench:counter:<rank>`).
+  With `--sweep-keyspace 100,1000,10000,100000` the same workload
+  is re-run once per keyspace size, and the reports show ops/sec
+  and p99 per size, so a run shows how keyspace size affects
+  throughput — a hash-table resize or a cache that stops fitting
+  shows up as a step down in the sweep table.
 - Latency stats (`kvbench/stats.py`): ops/sec, mean, p50, p95, p99,
   plus a log-spaced latency histogram and a per-second time series
   (ops, mean and max latency per second) to spot stalls.
@@ -107,6 +112,11 @@ python -m kvbench.cli --ops 20000 --clients 4 \
 # warm up for 2 seconds before measuring, so the cold first
 # seconds do not drag the percentiles down
 python -m kvbench.cli --ops 20000 --clients 4 --warmup 2s
+
+# sweep the keyspace: the same workload re-run at 100, 1000,
+# 10000 and 100000 keys, with ops/sec and p99 per size
+python -m kvbench.cli --ops 20000 --clients 4 \
+    --sweep-keyspace 100,1000,10000,100000
 ```
 
 Pipelined latencies are the batch round-trip time divided by the batch
@@ -134,7 +144,10 @@ results, and in duration mode the duration clock starts after
 warmup ends),
 `--seed` (default 1234), `--baseline`, `--compare HOST:PORT`
 (repeatable: also run the same workload against another server and
-add it to the report), `--output` (default report.md), `--json`
+add it to the report), `--sweep-keyspace` (comma-separated keyspace
+sizes, e.g. `100,1000,10000,100000`: re-run the same workload once
+per size and report ops/sec and p99 per size in both reports),
+`--output` (default report.md), `--json`
 (default: same name as `--output` with a `.json` extension).
 
 Every run writes a JSON report alongside the Markdown one, with the
@@ -166,6 +179,13 @@ share of ops in each log-spaced bucket (`<= 0.1 ms`, `<= 0.25 ms`,
 `100 ms`, `250 ms`, `500 ms`, `1000 ms`, and an overflow bucket for
 anything slower), drawn as text bars. The JSON report carries the
 same buckets per result under `histogram`.
+
+With `--sweep-keyspace` the report has a Keyspace sweep section
+right below the results table: one table per backend with a row per
+swept size — keys, ops, ops/sec, mean and p99 — so the effect of
+keyspace size on throughput reads at a glance. The JSON report
+carries the same rows per result under `keyspace_sweep`, and the
+workload section carries the swept sizes under `sweep_keyspace`.
 
 Below the table, each backend gets a per-operation stats table:
 ops, ops/sec, mean, p50, p95 and p99 latency split by SET, GET and
@@ -216,6 +236,9 @@ make test
 
 ## Roadmap
 
+- ~~Keyspace-size sweep (`--sweep-keyspace 100,1000,10000,100000`):
+  re-run the same workload at several keyspace sizes, with ops/sec
+  and p99 per size in both reports.~~ Done in 0.8.0.
 - ~~Per-key latency for hot keys (`--hot-keys N`): count, mean,
   p50/p95/p99 per key for the hottest keys by access count, in both
   reports.~~ Done in 0.7.0.

@@ -115,7 +115,7 @@ class TestReport(unittest.TestCase):
         doc.pop("generated")
         self.assertEqual(parsed, doc)
         self.assertEqual(parsed["tool"], "kvbench")
-        self.assertEqual(parsed["version"], "0.7.0")
+        self.assertEqual(parsed["version"], "0.8.0")
         self.assertEqual(parsed["command"], "kvbench --ops 100 --clients 2")
         self.assertEqual(parsed["workload"]["ops"], 100)
         self.assertEqual(parsed["workload"]["clients"], 2)
@@ -343,6 +343,47 @@ class TestReport(unittest.TestCase):
         parsed = json.loads(render_json([_result()], workload, "kvbench"))
         self.assertEqual(parsed["workload"]["warmup_s"], 0.0)
         self.assertEqual(parsed["results"][0]["warmup_ops"], 0)
+
+    def test_sweep_in_markdown_and_json(self):
+        workload = Workload(ops=100, clients=2, keys=10, value_size=8,
+                            sweep_keyspace=[10, 100])
+        result = BenchmarkResult(
+            name="cinder", ops=100, elapsed_s=0.01, errors=0,
+            latencies_ns=[100_000] * 100,
+            sweep=[
+                {"keys": 10, "ops": 100, "ops_per_sec": 10_000,
+                 "mean_ms": 0.1, "p99_ms": 0.12},
+                {"keys": 100, "ops": 100, "ops_per_sec": 9_000,
+                 "mean_ms": 0.11, "p99_ms": 0.15},
+            ],
+        )
+        text = render_markdown([result], workload, "kvbench")
+        self.assertIn("Keyspace sweep: 10, 100 keys", text)
+        self.assertIn("## Keyspace sweep", text)
+        self.assertIn("Keyspace sweep — cinder", text)
+        self.assertIn("| Keys | Ops | Ops/sec | Mean (ms) | p99 (ms) |",
+                      text)
+        self.assertIn("| 10 | 100 | 10,000 | 0.100 | 0.120 |", text)
+        self.assertIn("| 100 | 100 | 9,000 | 0.110 | 0.150 |", text)
+        self.assertIn("how keyspace size affects throughput", text)
+        parsed = json.loads(render_json([result], workload, "kvbench"))
+        self.assertEqual(parsed["workload"]["sweep_keyspace"], [10, 100])
+        sweep = parsed["results"][0]["keyspace_sweep"]
+        self.assertEqual(len(sweep), 2)
+        self.assertEqual(sweep[0]["keys"], 10)
+        self.assertAlmostEqual(sweep[0]["ops_per_sec"], 10_000)
+        self.assertAlmostEqual(sweep[0]["p99_ms"], 0.12)
+        self.assertEqual(sweep[1]["keys"], 100)
+
+    def test_no_sweep_omits_section(self):
+        workload = _workload()
+        text = render_markdown([_result()], workload, "kvbench")
+        self.assertNotIn("## Keyspace sweep", text)
+        self.assertNotIn("Keyspace sweep:", text)
+        self.assertNotIn("how keyspace size affects throughput", text)
+        parsed = json.loads(render_json([_result()], workload, "kvbench"))
+        self.assertIsNone(parsed["workload"]["sweep_keyspace"])
+        self.assertEqual(parsed["results"][0]["keyspace_sweep"], [])
 
     def test_json_path_for(self):
         self.assertEqual(json_path_for("report.md", None), "report.json")

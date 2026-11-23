@@ -4,7 +4,7 @@ import time
 import unittest
 
 from kvbench.bench import DictClient, DictStore, Workload, \
-    format_duration, run_workload
+    format_duration, run_keyspace_sweep, run_workload
 
 
 class TestDictBaseline(unittest.TestCase):
@@ -271,6 +271,41 @@ class TestDurationMode(unittest.TestCase):
         self.assertEqual(format_duration(1.5), "1.5s")
         self.assertEqual(format_duration(120), "2m")
         self.assertEqual(format_duration(90), "90s")
+
+
+class TestKeyspaceSweep(unittest.TestCase):
+    def test_sweep_runs_each_size(self):
+        workload = Workload(ops=200, clients=2, keys=10, value_size=8)
+        sweep = run_keyspace_sweep(DictClient, workload, [5, 20, 100])
+        self.assertEqual([entry["keys"] for entry in sweep], [5, 20, 100])
+        for entry in sweep:
+            self.assertEqual(entry["ops"], 200)
+            self.assertGreater(entry["ops_per_sec"], 0)
+            self.assertGreaterEqual(entry["mean_ms"], 0)
+            self.assertGreaterEqual(entry["p99_ms"], entry["mean_ms"])
+        # The base workload is untouched: the sweep copies it per size.
+        self.assertEqual(workload.keys, 10)
+
+    def test_sweep_stops_on_unreachable_backend(self):
+        def failing_factory():
+            raise ConnectionError("connection refused")
+
+        workload = Workload(ops=10, clients=1, keys=5)
+        sweep = run_keyspace_sweep(failing_factory, workload, [5, 10])
+        self.assertEqual(sweep, [])
+
+    def test_sweep_validation(self):
+        with self.assertRaises(ValueError):
+            Workload(ops=10, clients=1, keys=10, sweep_keyspace=[0])
+        with self.assertRaises(ValueError):
+            Workload(ops=10, clients=1, keys=10, sweep_keyspace=[-5])
+        with self.assertRaises(ValueError):
+            Workload(ops=10, clients=1, keys=10,
+                     sweep_keyspace=[10.5])
+        # A valid sweep list is kept as-is.
+        workload = Workload(ops=10, clients=1, keys=10,
+                            sweep_keyspace=[100, 1000])
+        self.assertEqual(workload.sweep_keyspace, [100, 1000])
 
 
 class TestWarmupMode(unittest.TestCase):

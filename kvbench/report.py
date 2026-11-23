@@ -36,6 +36,9 @@ def _workload_dict(workload):
                       if workload.distribution == "zipfian" else None),
         # How many of the hottest keys get per-key stats (0 disables).
         "hot_keys": workload.hot_keys,
+        # Keyspace sizes swept in this run, or null when no sweep.
+        "sweep_keyspace": (list(workload.sweep_keyspace)
+                           if workload.sweep_keyspace else None),
     }
 
 
@@ -60,6 +63,9 @@ def _result_dict(result, top_n=5):
         # Ops run in the warmup phase, before measurement. They are
         # not part of ``ops`` and contribute no latencies.
         "warmup_ops": result.warmup_ops,
+        # Keyspace sweep: one per-size summary per swept size
+        # (keys, ops, ops/sec, mean and p99); [] when no sweep ran.
+        "keyspace_sweep": result.sweep,
     }
 
 
@@ -170,6 +176,26 @@ def _hot_key_lines(result, top_n=5):
     return lines
 
 
+def _sweep_lines(result):
+    """Keyspace sweep table for one result, or [] when no sweep ran."""
+    if not result.sweep:
+        return []
+    lines = [
+        f"### Keyspace sweep — {result.name}",
+        "",
+        "| Keys | Ops | Ops/sec | Mean (ms) | p99 (ms) |",
+        "| ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for entry in result.sweep:
+        lines.append(
+            f"| {entry['keys']:,} | {entry['ops']} | "
+            f"{entry['ops_per_sec']:,.0f} | {entry['mean_ms']:.3f} | "
+            f"{entry['p99_ms']:.3f} |"
+        )
+    lines.append("")
+    return lines
+
+
 def _time_series_lines(result):
     """Per-second ops/latency table for one result, or [] when empty."""
     series = result.time_series
@@ -216,6 +242,16 @@ def render_markdown(results, workload, command_line):
         )
     else:
         warmup_line = None
+    if workload.sweep_keyspace:
+        sweep_line = (
+            "- Keyspace sweep: "
+            + ", ".join(f"{s:,}" for s in workload.sweep_keyspace)
+            + " keys (the same workload re-run once per size; "
+            "per-size ops/sec and p99 are in the Keyspace sweep "
+            "section below)"
+        )
+    else:
+        sweep_line = None
     lines = [
         "# kvbench report",
         "",
@@ -238,6 +274,8 @@ def render_markdown(results, workload, command_line):
     ]
     if warmup_line is not None:
         lines.append(warmup_line)
+    if sweep_line is not None:
+        lines.append(sweep_line)
     lines += [
         "",
         "## Results",
@@ -248,6 +286,11 @@ def render_markdown(results, workload, command_line):
     ]
     for result in results:
         lines.append(_row(result))
+    sweep_lines = []
+    for result in results:
+        sweep_lines += _sweep_lines(result)
+    if sweep_lines:
+        lines += ["", "## Keyspace sweep", ""] + sweep_lines
     per_op_lines = []
     for result in results:
         per_op_lines += _per_op_lines(result)
@@ -329,6 +372,13 @@ def render_markdown(results, workload, command_line):
                 f"- Warmup ops on {result.name}: {result.warmup_ops} "
                 "(excluded from results)."
             )
+    if workload.sweep_keyspace:
+        lines.append(
+            "- The Keyspace sweep section re-runs the same workload "
+            "once per keyspace size, so ops/sec and p99 per size show "
+            "how keyspace size affects throughput; the main results "
+            "table above uses the base keyspace size."
+        )
     for result in results:
         if result.error_sample:
             lines.append(

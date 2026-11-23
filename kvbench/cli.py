@@ -16,6 +16,11 @@ Usage:
     # are warm and the first seconds do not drag the percentiles down
     python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
         --ops 20000 --clients 4 --warmup 2s --output report.md
+    # sweep the keyspace: the same workload re-run at 100, 1000,
+    # 10000 and 100000 keys, with ops/sec and p99 per size
+    python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
+        --ops 20000 --clients 4 \\
+        --sweep-keyspace 100,1000,10000,100000 --output report.md
 """
 
 import argparse
@@ -23,7 +28,8 @@ import os
 import sys
 
 from . import __version__
-from .bench import DictClient, Workload, format_duration, run_workload
+from .bench import DictClient, Workload, format_duration, \
+    run_keyspace_sweep, run_workload
 from .report import write_json, write_report
 from .resp import RespClient
 
@@ -112,6 +118,34 @@ def _parse_duration(text):
     return value
 
 
+def _parse_keyspace_sweep(text):
+    """Parse a ``--sweep-keyspace`` value into a sorted list of
+    distinct positive ints, e.g. ``100,1000,10000`` -> [100, 1000,
+    10000]. Duplicates are dropped and the sizes are sorted, so
+    ``1000,100,1000`` sweeps 100 then 1000.
+    """
+    if not text:
+        raise ValueError(
+            "sweep-keyspace must list keyspace sizes, "
+            "e.g. 100,1000,10000")
+    sizes = []
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            raise ValueError(
+                "sweep-keyspace sizes must be comma-separated "
+                "integers, e.g. 100,1000,10000")
+        try:
+            size = int(part)
+        except ValueError as exc:
+            raise ValueError(
+                "sweep-keyspace sizes must be integers") from exc
+        if size <= 0:
+            raise ValueError("sweep-keyspace sizes must be positive")
+        sizes.append(size)
+    return sorted(set(sizes))
+
+
 def _parse_host_port(text):
     """Parse a HOST:PORT target, e.g. ``127.0.0.1:6380``."""
     if ":" not in text:
@@ -172,6 +206,10 @@ def build_parser():
                         help="how many of the hottest keys (by access "
                         "count) get per-key latency stats in the "
                         "reports (0 disables; default 5)")
+    parser.add_argument("--sweep-keyspace", default=None, metavar="KEYS",
+                        help="re-run the same workload once per "
+                        "keyspace size, e.g. 100,1000,10000, and "
+                        "report ops/sec and p99 per size")
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--baseline", action="store_true",
                         help="also run the in-process dict baseline")
@@ -197,6 +235,8 @@ def main(argv=None):
                       if args.duration else None)
         warmup_s = (_parse_duration(args.warmup)
                     if args.warmup else 0.0)
+        sweep_sizes = (_parse_keyspace_sweep(args.sweep_keyspace)
+                       if args.sweep_keyspace else [])
         if duration_s is not None and args.ops is not None:
             raise ValueError(
                 "--ops and --duration are mutually exclusive: "
@@ -222,6 +262,7 @@ def main(argv=None):
             distribution=args.distribution,
             zipf_skew=args.zipf_skew,
             hot_keys=args.hot_keys,
+            sweep_keyspace=sweep_sizes,
         )
     except ValueError as exc:
         print(f"kvbench: {exc}", file=sys.stderr)
@@ -232,6 +273,27 @@ def main(argv=None):
     def _warmup_note(result):
         return (f", warmup {result.warmup_ops} ops"
                 if result.warmup_ops else "")
+
+    def _run_sweep(factory, result):
+        """Re-run the workload once per swept keyspace size and
+        attach the per-size summaries to ``result``.
+
+        Prints one line per size. A sweep that stops early (the
+        backend went away mid-sweep) keeps the sizes that completed
+        and says so on stderr instead of failing the whole run —
+        the main result already landed.
+        """
+        if not sweep_sizes:
+            return
+        result.sweep = run_keyspace_sweep(factory, workload, sweep_sizes)
+        for entry in result.sweep:
+            print(f"  sweep {entry['keys']:,} keys: "
+                  f"{entry['ops_per_sec']:,.0f} ops/sec, "
+                  f"p99 {entry['p99_ms']:.3f} ms")
+        if len(result.sweep) < len(sweep_sizes):
+            print(f"kvbench: keyspace sweep on {result.name} stopped "
+                  f"after {len(result.sweep)} of {len(sweep_sizes)} "
+                  "sizes (backend unreachable)", file=sys.stderr)
 
     def server_factory():
         return RespClient(args.host, args.port)
@@ -255,6 +317,7 @@ def main(argv=None):
           f"p50 {result.summary['p50_ms']:.3f} ms, "
           f"p95 {result.summary['p95_ms']:.3f} ms, "
           f"errors {result.errors}{_warmup_note(result)}")
+    _run_sweep(server_factory, result)
 
     for host, port in compare_targets:
         def compare_factory(host=host, port=port):
@@ -274,6 +337,7 @@ def main(argv=None):
               f"p50 {compared.summary['p50_ms']:.3f} ms, "
               f"p95 {compared.summary['p95_ms']:.3f} ms, "
               f"errors {compared.errors}{_warmup_note(compared)}")
+        _run_sweep(compare_factory, compared)
 
     if args.baseline:
         baseline = run_workload(DictClient, workload, "baseline (dict)")
@@ -282,6 +346,7 @@ def main(argv=None):
               f"p50 {baseline.summary['p50_ms']:.3f} ms, "
               f"p95 {baseline.summary['p95_ms']:.3f} ms"
               f"{_warmup_note(baseline)}")
+        _run_sweep(DictClient, baseline)
 
     write_report(results, workload, command_line, args.output)
     print(f"report written to {args.output}")

@@ -14,7 +14,7 @@ server. The report says so.
 import random
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from .distribution import ZipfianSampler
 from .stats import histogram, summarize, time_series
@@ -80,6 +80,11 @@ class Workload:
     # per-key latency stats in the reports. 0 disables per-key
     # tracking entirely.
     hot_keys: int = 5
+    # Keyspace sizes for a sweep: when non-empty the same workload is
+    # re-run once per size (see run_keyspace_sweep) and the per-size
+    # ops/sec and p99 land in the reports, so a run shows how
+    # keyspace size affects throughput. Empty means no sweep.
+    sweep_keyspace: list = field(default_factory=list)
 
     def __post_init__(self):
         if self.clients <= 0 or self.keys <= 0:
@@ -101,6 +106,9 @@ class Workload:
             raise ValueError("warmup must be non-negative")
         if self.hot_keys < 0:
             raise ValueError("hot_keys must be non-negative")
+        if any(not isinstance(size, int) or size <= 0
+               for size in self.sweep_keyspace):
+            raise ValueError("sweep keyspace sizes must be positive integers")
         if self.pipeline < 1:
             raise ValueError("pipeline depth must be at least 1")
         total = self.set_weight + self.get_weight + self.incr_weight
@@ -144,6 +152,13 @@ class BenchmarkResult:
     # not part of ``ops`` and contribute no latencies; the count is
     # kept so a report can show how much warming actually happened.
     warmup_ops: int = 0
+    # Keyspace sweep results for this backend: one entry per swept
+    # size, in ascending size order, each with the size (``keys``),
+    # the ops completed, and the ops/sec, mean and p99 latency of
+    # that run. Empty when no sweep ran (``--sweep-keyspace`` not
+    # given). The full latency samples of the sweep runs are not
+    # kept — only these summaries.
+    sweep: list = field(default_factory=list)
 
     @property
     def hot_hit_rate(self):
@@ -510,3 +525,34 @@ def run_workload(client_factory, workload, name):
         hot_ops=hot_ops,
         warmup_ops=warmup_ops,
     )
+
+
+def run_keyspace_sweep(client_factory, workload, sizes):
+    """Run the same workload once per keyspace size in ``sizes``.
+
+    Each run is a fresh copy of ``workload`` with ``keys`` replaced
+    by that size; everything else (ops, clients, mix, distribution,
+    pipeline, warmup, seed) is identical, so the per-size numbers
+    isolate the effect of keyspace size on throughput. Returns a
+    list of ``{"keys", "ops", "ops_per_sec", "mean_ms", "p99_ms"}``
+    dicts, in the order ``sizes`` was given. If a run cannot reach
+    the backend the sweep stops there and the sizes completed so far
+    are returned — the caller reports the shortfall.
+    """
+    out = []
+    for size in sizes:
+        swept = replace(workload, keys=size)
+        try:
+            result = run_workload(client_factory, swept,
+                                  f"sweep ({size} keys)")
+        except (ConnectionError, OSError):
+            break
+        summary = result.summary
+        out.append({
+            "keys": size,
+            "ops": result.ops,
+            "ops_per_sec": result.ops_per_sec,
+            "mean_ms": summary["mean_ms"],
+            "p99_ms": summary["p99_ms"],
+        })
+    return out
