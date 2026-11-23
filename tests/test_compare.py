@@ -10,7 +10,7 @@ import unittest
 from kvbench.bench import BenchmarkResult, Workload
 from kvbench.cli import main
 from kvbench.compare import compare_results, format_verdict, \
-    load_baseline, workload_differences
+    load_baseline, load_history_baseline, workload_differences
 from kvbench.report import _workload_dict, render_json, render_markdown
 
 
@@ -156,6 +156,177 @@ class TestLoadBaseline(unittest.TestCase):
             with self.assertRaises(ValueError) as ctx:
                 load_baseline(path)
             self.assertIn("no results", str(ctx.exception))
+
+
+class TestLoadHistoryBaseline(unittest.TestCase):
+    def _write_history(self, tmp, records):
+        path = os.path.join(tmp, "history.jsonl")
+        with open(path, "w", encoding="utf-8") as f:
+            for record in records:
+                f.write(json.dumps(record) + "\n")
+        return path
+
+    def _record(self, backend, ops_per_sec, p99_ms, timestamp,
+                errors=0):
+        return {
+            "tool": "kvbench",
+            "version": "0.18.0",
+            "timestamp": timestamp,
+            "command": "kvbench --ops 100 --clients 2",
+            "backend": backend,
+            "ops": 100,
+            "elapsed_s": 0.01,
+            "ops_per_sec": ops_per_sec,
+            "mean_ms": p99_ms,
+            "p50_ms": p99_ms,
+            "p95_ms": p99_ms,
+            "p99_ms": p99_ms,
+            "errors": errors,
+            "workload": _workload_dict(_workload()),
+        }
+
+    def _history_path(self, tmp):
+        cinder = "cinder (127.0.0.1:6379)"
+        return self._write_history(tmp, [
+            self._record(cinder, 8_000, 0.12,
+                         "2026-11-21T10:00:00+00:00"),
+            self._record("baseline (dict)", 50_000, 0.02,
+                         "2026-11-21T10:00:00+00:00"),
+            self._record(cinder, 9_000, 0.11,
+                         "2026-11-22T10:00:00+00:00"),
+            self._record(cinder, 10_000, 0.10,
+                         "2026-11-23T10:00:00+00:00"),
+        ])
+
+    def test_latest_picks_most_recent_per_backend(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = load_history_baseline(
+                self._history_path(tmp), "latest")
+            by_name = {r["name"]: r for r in doc["results"]}
+            self.assertEqual(by_name["cinder (127.0.0.1:6379)"]
+                             ["ops_per_sec"], 10_000)
+            self.assertEqual(by_name["baseline (dict)"]
+                             ["ops_per_sec"], 50_000)
+            self.assertEqual(doc["generated"],
+                             "2026-11-23T10:00:00+00:00")
+
+    def test_negative_one_is_latest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = load_history_baseline(
+                self._history_path(tmp), "-1")
+            by_name = {r["name"]: r for r in doc["results"]}
+            self.assertEqual(by_name["cinder (127.0.0.1:6379)"]
+                             ["ops_per_sec"], 10_000)
+
+    def test_index_zero_is_oldest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = load_history_baseline(
+                self._history_path(tmp), "0")
+            by_name = {r["name"]: r for r in doc["results"]}
+            self.assertEqual(by_name["cinder (127.0.0.1:6379)"]
+                             ["ops_per_sec"], 8_000)
+            self.assertEqual(doc["generated"],
+                             "2026-11-21T10:00:00+00:00")
+
+    def test_positive_index_counts_forward(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = load_history_baseline(
+                self._history_path(tmp), "1")
+            by_name = {r["name"]: r for r in doc["results"]}
+            self.assertEqual(by_name["cinder (127.0.0.1:6379)"]
+                             ["ops_per_sec"], 9_000)
+            # The dict backend has only one recorded run, so index
+            # 1 has nothing for it — it is skipped, not invented.
+            self.assertNotIn("baseline (dict)", by_name)
+
+    def test_negative_two_counts_back_from_latest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = load_history_baseline(
+                self._history_path(tmp), "-2")
+            by_name = {r["name"]: r for r in doc["results"]}
+            self.assertEqual(by_name["cinder (127.0.0.1:6379)"]
+                             ["ops_per_sec"], 9_000)
+            self.assertNotIn("baseline (dict)", by_name)
+
+    def test_timestamp_picks_latest_at_or_before(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = load_history_baseline(
+                self._history_path(tmp), "2026-11-22T12:00:00Z")
+            by_name = {r["name"]: r for r in doc["results"]}
+            self.assertEqual(by_name["cinder (127.0.0.1:6379)"]
+                             ["ops_per_sec"], 9_000)
+            # The dict backend's one run (Nov 21) is at or before
+            # the timestamp, so it is picked too.
+            self.assertEqual(by_name["baseline (dict)"]
+                             ["ops_per_sec"], 50_000)
+
+    def test_timestamp_skips_backend_with_no_run_yet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_history(tmp, [
+                self._record("cinder (127.0.0.1:6379)", 8_000, 0.12,
+                             "2026-11-21T10:00:00+00:00"),
+                self._record("baseline (dict)", 50_000, 0.02,
+                             "2026-11-23T10:00:00+00:00"),
+            ])
+            doc = load_history_baseline(
+                path, "2026-11-22T00:00:00Z")
+            by_name = {r["name"]: r for r in doc["results"]}
+            self.assertEqual(by_name["cinder (127.0.0.1:6379)"]
+                             ["ops_per_sec"], 8_000)
+            # The dict backend's first run is after the timestamp,
+            # so it is left out rather than invented.
+            self.assertNotIn("baseline (dict)", by_name)
+
+    def test_timestamp_before_all_runs_is_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError) as ctx:
+                load_history_baseline(
+                    self._history_path(tmp), "2026-11-01T00:00:00Z")
+            self.assertIn("at or before", str(ctx.exception))
+
+    def test_index_out_of_range_is_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # No backend has 6 recorded runs, so nothing is chosen.
+            with self.assertRaises(ValueError) as ctx:
+                load_history_baseline(
+                    self._history_path(tmp), "5")
+            self.assertIn("out of range", str(ctx.exception))
+            with self.assertRaises(ValueError):
+                load_history_baseline(
+                    self._history_path(tmp), "-4")
+
+    def test_invalid_selector_is_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError) as ctx:
+                load_history_baseline(
+                    self._history_path(tmp), "yesterday")
+            self.assertIn("invalid --compare-history selector",
+                          str(ctx.exception))
+
+    def test_missing_history_file(self):
+        with self.assertRaises(ValueError) as ctx:
+            load_history_baseline("/nonexistent/history.jsonl", "-1")
+        self.assertIn("not found", str(ctx.exception))
+
+    def test_empty_history_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_history(tmp, [])
+            with self.assertRaises(ValueError) as ctx:
+                load_history_baseline(path, "-1")
+            self.assertIn("no runs", str(ctx.exception))
+
+    def test_baseline_doc_compares_like_a_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = load_history_baseline(
+                self._history_path(tmp), "0")
+            comparison = compare_results(
+                [_result()], doc, _workload_dict(_workload()),
+                "history.jsonl (history run 0)", source="history")
+            entry = comparison["entries"][0]
+            self.assertAlmostEqual(entry["ops_sec_delta_pct"], 25.0)
+            self.assertEqual(entry["verdict"], "faster")
+            self.assertEqual(comparison["source"], "history")
+            self.assertTrue(comparison["workload_matches"])
 
 
 class TestCompareResults(unittest.TestCase):
@@ -350,6 +521,17 @@ class TestComparisonInReports(unittest.TestCase):
             comparison["entries"][0]["ops_sec_delta_pct"], 25.0)
         self.assertEqual(comparison["entries"][0]["verdict"], "faster")
 
+    def test_markdown_notes_name_history_baseline(self):
+        comparison = compare_results(
+            [_result()], _baseline_doc(ops_per_sec=8_000, p99_ms=0.12),
+            _workload_dict(_workload()),
+            "history.jsonl (history run -1)", source="history")
+        text = render_markdown([_result()], _workload(), "kvbench",
+                               comparison)
+        self.assertIn("a run recorded in the history file", text)
+        self.assertIn("Baseline: `history.jsonl (history run -1)`",
+                      text)
+
     def test_no_comparison_omits_section_and_key(self):
         text = render_markdown([_result()], _workload(), "kvbench")
         self.assertNotIn("## Comparison with previous run", text)
@@ -440,6 +622,136 @@ class TestCompareFileCli(unittest.TestCase):
                                 "--compare-file",
                                 "/nonexistent/prev.json"]))
         self.assertEqual(code, 1)
+
+
+class TestCompareHistoryCli(unittest.TestCase):
+    def setUp(self):
+        self.server = _start_server()
+        self.port = self.server.server_address[1]
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+    def _argv(self, extra):
+        return ["--host", "127.0.0.1", "--port", str(self.port)] + extra
+
+    def _run_baseline(self, tmp):
+        """Run a benchmark against the fake server and return its
+        JSON path."""
+        out = os.path.join(tmp, "base.md")
+        code = main(self._argv(["--ops", "100", "--clients", "1",
+                                "--output", out]))
+        self.assertEqual(code, 0)
+        return os.path.join(tmp, "base.json")
+
+    def _run_with_history(self, tmp):
+        """Run a benchmark that records itself in a history file,
+        and return the history path."""
+        history = os.path.join(tmp, "history.jsonl")
+        code = main(self._argv(["--ops", "100", "--clients", "1",
+                                "--output", os.path.join(tmp, "base.md"),
+                                "--history", "--history-file", history]))
+        self.assertEqual(code, 0)
+        return history
+
+    def test_compare_history_end_to_end(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._run_with_history(tmp)
+            out = os.path.join(tmp, "run.md")
+            code = main(self._argv(["--ops", "100", "--clients", "1",
+                                    "--output", out,
+                                    "--compare-history", "-1",
+                                    "--history-file", history]))
+            self.assertEqual(code, 0)
+            with open(out, encoding="utf-8") as f:
+                text = f.read()
+            self.assertIn("## Comparison with previous run", text)
+            self.assertIn("history run -1", text)
+            self.assertIn("a run recorded in the history file", text)
+            parsed = json.loads(open(os.path.join(tmp, "run.json"),
+                                     encoding="utf-8").read())
+            comparison = parsed["comparison"]
+            self.assertEqual(comparison["source"], "history")
+            self.assertEqual(len(comparison["entries"]), 1)
+            self.assertEqual(
+                comparison["entries"][0]["name"],
+                f"cinder (127.0.0.1:{self.port})")
+
+    def test_compare_history_by_timestamp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._run_with_history(tmp)
+            out = os.path.join(tmp, "run.md")
+            code = main(self._argv(["--ops", "100", "--clients", "1",
+                                    "--output", out,
+                                    "--compare-history", "2999-01-01T00:00:00Z",
+                                    "--history-file", history]))
+            self.assertEqual(code, 0)
+            with open(out, encoding="utf-8") as f:
+                text = f.read()
+            self.assertIn("## Comparison with previous run", text)
+
+    def test_regression_threshold_exits_3_against_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            history = os.path.join(tmp, "history.jsonl")
+            record = {
+                "tool": "kvbench", "version": "0.19.0",
+                "timestamp": "2026-11-23T00:00:00+00:00",
+                "command": "kvbench --ops 100 --clients 1",
+                "backend": f"cinder (127.0.0.1:{self.port})",
+                "ops": 100, "elapsed_s": 0.01,
+                "ops_per_sec": 10**9, "mean_ms": 0.0001,
+                "p50_ms": 0.0001, "p95_ms": 0.0001,
+                "p99_ms": 0.0001, "errors": 0,
+                "workload": _workload_dict(_workload()),
+            }
+            with open(history, "w", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
+            out = os.path.join(tmp, "run.md")
+            code = main(self._argv(["--ops", "100", "--clients", "1",
+                                    "--output", out,
+                                    "--compare-history", "-1",
+                                    "--history-file", history,
+                                    "--regression-threshold", "5"]))
+            self.assertEqual(code, 3)
+
+    def test_compare_file_and_compare_history_conflict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            baseline_json = self._run_baseline(tmp)
+            code = main(self._argv(["--ops", "10",
+                                    "--compare-file", baseline_json,
+                                    "--compare-history", "-1"]))
+            self.assertEqual(code, 2)
+
+    def test_threshold_works_with_compare_history(self):
+        # --regression-threshold without --compare-file is fine
+        # when --compare-history supplies the baseline. The
+        # threshold is deliberately huge: two live runs against
+        # the fake server jitter well past 5%, and this test only
+        # checks the flag combination is accepted, not the gate.
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._run_with_history(tmp)
+            code = main(self._argv(["--ops", "100", "--clients", "1",
+                                    "--output", os.path.join(tmp, "r.md"),
+                                    "--compare-history", "-1",
+                                    "--history-file", history,
+                                    "--regression-threshold", "1000"]))
+            self.assertEqual(code, 0)
+
+    def test_missing_history_file_fails_fast(self):
+        code = main(self._argv(["--ops", "10",
+                                "--compare-history", "-1",
+                                "--history-file",
+                                "/nonexistent/history.jsonl"]))
+        self.assertEqual(code, 1)
+
+    def test_bad_selector_fails_fast(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._run_with_history(tmp)
+            code = main(self._argv(["--ops", "10",
+                                    "--compare-history", "yesterday",
+                                    "--history-file", history]))
+            self.assertEqual(code, 1)
 
 
 if __name__ == "__main__":

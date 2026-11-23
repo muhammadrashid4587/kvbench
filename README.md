@@ -167,6 +167,15 @@ python -m kvbench.cli --trend
 python -m kvbench.cli --ops 20000 --clients 4 \
     --compare-file report.json --regression-threshold 5
 
+# same comparison, but against a run recorded in the history file
+# instead of a report file — -1 is the most recent recorded run,
+# 0 the oldest, or give an ISO timestamp for the latest run at or
+# before that time
+python -m kvbench.cli --ops 20000 --clients 4 \
+    --compare-history -1 --regression-threshold 5
+python -m kvbench.cli --ops 20000 --clients 4 \
+    --compare-history 2026-11-22T15:00:00Z
+
 # SLO gate: fail the run (exit 4) when p99 is above 1 ms or more
 # than 1% of ops error — the verdict lands in both reports
 python -m kvbench.cli --ops 20000 --clients 4 \
@@ -236,9 +245,17 @@ default 20),
 `--compare-file` (compare this run against a previous run's JSON
 report — ops/sec and p99 side by side per backend, with the
 percentage change and a verdict in both reports; see below),
-`--regression-threshold` (with `--compare-file`, exit 3 when any
-backend's ops/sec fell by more than that many percent, or its p99
-rose by more than that many percent, versus the baseline file),
+`--compare-history` (compare this run against a run recorded in
+the history file instead of a JSON report — pick it by index, `0`
+for the oldest run, `-1` or `latest` for the most recent, or by
+ISO timestamp for the latest run at or before that time, e.g.
+`--compare-history -1`; the history file is `--history-file`,
+default `~/.kvbench/history.jsonl`; mutually exclusive with
+`--compare-file`),
+`--regression-threshold` (with `--compare-file` or
+`--compare-history`, exit 3 when any backend's ops/sec fell by
+more than that many percent, or its p99 rose by more than that
+many percent, versus the baseline run),
 `--slo-p99-ms` (SLO gate: exit 4 when any backend's measured p99
 latency is above that many milliseconds),
 `--slo-error-rate` (SLO gate: exit 4 when any backend's error rate
@@ -306,12 +323,40 @@ entries.
 With `--regression-threshold PCT` the comparison becomes a gate:
 the run exits 3 when any backend's ops/sec fell by more than PCT
 percent, or its p99 rose by more than PCT percent, versus the
-baseline file — after the reports are written, so the regression
+baseline run — after the reports are written, so the regression
 is visible in them. A missing or unreadable baseline file fails
 the run before any benchmark starts. `--regression-threshold`
-without `--compare-file` is rejected. Small runs are noisy on a
-shared machine, so use a threshold well above run-to-run jitter
-for the workload you gate on.
+without `--compare-file` or `--compare-history` is rejected.
+Small runs are noisy on a shared machine, so use a threshold well
+above run-to-run jitter for the workload you gate on.
+
+With `--compare-history SELECTOR` the baseline comes from the
+history file (`--history-file`, default
+`~/.kvbench/history.jsonl`) instead of a JSON report: one recorded
+run per backend is picked out of the history and compared the same
+way — same side-by-side table, same verdicts, same regression
+gate, same workload-difference warning. The selector is per
+backend, since a run is recorded once per backend:
+
+- `latest`, or a negative index: count back from the most recent
+  run of that backend (`-1` is the latest, `-2` the one before).
+- a non-negative index: count forward from the oldest run (`0`
+  is the first run ever recorded for that backend).
+- an ISO timestamp (`2026-11-22T15:00:00Z`, or `2026-11-22
+  15:00` — a timestamp with no timezone is read as UTC): the
+  latest run of that backend at or before that time.
+
+A backend with no run matching the selector — an index past how
+many runs it has, or a timestamp before its first run — is left
+out of the comparison rather than invented, and shows up as an
+unmatched backend in the reports; a selector that matches no
+backend at all fails the run before any benchmark starts, as does
+a missing history file or an invalid selector. The reports name
+the history file and the selector as the baseline, and the JSON
+report carries the baseline under `comparison` with
+`"source": "history"` (a report-file baseline carries
+`"source": "report"`). `--compare-file` and `--compare-history`
+together are rejected — pick one baseline.
 
 ## SLO gate
 
@@ -534,12 +579,12 @@ make test
 
 ## Roadmap
 
-- Compare against a run from the history file (`--compare-file`
+- ~~Compare against a run from the history file (`--compare-file`
   against a history-file run): pick a backend's run out of
   `~/.kvbench/history.jsonl` as the baseline instead of a JSON
   report file, so a regression check needs no report file lying
-  around. Next.
-- ~~Ops/sec trend chart in Markdown (`--trend`): render the run
+  around.~~ Done in 0.19.0.
+- Ops/sec trend chart in Markdown (`--trend`): render the run
   history as a per-backend ops/sec-over-time chart — a table with
   ops/sec, the delta versus the previous run, and p99 alongside,
   plus a sparkline and the first-to-last change — handling empty

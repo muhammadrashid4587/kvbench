@@ -38,6 +38,13 @@ Usage:
     python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
         --ops 20000 --clients 4 --compare-file report.json \\
         --regression-threshold 5
+    # same comparison, but against a run recorded in the history
+    # file instead of a report file — -1 is the most recent
+    # recorded run, 0 the oldest, or give an ISO timestamp for the
+    # latest run at or before that time
+    python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
+        --ops 20000 --clients 4 --compare-history -1 \\
+        --regression-threshold 5
     # SLO gate: fail the run (exit 4) when p99 is above 1 ms or
     # more than 1% of ops error
     python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
@@ -61,7 +68,8 @@ import sys
 from . import __version__
 from .bench import DictClient, Workload, format_duration, \
     run_client_sweep, run_keyspace_sweep, run_workload
-from .compare import compare_results, format_verdict, load_baseline
+from .compare import compare_results, format_verdict, load_baseline, \
+    load_history_baseline
 from .history import DEFAULT_HISTORY_FILE, format_history, \
     format_trend, load_history, record_run
 from .report import _workload_dict, render_csv, write_csv, write_json, \
@@ -362,12 +370,22 @@ def build_parser():
                         "p99 side by side per backend, with the "
                         "percentage change and a verdict in both "
                         "reports")
+    parser.add_argument("--compare-history", default=None,
+                        metavar="SELECTOR",
+                        help="compare this run against a run recorded "
+                        "in the history file (see --history-file) "
+                        "instead of a JSON report: pick it by index "
+                        "(0 for the oldest run, -1 or 'latest' for "
+                        "the most recent) or by ISO timestamp (the "
+                        "latest run at or before that time), "
+                        "e.g. --compare-history -1")
     parser.add_argument("--regression-threshold", type=float, default=None,
                         metavar="PCT",
-                        help="with --compare-file, fail the run (exit 3) "
+                        help="with --compare-file or --compare-history, "
+                        "fail the run (exit 3) "
                         "when any backend's ops/sec fell by more than "
                         "PCT percent, or its p99 rose by more than PCT "
-                        "percent, versus the baseline file")
+                        "percent, versus the baseline run")
     parser.add_argument("--slo-p99-ms", type=float, default=None,
                         metavar="MS",
                         help="SLO gate: fail the run (exit 4) when any "
@@ -426,12 +444,19 @@ def main(argv=None):
             raise ValueError(
                 "--ops and --duration are mutually exclusive: "
                 "pick a fixed op count or a fixed run time, not both")
-        if args.regression_threshold is not None \
-                and args.compare_file is None:
+        if args.compare_file is not None \
+                and args.compare_history is not None:
             raise ValueError(
-                "--regression-threshold needs --compare-file: "
-                "there is nothing to compare against without a "
-                "baseline report")
+                "--compare-file and --compare-history are mutually "
+                "exclusive: pick a JSON report or a history run, "
+                "not both")
+        if args.regression_threshold is not None \
+                and args.compare_file is None \
+                and args.compare_history is None:
+            raise ValueError(
+                "--regression-threshold needs --compare-file or "
+                "--compare-history: there is nothing to compare "
+                "against without a baseline run")
         if args.regression_threshold is not None \
                 and args.regression_threshold < 0:
             raise ValueError(
@@ -462,15 +487,28 @@ def main(argv=None):
     except ValueError as exc:
         print(f"kvbench: {exc}", file=sys.stderr)
         return 2
-    # Load the baseline report before running anything: a bad path
-    # fails fast instead of after a benchmark that took minutes.
+    # Load the baseline run before running anything: a bad path or
+    # selector fails fast instead of after a benchmark that took
+    # minutes.
     baseline_doc = None
+    baseline_source = "report"
+    baseline_label = args.compare_file
     if args.compare_file:
         try:
             baseline_doc = load_baseline(args.compare_file)
         except ValueError as exc:
             print(f"kvbench: {exc}", file=sys.stderr)
             return 1
+    elif args.compare_history is not None:
+        try:
+            baseline_doc = load_history_baseline(
+                history_path, args.compare_history)
+        except ValueError as exc:
+            print(f"kvbench: {exc}", file=sys.stderr)
+            return 1
+        baseline_source = "history"
+        baseline_label = (f"{history_path} "
+                          f"(history run {args.compare_history})")
     try:
         workload = Workload(
             ops=(args.ops if args.ops is not None else
@@ -610,7 +648,8 @@ def main(argv=None):
     if baseline_doc is not None:
         comparison = compare_results(
             results, baseline_doc, _workload_dict(workload),
-            args.compare_file, args.regression_threshold)
+            baseline_label, args.regression_threshold,
+            source=baseline_source)
     # The SLO gate is evaluated before the reports are written, so
     # the verdict lands in both reports even when the run fails.
     slo = evaluate_slo(results, slo_p99_ms, slo_error_rate,

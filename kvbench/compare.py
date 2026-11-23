@@ -8,6 +8,15 @@ side by side, with the percentage change and a verdict per backend.
 the run exits non-zero when any backend's ops/sec fell by more than
 PCT, or its p99 rose by more than PCT, versus the baseline file.
 
+``--compare-history SELECTOR`` does the same thing against a run
+recorded in the history file (the JSONL file ``--history`` writes
+and ``--trend`` reads) instead of a report file, so a regression
+check needs no report file lying around. The selector picks one
+recorded run per backend: ``latest`` (or a negative index) counts
+back from the most recent run, a non-negative index counts forward
+from the oldest, and an ISO timestamp picks the latest run at or
+before that time.
+
 A comparison only means something when the two runs used the same
 workload, so the comparison also records which workload settings
 differed (ops, clients, keys, mix, pipeline, ...) — the report
@@ -17,6 +26,9 @@ that measured different things.
 
 import json
 import os
+from datetime import datetime, timezone
+
+from .history import load_history
 
 # Workload settings that have to match for a comparison to be
 # apples-to-apples. Compared key by key; a difference is reported
@@ -34,6 +46,125 @@ _WORKLOAD_KEYS = (
     "distribution",
     "zipf_skew",
 )
+
+
+def _parse_history_selector(selector):
+    """Parse a ``--compare-history`` selector.
+
+    Returns ``("index", n)`` for ``latest`` (n = -1) and for an
+    integer (0 is the oldest recorded run, -1 the most recent), or
+    ``("time", when)`` for an ISO timestamp (a naive timestamp is
+    read as UTC). Raises ValueError for anything else, with a
+    message that says what a selector looks like.
+    """
+    if selector == "latest":
+        return ("index", -1)
+    try:
+        return ("index", int(selector))
+    except ValueError:
+        pass
+    text = str(selector).strip()
+    try:
+        when = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(
+            f"invalid --compare-history selector {selector!r}: use "
+            "'latest', an index (0 for the oldest run, -1 for the "
+            "most recent), or an ISO timestamp "
+            "(e.g. 2026-11-22T15:00:00Z)") from exc
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return ("time", when)
+
+
+def _record_timestamp(record):
+    """A history record's timestamp as an aware datetime, or None
+    when the record carries no parseable timestamp."""
+    try:
+        when = datetime.fromisoformat(
+            str(record.get("timestamp") or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when
+
+
+def load_history_baseline(path, selector):
+    """Load a baseline run from a history file.
+
+    ``path`` is the JSONL history file (the one ``--history``
+    writes and ``--trend`` reads); ``selector`` picks one recorded
+    run per backend — an index, ``latest``, or an ISO timestamp
+    (see :func:`_parse_history_selector`). Returns a baseline
+    document in the same shape as a JSON report (``generated``,
+    ``command``, ``workload``, ``results`` with ``ops_per_sec``,
+    ``errors`` and a ``summary`` holding ``p99_ms``), so
+    :func:`compare_results` works on it unchanged.
+
+    Raises ValueError when the file does not exist, holds no runs,
+    the selector is invalid, an index is out of range for a
+    backend, or no recorded run falls at or before a timestamp.
+    A history record's workload has the same keys a JSON report's
+    does, so the workload comparison still applies — the baseline
+    workload carried here is the first chosen run's, since picks
+    for different backends can come from different runs.
+    """
+    if not os.path.exists(path):
+        raise ValueError(f"history file not found: {path}")
+    entries = load_history(path)
+    if not entries:
+        raise ValueError(
+            f"history file {path} holds no runs to compare against")
+    kind, value = _parse_history_selector(selector)
+    by_backend = {}
+    for entry in entries:
+        by_backend.setdefault(entry.get("backend", "?"), []).append(entry)
+    chosen = []
+    for backend, runs in by_backend.items():
+        if kind == "index":
+            index = value if value >= 0 else len(runs) + value
+            # Backends recorded fewer times than the index asks for
+            # are skipped, not an error: a backend added later has
+            # fewer runs than an older one, and the comparison still
+            # works for the backends that do have that run.
+            if index < 0 or index >= len(runs):
+                continue
+            chosen.append(runs[index])
+        else:
+            at_or_before = [r for r in runs
+                            if (_record_timestamp(r) is not None
+                                and _record_timestamp(r) <= value)]
+            if not at_or_before:
+                continue
+            chosen.append(at_or_before[-1])
+    if not chosen:
+        if kind == "index":
+            raise ValueError(
+                f"history run {selector!r} is out of range for every "
+                f"backend in {path}: no backend has that many "
+                "recorded runs")
+        raise ValueError(
+            f"no run in history file {path} at or before {selector}")
+    first = chosen[0]
+    results = [{
+        "name": record.get("backend", "?"),
+        "ops": record.get("ops"),
+        "elapsed_s": record.get("elapsed_s"),
+        "ops_per_sec": record.get("ops_per_sec") or 0.0,
+        "errors": record.get("errors"),
+        "summary": {"p99_ms": record.get("p99_ms") or 0.0},
+    } for record in chosen]
+    generated = max(
+        (record.get("timestamp") or "" for record in chosen),
+        default=None)
+    return {
+        "tool": "kvbench",
+        "generated": generated,
+        "command": first.get("command"),
+        "workload": first.get("workload"),
+        "results": results,
+    }
 
 
 def load_baseline(path):
@@ -112,7 +243,7 @@ def workload_differences(current_workload, baseline_workload):
 
 
 def compare_results(results, baseline_doc, current_workload,
-                    baseline_path, threshold_pct=None):
+                    baseline_path, threshold_pct=None, source="report"):
     """Compare ``results`` against a loaded baseline document.
 
     Backends are matched by name. Each matched backend gets an
@@ -122,6 +253,9 @@ def compare_results(results, baseline_doc, current_workload,
     ops/sec fell by more than the threshold, or the p99 rose by
     more than it. Backends present in only one of the two runs are
     listed as unmatched instead of being silently dropped.
+    ``source`` is ``"report"`` for a baseline loaded from a JSON
+    report file, ``"history"`` for one loaded from the history
+    file — it only changes how the report describes the baseline.
 
     Returns a JSON-serializable dict (the ``comparison`` section of
     the JSON report).
@@ -173,6 +307,7 @@ def compare_results(results, baseline_doc, current_workload,
         current_workload, baseline_doc.get("workload"))
     return {
         "file": baseline_path,
+        "source": source,
         "baseline_generated": baseline_doc.get("generated"),
         "baseline_command": baseline_doc.get("command"),
         "workload_matches": not differences,

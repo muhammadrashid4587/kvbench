@@ -781,9 +781,13 @@ def render_markdown(results, workload, command_line, comparison=None,
             "results table above uses the base client count."
         )
     if comparison is not None:
+        baseline_desc = (
+            "a run recorded in the history file"
+            if comparison.get("source") == "history"
+            else "an earlier JSON report")
         lines.append(
             "- The Comparison with previous run section compares "
-            "this run against an earlier JSON report "
+            f"this run against {baseline_desc} "
             f"(`{comparison['file']}`): ops/sec and p99 side by "
             "side per backend, with the percentage change and a "
             "verdict. Backends are matched by name; a backend in "
