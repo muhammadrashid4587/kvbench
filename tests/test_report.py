@@ -1,11 +1,14 @@
 """Tests for kvbench.report Markdown and JSON output."""
 
+import csv
+import io
 import json
 import unittest
 
 from kvbench.bench import BenchmarkResult, Workload
 from kvbench.cli import json_path_for
-from kvbench.report import render_json, render_markdown, to_json_dict
+from kvbench.report import render_csv, render_json, render_markdown, \
+    to_json_dict, write_csv
 
 
 def _workload():
@@ -115,7 +118,7 @@ class TestReport(unittest.TestCase):
         doc.pop("generated")
         self.assertEqual(parsed, doc)
         self.assertEqual(parsed["tool"], "kvbench")
-        self.assertEqual(parsed["version"], "0.11.0")
+        self.assertEqual(parsed["version"], "0.12.0")
         self.assertEqual(parsed["command"], "kvbench --ops 100 --clients 2")
         self.assertEqual(parsed["workload"]["ops"], 100)
         self.assertEqual(parsed["workload"]["clients"], 2)
@@ -211,6 +214,70 @@ class TestReport(unittest.TestCase):
         self.assertEqual(parsed["results"][0]["time_series"], [])
         text = render_markdown([_result()], _workload(), "kvbench")
         self.assertNotIn("## Latency over time", text)
+
+    def test_csv_rows_from_time_series(self):
+        result = BenchmarkResult(
+            name="cinder", ops=3, elapsed_s=2.5, errors=0,
+            latencies_ns=[1_000_000, 2_000_000, 4_000_000],
+            times_s=[0.2, 0.9, 2.3],
+        )
+        rows = list(csv.DictReader(io.StringIO(render_csv([result]))))
+        self.assertEqual(len(rows), 3)
+        # Each row covers one second, so ops_per_sec is the ops in
+        # that second; mean/max are the per-second latencies.
+        self.assertEqual(rows[0]["backend"], "cinder")
+        self.assertEqual(rows[0]["second"], "0")
+        self.assertEqual(rows[0]["ops"], "2")
+        self.assertEqual(rows[0]["ops_per_sec"], "2")
+        self.assertEqual(rows[0]["mean_ms"], "1.500")
+        self.assertEqual(rows[0]["max_ms"], "2.000")
+        # The empty second is kept: a stall shows up as a 0-op row.
+        self.assertEqual(rows[1]["second"], "1")
+        self.assertEqual(rows[1]["ops"], "0")
+        self.assertEqual(rows[1]["ops_per_sec"], "0")
+        self.assertEqual(rows[1]["mean_ms"], "0.000")
+        self.assertEqual(rows[2]["second"], "2")
+        self.assertEqual(rows[2]["ops"], "1")
+
+    def test_csv_header_and_multiple_backends(self):
+        first = BenchmarkResult(
+            name="cinder", ops=1, elapsed_s=0.5, errors=0,
+            latencies_ns=[1_000_000], times_s=[0.1],
+        )
+        second = BenchmarkResult(
+            name="baseline (dict)", ops=1, elapsed_s=0.5, errors=0,
+            latencies_ns=[500_000], times_s=[0.1],
+        )
+        text = render_csv([first, second])
+        self.assertTrue(text.startswith(
+            "backend,second,ops,ops_per_sec,mean_ms,max_ms\r\n"))
+        rows = list(csv.DictReader(io.StringIO(text)))
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["backend"], "cinder")
+        self.assertEqual(rows[1]["backend"], "baseline (dict)")
+        self.assertEqual(rows[1]["mean_ms"], "0.500")
+
+    def test_csv_header_only_without_times(self):
+        # Results built without completion times have no series, so
+        # the CSV is just the header — it still parses cleanly.
+        rows = list(csv.DictReader(io.StringIO(render_csv([_result()]))))
+        self.assertEqual(rows, [])
+
+    def test_write_csv_round_trip(self):
+        import os
+        import tempfile
+        result = BenchmarkResult(
+            name="cinder", ops=1, elapsed_s=0.5, errors=0,
+            latencies_ns=[1_000_000], times_s=[0.1],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "timeseries.csv")
+            self.assertEqual(write_csv([result], path),
+                             render_csv([result]))
+            with open(path, encoding="utf-8", newline="") as f:
+                rows = list(csv.DictReader(f))
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["backend"], "cinder")
 
     def test_per_op_in_json(self):
         parsed = json.loads(render_json([_result_with_per_op()],

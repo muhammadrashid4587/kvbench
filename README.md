@@ -137,6 +137,10 @@ python -m kvbench.cli --ops 20000 --sweep-clients 1,2,4,8
 # trend over time (default file: ~/.kvbench/history.jsonl)
 python -m kvbench.cli --ops 20000 --clients 4 --history
 python -m kvbench.cli --show-history
+
+# also write a per-second throughput CSV for plotting
+python -m kvbench.cli --ops 20000 --clients 4 --duration 10s \
+    --csv timeseries.csv
 ```
 
 Pipelined latencies are the batch round-trip time divided by the batch
@@ -172,6 +176,9 @@ re-run the same workload once per count and report ops/sec and p99
 per count in both reports),
 `--output` (default report.md), `--json`
 (default: same name as `--output` with a `.json` extension),
+`--csv` (write a per-second throughput CSV alongside the reports:
+one row per backend per second with ops, ops/sec, mean and max
+latency — see below),
 `--history` (record this run in the history file so later runs can
 be compared against it), `--history-file` (where the history lives,
 default `~/.kvbench/history.jsonl`), `--show-history` (print the
@@ -270,6 +277,15 @@ and their mean and max latency. A second with 0 ops marks a stall —
 the workload made no progress in that second. The JSON report
 carries the same series per result under `time_series`.
 
+With `--csv PATH` the same per-second series is also written as a
+plain CSV, one row per backend per second: `backend,second,ops,
+ops_per_sec,mean_ms,max_ms`. Each row covers exactly one second, so
+`ops_per_sec` is the ops completed in that second; a row with 0 ops
+is a stall second. The file plots directly — ops/sec over time in a
+spreadsheet or with matplotlib — without parsing the Markdown
+report. The CSV is opt-in only; without `--csv` no CSV file is
+written.
+
 With `--distribution zipfian` the workload section shows the skew
 and the expected hot-set share, and the notes list the measured
 hot-set hit rate per backend: the share of ops that hit the hottest
@@ -301,6 +317,10 @@ make test
 
 ## Roadmap
 
+- ~~Throughput-over-time CSV export (`--csv PATH`): one row per
+  backend per second with ops, ops/sec, mean and max latency, so
+  throughput over time plots directly without parsing the
+  report.~~ Done in 0.12.0.
 - ~~Tail-latency attribution: when p99 is high, break the slowest
   ops down by operation type, by client, by hot vs cold keys and
   by second, and name the factor that dominates the tail in both

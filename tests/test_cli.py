@@ -5,6 +5,7 @@ server, so ``main()`` runs the same workload against two targets and
 both rows land in the report.
 """
 
+import csv
 import json
 import os
 import socketserver
@@ -455,6 +456,66 @@ class TestWarmupRun(unittest.TestCase):
         # A leading dash would be read as an option flag, so pass it
         # with "="; the parser must still reject the value itself.
         self.assertEqual(main(["--warmup=-5s", "--ops", "10"]), 2)
+
+
+class TestCsvFlag(unittest.TestCase):
+    def test_defaults_no_csv(self):
+        args = build_parser().parse_args([])
+        self.assertIsNone(args.csv)
+
+    def test_csv_value_kept(self):
+        args = build_parser().parse_args(["--csv", "timeseries.csv"])
+        self.assertEqual(args.csv, "timeseries.csv")
+
+
+class TestCsvRun(unittest.TestCase):
+    def test_csv_written_with_throughput_rows(self):
+        server = _start_server()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                output = os.path.join(tmp, "report.md")
+                csv_path = os.path.join(tmp, "timeseries.csv")
+                code = main([
+                    "--host", "127.0.0.1",
+                    "--port", str(server.server_address[1]),
+                    "--ops", "200", "--clients", "2",
+                    "--output", output, "--csv", csv_path,
+                ])
+                self.assertEqual(code, 0)
+                with open(csv_path, encoding="utf-8", newline="") as f:
+                    rows = list(csv.DictReader(f))
+                self.assertGreater(len(rows), 0)
+                self.assertEqual(rows[0]["backend"],
+                                 f"cinder (127.0.0.1:"
+                                 f"{server.server_address[1]})")
+                self.assertEqual(rows[0]["second"], "0")
+                # One row per second, so ops_per_sec is the ops in
+                # that second, and the rows cover all 200 ops.
+                self.assertEqual(rows[0]["ops_per_sec"],
+                                 rows[0]["ops"])
+                self.assertEqual(sum(int(r["ops"]) for r in rows), 200)
+                self.assertGreater(float(rows[0]["mean_ms"]), 0)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_no_csv_without_flag(self):
+        server = _start_server()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                output = os.path.join(tmp, "report.md")
+                code = main([
+                    "--host", "127.0.0.1",
+                    "--port", str(server.server_address[1]),
+                    "--ops", "200", "--clients", "2",
+                    "--output", output,
+                ])
+                self.assertEqual(code, 0)
+                self.assertFalse(os.path.exists(
+                    os.path.join(tmp, "timeseries.csv")))
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 if __name__ == "__main__":

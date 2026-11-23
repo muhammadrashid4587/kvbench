@@ -41,7 +41,7 @@ from .bench import DictClient, Workload, format_duration, \
     run_client_sweep, run_keyspace_sweep, run_workload
 from .history import DEFAULT_HISTORY_FILE, format_history, \
     load_history, record_run
-from .report import write_json, write_report
+from .report import render_csv, write_csv, write_json, write_report
 from .resp import RespClient
 
 
@@ -265,6 +265,10 @@ def build_parser():
     parser.add_argument("--json", default=None, metavar="PATH",
                         help="where to write the JSON report "
                         "(default: same name as --output, .json extension)")
+    parser.add_argument("--csv", default=None, metavar="PATH",
+                        help="also write a per-second throughput CSV "
+                        "(backend, second, ops, ops/sec, mean/max "
+                        "latency) for plotting, e.g. timeseries.csv")
     parser.add_argument("--history", action="store_true",
                         help="record this run in the history file "
                         "(default ~/.kvbench/history.jsonl) so later "
@@ -444,6 +448,9 @@ def main(argv=None):
     json_path = json_path_for(args.output, args.json)
     write_json(results, workload, command_line, json_path)
     print(f"JSON report written to {json_path}")
+    if args.csv:
+        write_csv(results, args.csv)
+        print(f"CSV written to {args.csv}")
     if args.history:
         count = record_run(history_path, results, workload, command_line)
         print(f"recorded {count} run(s) in history file {history_path}")

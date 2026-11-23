@@ -1,5 +1,7 @@
 """Markdown and JSON report writers."""
 
+import csv
+import io
 import json
 import platform
 import sys
@@ -106,6 +108,47 @@ def write_json(results, workload, command_line, path):
     """Write the JSON report to ``path`` and return its text."""
     text = render_json(results, workload, command_line)
     with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    return text
+
+
+# CSV header: one row per backend per second of the run.
+_CSV_HEADER = ("backend", "second", "ops", "ops_per_sec",
+               "mean_ms", "max_ms")
+
+
+def render_csv(results):
+    """Render per-second throughput as CSV text.
+
+    One row per backend per second, from the same per-second series
+    the Markdown report shows under Latency over time. Each row
+    covers exactly one second, so ``ops_per_sec`` is the ops
+    completed in that second; a row with 0 ops is a stall second.
+    Results with no time series (built without completion times)
+    contribute no rows. The output is plain CSV with a header, so
+    it plots directly (e.g. in a spreadsheet or with matplotlib)
+    without parsing the Markdown report.
+    """
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(_CSV_HEADER)
+    for result in results:
+        for bucket in result.time_series:
+            writer.writerow([
+                result.name,
+                bucket["second"],
+                bucket["ops"],
+                bucket["ops"],
+                f"{bucket['mean_ms']:.3f}",
+                f"{bucket['max_ms']:.3f}",
+            ])
+    return buf.getvalue()
+
+
+def write_csv(results, path):
+    """Write the throughput CSV to ``path`` and return its text."""
+    text = render_csv(results)
+    with open(path, "w", encoding="utf-8", newline="") as f:
         f.write(text)
     return text
 
