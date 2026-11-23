@@ -11,7 +11,8 @@ from kvbench import __version__
 from kvbench.bench import BenchmarkResult, Workload
 from kvbench.cli import main
 from kvbench.history import DEFAULT_HISTORY_FILE, build_record, \
-    format_history, format_trend, load_history, record_run, _sparkline
+    format_history, format_trend, load_history, record_run, \
+    write_trend, _sparkline
 
 
 def _make_result(name="cinder (127.0.0.1:6379)", ops=1000,
@@ -254,6 +255,47 @@ class TestFormatTrend(unittest.TestCase):
             self.assertIn("+25.0%", text)
 
 
+class TestWriteTrend(unittest.TestCase):
+    def _entries(self, rates=(40000.0, 50000.0, 60000.0)):
+        workload = _make_workload()
+        return [
+            build_record(_make_result(ops_per_sec=rate), workload,
+                         "kvbench")
+            for rate in rates
+        ]
+
+    def test_file_matches_the_stdout_chart(self):
+        entries = self._entries()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "trend.md")
+            text = write_trend(path, entries)
+            self.assertEqual(text, format_trend(entries))
+            with open(path, encoding="utf-8") as f:
+                self.assertEqual(f.read(), text)
+
+    def test_empty_history_writes_the_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "trend.md")
+            text = write_trend(path, [])
+            self.assertIn("No runs recorded yet", text)
+            with open(path, encoding="utf-8") as f:
+                self.assertIn("No runs recorded yet", f.read())
+
+    def test_file_ends_with_a_newline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "trend.md")
+            write_trend(path, [])
+            with open(path, encoding="utf-8") as f:
+                self.assertTrue(f.read().endswith("\n"))
+
+    def test_creates_parent_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "reports", "trend.md")
+            write_trend(path, self._entries())
+            with open(path, encoding="utf-8") as f:
+                self.assertIn("60,000", f.read())
+
+
 class TestTrendCli(unittest.TestCase):
     def test_trend_flag_prints_chart_and_exits_zero(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -278,6 +320,43 @@ class TestTrendCli(unittest.TestCase):
                 code = main(["--trend", "--history-file", path])
             self.assertEqual(code, 0)
             self.assertIn("No runs recorded yet", out.getvalue())
+
+    def test_trend_out_writes_file_and_still_prints(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            history = os.path.join(tmp, "history.jsonl")
+            record_run(history, [_make_result(ops_per_sec=40000.0),
+                                 _make_result(ops_per_sec=50000.0)],
+                       _make_workload(), "kvbench")
+            out_path = os.path.join(tmp, "trend.md")
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = main(["--trend", "--history-file", history,
+                             "--trend-out", out_path])
+            self.assertEqual(code, 0)
+            # The chart still prints to stdout, and the same chart
+            # lands in the file so it can be committed or attached.
+            stdout = out.getvalue()
+            self.assertIn("ops/sec trend", stdout)
+            self.assertIn("+25.0%", stdout)
+            self.assertIn(f"Trend written to {out_path}", stdout)
+            with open(out_path, encoding="utf-8") as f:
+                file_text = f.read()
+            self.assertIn("ops/sec trend", file_text)
+            self.assertIn("+25.0%", file_text)
+            self.assertIn("▁█", file_text)
+            self.assertNotIn("Trend written to", file_text)
+
+    def test_trend_out_without_trend_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = os.path.join(tmp, "trend.md")
+            err = io.StringIO()
+            with redirect_stdout(io.StringIO()):
+                from contextlib import redirect_stderr
+                with redirect_stderr(err):
+                    code = main(["--trend-out", out_path])
+            self.assertEqual(code, 2)
+            self.assertIn("--trend-out needs --trend", err.getvalue())
+            self.assertFalse(os.path.exists(out_path))
 
 
 class TestDefaultPath(unittest.TestCase):

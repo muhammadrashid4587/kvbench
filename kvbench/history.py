@@ -200,6 +200,23 @@ def format_trend(entries, limit=20):
     return "\n".join(sections)
 
 
+def write_trend(path, entries, limit=20):
+    """Render the ops/sec trend chart and write it to ``path``.
+
+    Creates the parent directory when needed. Returns the rendered
+    text — the same text ``--trend`` prints to stdout — so the file
+    can be committed or attached to a report.
+    """
+    text = format_trend(entries, limit=limit)
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+        if not text.endswith("\n"):
+            f.write("\n")
+    return text
+
+
 def format_history(entries, limit=20):
     """Render history entries as a trend table (most recent first).
 

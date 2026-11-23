@@ -78,7 +78,7 @@ from .bench import DictClient, Workload, format_duration, \
 from .compare import compare_results, format_verdict, load_baseline, \
     load_history_baseline
 from .history import DEFAULT_HISTORY_FILE, format_history, \
-    format_trend, load_history, record_run
+    format_trend, load_history, record_run, write_trend
 from .report import _workload_dict, render_csv, write_csv, write_json, \
     write_report
 from .resp import RespClient
@@ -368,6 +368,10 @@ def build_parser():
                         help="print an ops/sec trend chart per backend "
                         "from the recorded run history and exit "
                         "(no benchmark is run)")
+    parser.add_argument("--trend-out", default=None, metavar="PATH",
+                        help="with --trend, also write the trend chart "
+                        "to this Markdown file (e.g. trend.md) so it "
+                        "can be committed or attached to a report")
     parser.add_argument("--history-limit", type=int, default=20,
                         help="how many recent runs --show-history and "
                         "--trend print per backend (default 20)")
@@ -435,11 +439,21 @@ def main(argv=None):
         entries = load_history(history_path)
         print(format_history(entries, limit=args.history_limit))
         return 0
+    if args.trend_out and not args.trend:
+        print("kvbench: --trend-out needs --trend: it writes the "
+              "trend chart to a file, and there is no trend chart "
+              "without --trend", file=sys.stderr)
+        return 2
     if args.trend:
         # Trend-only mode: same history file, rendered as a
         # per-backend ops/sec-over-time chart instead of a table.
         entries = load_history(history_path)
-        print(format_trend(entries, limit=args.history_limit))
+        text = format_trend(entries, limit=args.history_limit)
+        print(text)
+        if args.trend_out:
+            write_trend(args.trend_out, entries,
+                        limit=args.history_limit)
+            print(f"Trend written to {args.trend_out}")
         return 0
     try:
         set_w, get_w, incr_w, mix_label = _parse_mix(args.mix)

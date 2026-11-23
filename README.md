@@ -162,6 +162,10 @@ python -m kvbench.cli --show-history
 # same history file
 python -m kvbench.cli --trend
 
+# same trend chart, written to a Markdown file as well, so it
+# can be committed or attached to a report
+python -m kvbench.cli --trend --trend-out trend.md
+
 # compare this run against a previous run's JSON report, side by
 # side, and fail the run when it regressed past 5%
 python -m kvbench.cli --ops 20000 --clients 4 \
@@ -246,6 +250,9 @@ default `~/.kvbench/history.jsonl`), `--show-history` (print the
 recorded run history and exit, no benchmark is run),
 `--trend` (print an ops/sec trend chart per backend from the
 recorded run history and exit, no benchmark is run),
+`--trend-out PATH` (with `--trend`, also write the trend chart to
+a Markdown file — the same text printed to stdout — so it can be
+committed or attached to a report; needs `--trend`),
 `--history-limit` (how many recent runs `--show-history` and
 default 20),
 `--compare-file` (compare this run against a previous run's JSON
@@ -310,6 +317,14 @@ newest) and the first-to-last change. A backend with a single
 recorded run shows its one value with no delta and a single
 block; an empty history prints the same "No runs recorded yet"
 message as `--show-history`.
+
+With `--trend-out PATH` the same chart is also written to a
+Markdown file — the exact text printed to stdout — so the trend
+can be committed next to a report or attached to one instead of
+being re-rendered from the history file each time. The parent
+directory is created when needed, and `--trend-out` without
+`--trend` is rejected (exit 2), since there is no chart to
+write without it.
 
 ## Comparing against a previous run
 
@@ -605,6 +620,10 @@ make test
 
 ## Roadmap
 
+- ~~Trend chart as a Markdown file (`--trend-out PATH`): write
+  the same ops/sec trend chart `--trend` prints to stdout to a
+  Markdown file as well, so it can be committed or attached to a
+  report.~~ Done in 0.21.0.
 - ~~Compare against a history run with the same workload
   (`--compare-history` with `--compare-same-workload`): only
   recorded runs whose workload matches this run's are considered
