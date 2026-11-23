@@ -73,6 +73,15 @@ C. Pure Python 3 standard library, no dependencies.
   5 ms and error rate 0.1% — with per-op verdicts in both
   reports, on top of the global gate, so a slow write fails the
   run even when the overall p99 is fine.
+  With `--slo-preset PATH` the thresholds live in a JSON file
+  instead of on the command line — `{"p99_ms": 1,
+  "error_rate_pct": 1, "per_op": {"SET": {"p99_ms": 5,
+  "error_rate_pct": 0.1}}}` — so CI can share one budget across
+  runs; every key is optional, and CLI flags
+  (`--slo-p99-ms`, `--slo-error-rate`, `--slo-op`) override the
+  preset values. A missing, unreadable or invalid preset file
+  fails the run (exit 2) before any benchmark starts, and both
+  reports name the preset file the thresholds came from.
 - A baseline mode that runs the exact same workload against an
   in-process Python dict, so the report can compare the server with a
   no-network upper bound on the same machine.
@@ -165,6 +174,12 @@ python -m kvbench.cli --ops 20000 --clients 4 \
 python -m kvbench.cli --ops 20000 --clients 4 \
     --slo-op SET:5,0.1 --slo-op GET:2,0.1
 
+# SLO preset file: thresholds live in a JSON file (see below for
+# the format) instead of on the command line — CLI flags still
+# override the preset values
+python -m kvbench.cli --ops 20000 --clients 4 \
+    --slo-preset slo.json
+
 # also write a per-second throughput CSV for plotting
 python -m kvbench.cli --ops 20000 --clients 4 --duration 10s \
     --csv timeseries.csv
@@ -228,6 +243,9 @@ one operation type on its own p99 and error-rate thresholds, e.g.
 their error rate is above 0.1%; either threshold may be left empty,
 e.g. `SET:5,` gates p99 only; a later entry for the same op
 replaces the earlier one).
+`--slo-preset PATH` (load SLO thresholds from a JSON preset file
+instead of passing them on the command line — see the SLO gate
+section for the format; CLI flags override preset values).
 
 Every run writes a JSON report alongside the Markdown one, with the
 same workload settings and per-backend results (ops, ops/sec, elapsed,
@@ -306,7 +324,35 @@ per backend, and a `pass`/`breach` verdict, plus a per-operation
 table with the same verdicts per op when `--slo-op` was given,
 and the JSON report carries the same gate under `slo` (with the
 thresholds also recorded under `workload`, and the per-op entries
-under each backend's `per_op`). The gate is evaluated after the
+under each backend's `per_op`).
+
+With `--slo-preset PATH` the thresholds come from a JSON file
+instead of the command line, so one budget can be shared across
+runs and checked into CI:
+
+```json
+{
+  "p99_ms": 1,
+  "error_rate_pct": 1,
+  "per_op": {
+    "SET": {"p99_ms": 5, "error_rate_pct": 0.1},
+    "GET": {"p99_ms": 2}
+  }
+}
+```
+
+Every key is optional — a preset may set only the global p99, only
+per-op thresholds, or any combination — and a per-op entry may set
+either threshold or both, but at least one. The same ranges apply
+as on the command line: p99 non-negative, error rate between 0
+and 100. CLI flags override the preset: `--slo-p99-ms` replaces
+the preset's global p99, `--slo-error-rate` its error rate, and
+`--slo-op` replaces the preset's entry for that op, leaving the
+rest of the preset in place. Both reports name the preset file
+(`workload.slo_preset` and `slo.preset` in JSON, a line in the
+Markdown SLO gate section), so a report shows where its budgets
+came from. A missing, unreadable, invalid, or out-of-range preset
+file fails the run with exit 2 before any benchmark starts. The gate is evaluated after the
 reports are written, so a breached run still leaves a report
 showing the verdict — and then the process exits 4, a distinct
 code from the regression gate's 3. A run that breaches both gates
@@ -429,6 +475,12 @@ make test
 
 ## Roadmap
 
+- ~~SLO preset file (`--slo-preset PATH`): load SLO thresholds
+  from a JSON preset file (`p99_ms`, `error_rate_pct`, `per_op`),
+  validatable (a bad file exits 2 before any benchmark runs),
+  composable with CLI flags (CLI overrides preset), and recorded
+  in both reports (`workload.slo_preset` / `slo.preset` in JSON,
+  named in the Markdown SLO gate section).~~ Done in 0.16.0.
 - ~~Per-operation SLOs (`--slo-op OP:P99,ERR`, repeatable): each
   operation type carries its own p99 and error-rate thresholds on
   top of the global SLO gate, with per-op verdicts in both the

@@ -103,6 +103,11 @@ class Workload:
     # Empty means no per-op gate; the global thresholds above still
     # apply. Validated the same way as the global thresholds.
     slo_per_op: dict = field(default_factory=dict)
+    # Path of the SLO preset file the thresholds were loaded from
+    # (``--slo-preset``), or None when no preset was used. Recorded
+    # so the reports can say where the thresholds came from; the
+    # thresholds themselves live in the fields above.
+    slo_preset: str = None
 
     def __post_init__(self):
         if self.clients <= 0 or self.keys <= 0:

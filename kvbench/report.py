@@ -54,6 +54,9 @@ def _workload_dict(workload):
                   "error_rate_pct": thresholds[1]}
              for op, thresholds in workload.slo_per_op.items()}
             if workload.slo_per_op else None),
+        # The preset file the SLO thresholds were loaded from, or
+        # null when they were given on the command line.
+        "slo_preset": workload.slo_preset,
     }
 
 
@@ -505,6 +508,17 @@ def _slo_lines(slo):
         "",
         "Thresholds: " + "; ".join(thresholds) + ".",
         "",
+    ]
+    if slo.get("preset"):
+        # Name the file the thresholds came from; CLI flags may have
+        # overridden individual preset values, but the file is where
+        # the run's budgets started.
+        lines.append(
+            f"Thresholds loaded from preset file `{slo['preset']}`; "
+            "CLI flags override preset values."
+        )
+        lines.append("")
+    lines += [
         "| Backend | p99 (ms) | p99 limit (ms) | Error rate | "
         "Error limit | Verdict |",
         "| --- | ---: | ---: | ---: | ---: | --- |",
@@ -821,6 +835,9 @@ def render_markdown(results, workload, command_line, comparison=None,
             "exit code 4 — after the reports are written, so the "
             "breach is visible in them. The JSON report carries "
             "the same gate under `slo`."
+            + (f" The thresholds were loaded from preset file "
+               f"`{slo['preset']}`; CLI flags override preset "
+               "values." if slo.get("preset") else "")
         )
     for result in results:
         if result.error_sample:

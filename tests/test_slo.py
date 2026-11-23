@@ -16,7 +16,7 @@ from kvbench.bench import BenchmarkResult, Workload
 from kvbench.cli import _parse_slo_op, main
 from kvbench.report import render_json, render_markdown, to_json_dict
 from kvbench.slo import error_rate_pct, evaluate_slo, format_slo_verdict, \
-    per_op_error_rate_pct
+    load_slo_preset, per_op_error_rate_pct
 
 
 def _result(name="cinder (127.0.0.1:6379)", ops=100, errors=0,
@@ -178,6 +178,107 @@ class TestParseSloOp(unittest.TestCase):
     def test_non_numeric_threshold_rejected(self):
         with self.assertRaises(ValueError):
             _parse_slo_op("SET:fast,0.1")
+
+
+class TestLoadSloPreset(unittest.TestCase):
+    def _write_preset(self, text):
+        tmp = tempfile.NamedTemporaryFile(
+            "w", suffix=".json", delete=False, encoding="utf-8")
+        tmp.write(text)
+        tmp.close()
+        self.addCleanup(os.unlink, tmp.name)
+        return tmp.name
+
+    def test_full_preset(self):
+        path = self._write_preset(json.dumps({
+            "p99_ms": 1.0,
+            "error_rate_pct": 0.5,
+            "per_op": {
+                "SET": {"p99_ms": 5, "error_rate_pct": 0.1},
+                "GET": {"p99_ms": 2},
+            },
+        }))
+        preset = load_slo_preset(path)
+        self.assertEqual(preset["p99_ms"], 1.0)
+        self.assertEqual(preset["error_rate_pct"], 0.5)
+        self.assertEqual(preset["per_op"], {
+            "SET": (5.0, 0.1), "GET": (2.0, None)})
+
+    def test_partial_preset_defaults_to_none(self):
+        # Every key is optional: a preset may set only the p99 cap.
+        path = self._write_preset(json.dumps({"p99_ms": 2.5}))
+        preset = load_slo_preset(path)
+        self.assertEqual(preset["p99_ms"], 2.5)
+        self.assertIsNone(preset["error_rate_pct"])
+        self.assertEqual(preset["per_op"], {})
+
+    def test_empty_object_is_no_thresholds(self):
+        path = self._write_preset("{}")
+        preset = load_slo_preset(path)
+        self.assertIsNone(preset["p99_ms"])
+        self.assertIsNone(preset["error_rate_pct"])
+        self.assertEqual(preset["per_op"], {})
+
+    def test_op_name_is_case_insensitive(self):
+        path = self._write_preset(json.dumps({
+            "per_op": {"set": {"p99_ms": 5}}}))
+        preset = load_slo_preset(path)
+        self.assertEqual(preset["per_op"], {"SET": (5.0, None)})
+
+    def test_missing_file_rejected(self):
+        with self.assertRaises(ValueError) as caught:
+            load_slo_preset("/nonexistent/slo.json")
+        self.assertIn("not found", str(caught.exception))
+
+    def test_invalid_json_rejected(self):
+        path = self._write_preset("{not json")
+        with self.assertRaises(ValueError) as caught:
+            load_slo_preset(path)
+        self.assertIn("not valid JSON", str(caught.exception))
+
+    def test_non_object_rejected(self):
+        path = self._write_preset("[1, 2]")
+        with self.assertRaises(ValueError) as caught:
+            load_slo_preset(path)
+        self.assertIn("must be a JSON object", str(caught.exception))
+
+    def test_unknown_key_rejected(self):
+        path = self._write_preset(json.dumps({"p95_ms": 1.0}))
+        with self.assertRaises(ValueError) as caught:
+            load_slo_preset(path)
+        self.assertIn("unknown key", str(caught.exception))
+
+    def test_negative_p99_rejected(self):
+        path = self._write_preset(json.dumps({"p99_ms": -1}))
+        with self.assertRaises(ValueError):
+            load_slo_preset(path)
+
+    def test_error_rate_above_100_rejected(self):
+        path = self._write_preset(json.dumps({"error_rate_pct": 101}))
+        with self.assertRaises(ValueError):
+            load_slo_preset(path)
+
+    def test_non_numeric_threshold_rejected(self):
+        path = self._write_preset(json.dumps({"p99_ms": "fast"}))
+        with self.assertRaises(ValueError):
+            load_slo_preset(path)
+
+    def test_unknown_op_rejected(self):
+        path = self._write_preset(json.dumps({
+            "per_op": {"DEL": {"p99_ms": 1}}}))
+        with self.assertRaises(ValueError):
+            load_slo_preset(path)
+
+    def test_per_op_with_no_threshold_rejected(self):
+        path = self._write_preset(json.dumps({
+            "per_op": {"SET": {}}}))
+        with self.assertRaises(ValueError):
+            load_slo_preset(path)
+
+    def test_per_op_must_be_an_object(self):
+        path = self._write_preset(json.dumps({"per_op": [1]}))
+        with self.assertRaises(ValueError):
+            load_slo_preset(path)
 
 
 class TestPerOpErrorRate(unittest.TestCase):
@@ -418,6 +519,24 @@ class TestSloReport(unittest.TestCase):
         self.assertEqual(doc["slo"]["per_op_thresholds"], {
             "SET": {"p99_ms": 10.0, "error_rate_pct": 15.0}})
 
+    def test_preset_recorded_in_both_reports(self):
+        workload = Workload(
+            ops=100, clients=2, keys=10, value_size=8,
+            set_weight=50, get_weight=40, incr_weight=10,
+            slo_p99_ms=1.0, slo_preset="slo.json")
+        slo = evaluate_slo([_result()], p99_ms=1.0, preset="slo.json")
+        text = render_markdown([_result()], workload, "kvbench", slo=slo)
+        self.assertIn("Thresholds loaded from preset file `slo.json`",
+                      text)
+        doc = json.loads(render_json([_result()], workload, "kvbench",
+                                     slo=slo))
+        self.assertEqual(doc["workload"]["slo_preset"], "slo.json")
+        self.assertEqual(doc["slo"]["preset"], "slo.json")
+
+    def test_no_preset_means_null_preset(self):
+        doc = to_json_dict([_result()], _workload(), "kvbench")
+        self.assertIsNone(doc["workload"]["slo_preset"])
+
 
 class _FakeRespHandler(socketserver.StreamRequestHandler):
     """Minimal RESP: SET/GET/INCR against the server's own dict."""
@@ -560,6 +679,75 @@ class TestSloCli(unittest.TestCase):
         self.assertEqual(self._run("--slo-op", "DEL:1,1"), 2)
         self.assertEqual(self._run("--slo-op", "SET:1"), 2)
         self.assertEqual(self._run("--slo-op", "SET:,"), 2)
+
+    def _write_preset(self, data):
+        path = os.path.join(self.tmp.name, "slo.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        return path
+
+    def test_preset_thresholds_gate_the_run(self):
+        # A generous preset passes; an impossible one fails with
+        # exit 4, and both reports name the preset file.
+        generous = self._write_preset({"p99_ms": 1000})
+        self.assertEqual(self._run("--slo-preset", generous), 0)
+        with open(self.output, encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("SLO gate: passed", text)
+        self.assertIn(f"preset file `{generous}`", text)
+        with open(self.output.replace(".md", ".json"),
+                  encoding="utf-8") as f:
+            doc = json.load(f)
+        self.assertEqual(doc["workload"]["slo_preset"], generous)
+        self.assertEqual(doc["slo"]["preset"], generous)
+        self.assertEqual(doc["workload"]["slo_p99_ms"], 1000.0)
+        impossible = self._write_preset({"p99_ms": 0.000001})
+        self.assertEqual(self._run("--slo-preset", impossible), 4)
+
+    def test_preset_per_op_thresholds_gate_the_run(self):
+        preset = self._write_preset(
+            {"per_op": {"SET": {"p99_ms": 0.000001}}})
+        self.assertEqual(self._run("--slo-preset", preset), 4)
+        with open(self.output.replace(".md", ".json"),
+                  encoding="utf-8") as f:
+            doc = json.load(f)
+        self.assertEqual(doc["slo"]["per_op_thresholds"], {
+            "SET": {"p99_ms": 0.000001, "error_rate_pct": None}})
+
+    def test_cli_flags_override_preset(self):
+        # The preset's impossible p99 cap is overridden by a
+        # generous CLI flag, so the run passes.
+        preset = self._write_preset({"p99_ms": 0.000001,
+                                     "error_rate_pct": 0.0})
+        self.assertEqual(self._run(
+            "--slo-preset", preset, "--slo-p99-ms", "1000"), 0)
+        with open(self.output.replace(".md", ".json"),
+                  encoding="utf-8") as f:
+            doc = json.load(f)
+        self.assertEqual(doc["workload"]["slo_p99_ms"], 1000.0)
+        # And a CLI per-op flag overrides the preset's entry for
+        # that op only: a preset whose SET cap is impossible passes
+        # once the CLI replaces the SET entry.
+        per_op_preset = self._write_preset(
+            {"p99_ms": 1000,
+             "per_op": {"SET": {"p99_ms": 0.000001}}})
+        self.assertEqual(self._run("--slo-preset", per_op_preset), 4)
+        self.assertEqual(self._run(
+            "--slo-preset", per_op_preset,
+            "--slo-op", "SET:1000,"), 0)
+
+    def test_missing_preset_file_rejected(self):
+        missing = os.path.join(self.tmp.name, "nope.json")
+        self.assertEqual(self._run("--slo-preset", missing), 2)
+
+    def test_invalid_preset_file_rejected(self):
+        path = os.path.join(self.tmp.name, "bad.json")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("{not json")
+        self.assertEqual(self._run("--slo-preset", path), 2)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"p99_ms": -1}, f)
+        self.assertEqual(self._run("--slo-preset", path), 2)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,130 @@ still leaves a report showing the verdict, and the process exits 4
 (a distinct code from the regression gate's 3).
 """
 
+import json
+import os
+
+
+def load_slo_preset(path):
+    """Load SLO thresholds from a preset file.
+
+    The file is JSON with an object of the form::
+
+        {
+          "p99_ms": 1.0,
+          "error_rate_pct": 1.0,
+          "per_op": {
+            "SET": {"p99_ms": 5, "error_rate_pct": 0.1},
+            "GET": {"p99_ms": 2}
+          }
+        }
+
+    Every key is optional: a preset may set only the global p99, only
+    per-op thresholds, or any combination. A per-op entry may set
+    either threshold or both, but at least one. Thresholds follow the
+    same rules as the CLI flags: p99 must be non-negative, the error
+    rate between 0 and 100.
+
+    Returns a dict with ``p99_ms``, ``error_rate_pct`` (either may be
+    None) and ``per_op`` (op name to a ``(p99_ms, error_rate_pct)``
+    pair, either of which may be None). Raises ValueError with a
+    message naming the file and what is wrong with it when the file
+    is missing, is not valid JSON, is not an object, or holds an
+    unknown key, an unknown op, or an out-of-range threshold.
+    """
+    if not os.path.exists(path):
+        raise ValueError(f"slo preset not found: {path}")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except OSError as exc:
+        raise ValueError(
+            f"slo preset {path} cannot be read: {exc.strerror or exc}"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"slo preset {path} is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"slo preset {path} must be a JSON object")
+    unknown = sorted(set(data) - {"p99_ms", "error_rate_pct", "per_op"})
+    if unknown:
+        raise ValueError(
+            f"slo preset {path}: unknown key(s) "
+            + ", ".join(repr(k) for k in unknown)
+            + " (expected p99_ms, error_rate_pct, per_op)")
+    p99_ms = _preset_number(data, "p99_ms", path)
+    if p99_ms is not None and p99_ms < 0:
+        raise ValueError(
+            f"slo preset {path}: p99_ms must be non-negative")
+    error_rate_pct = _preset_number(data, "error_rate_pct", path)
+    if error_rate_pct is not None and not (0 <= error_rate_pct <= 100):
+        raise ValueError(
+            f"slo preset {path}: error_rate_pct must be between "
+            "0 and 100")
+    per_op = {}
+    raw_per_op = data.get("per_op")
+    if raw_per_op is not None:
+        if not isinstance(raw_per_op, dict):
+            raise ValueError(
+                f"slo preset {path}: per_op must be an object "
+                "mapping op names to thresholds")
+        for op, thresholds in raw_per_op.items():
+            op = op.upper() if isinstance(op, str) else op
+            if op not in ("SET", "GET", "INCR"):
+                raise ValueError(
+                    f"slo preset {path}: per_op op must be SET, GET "
+                    "or INCR")
+            if not isinstance(thresholds, dict):
+                raise ValueError(
+                    f"slo preset {path}: per_op {op} must be an "
+                    "object with p99_ms and/or error_rate_pct")
+            unknown = sorted(
+                set(thresholds) - {"p99_ms", "error_rate_pct"})
+            if unknown:
+                raise ValueError(
+                    f"slo preset {path}: per_op {op} has unknown "
+                    "key(s) "
+                    + ", ".join(repr(k) for k in unknown)
+                    + " (expected p99_ms, error_rate_pct)")
+            op_p99 = _preset_number(thresholds, "p99_ms", path,
+                                    f"per_op {op}")
+            if op_p99 is not None and op_p99 < 0:
+                raise ValueError(
+                    f"slo preset {path}: per_op {op} p99_ms must be "
+                    "non-negative")
+            op_rate = _preset_number(thresholds, "error_rate_pct", path,
+                                     f"per_op {op}")
+            if op_rate is not None and not (0 <= op_rate <= 100):
+                raise ValueError(
+                    f"slo preset {path}: per_op {op} error_rate_pct "
+                    "must be between 0 and 100")
+            if op_p99 is None and op_rate is None:
+                raise ValueError(
+                    f"slo preset {path}: per_op {op} must set at "
+                    "least one threshold")
+            per_op[op] = (op_p99, op_rate)
+    return {"p99_ms": p99_ms, "error_rate_pct": error_rate_pct,
+            "per_op": per_op}
+
+
+def _preset_number(data, key, path, where=None):
+    """A numeric preset value, or None when the key is absent.
+
+    Raises ValueError naming the file when the value is present but
+    not a number. Booleans are rejected: JSON ``true`` is not a
+    threshold.
+    """
+    if key not in data or data[key] is None:
+        return None
+    value = data[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        label = f"{where} {key}" if where else key
+        raise ValueError(
+            f"slo preset {path}: {label} must be a number")
+    return float(value)
+
+
 def error_rate_pct(result):
     """Error rate of a result, as a percentage of all ops attempted.
 
@@ -81,7 +205,7 @@ def _evaluate_per_op(result, per_op):
 
 
 def evaluate_slo(results, p99_ms=None, error_rate_threshold_pct=None,
-                 per_op=None):
+                 per_op=None, preset=None):
     """Evaluate the SLO gate for every result.
 
     Returns None when no threshold was given (no gate). Otherwise a
@@ -96,6 +220,10 @@ def evaluate_slo(results, p99_ms=None, error_rate_threshold_pct=None,
     the global ones, so a slow SET breaches even when the overall
     p99 is fine. A backend breaches when any of its global or
     per-op thresholds is breached.
+
+    ``preset`` is the path of the preset file the thresholds were
+    loaded from (``--slo-preset``), recorded so the reports can say
+    where the thresholds came from; None when no preset was used.
     """
     per_op = per_op or {}
     if (p99_ms is None and error_rate_threshold_pct is None
@@ -131,6 +259,9 @@ def evaluate_slo(results, p99_ms=None, error_rate_threshold_pct=None,
                  "error_rate_pct": thresholds[1]}
             for op, thresholds in per_op.items()
         } if per_op else None,
+        # The preset file the thresholds came from, or None when
+        # they were given on the command line.
+        "preset": preset,
         "entries": entries,
         "breaches": sum(1 for e in entries
                         if e["verdict"] == "breach"),

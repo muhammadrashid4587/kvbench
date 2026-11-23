@@ -44,6 +44,11 @@ Usage:
     python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
         --ops 20000 --clients 4 --slo-op SET:5,0.1 \\
         --slo-op GET:2,0.1
+    # SLO preset file: the thresholds live in a JSON file instead
+    # of on the command line, so CI can share one budget across
+    # runs; CLI flags still override the preset values
+    python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
+        --ops 20000 --clients 4 --slo-preset slo.json
 """
 
 import argparse
@@ -59,7 +64,7 @@ from .history import DEFAULT_HISTORY_FILE, format_history, \
 from .report import _workload_dict, render_csv, write_csv, write_json, \
     write_report
 from .resp import RespClient
-from .slo import evaluate_slo, format_slo_verdict
+from .slo import evaluate_slo, format_slo_verdict, load_slo_preset
 
 
 def json_path_for(output_path, json_arg):
@@ -375,6 +380,12 @@ def build_parser():
                         "either threshold may be left empty "
                         "(SET:5, gates p99 only); repeatable, a later "
                         "entry for the same op replaces the earlier one")
+    parser.add_argument("--slo-preset", default=None, metavar="PATH",
+                        help="load SLO thresholds from a JSON preset "
+                        "file (p99_ms, error_rate_pct, per_op) instead "
+                        "of passing them on the command line; CLI "
+                        "flags (--slo-p99-ms, --slo-error-rate, "
+                        "--slo-op) override the preset values")
     return parser
 
 
@@ -413,6 +424,24 @@ def main(argv=None):
             raise ValueError(
                 "--regression-threshold must be non-negative")
         slo_per_op = {}
+        # A preset file supplies the thresholds; CLI flags override
+        # it — a global flag replaces the preset's value, and a
+        # --slo-op entry replaces the preset's entry for that op.
+        # A bad preset file fails fast (exit 2) before any benchmark
+        # runs, like the other argument errors above.
+        slo_p99_ms = args.slo_p99_ms
+        slo_error_rate = args.slo_error_rate
+        if args.slo_preset:
+            preset = load_slo_preset(args.slo_preset)
+            if preset["p99_ms"] is not None:
+                slo_p99_ms = preset["p99_ms"]
+            if preset["error_rate_pct"] is not None:
+                slo_error_rate = preset["error_rate_pct"]
+            slo_per_op.update(preset["per_op"])
+        if args.slo_p99_ms is not None:
+            slo_p99_ms = args.slo_p99_ms
+        if args.slo_error_rate is not None:
+            slo_error_rate = args.slo_error_rate
         for text in args.slo_op:
             op, p99_ms, error_rate_pct = _parse_slo_op(text)
             # A later entry for the same op replaces the earlier one.
@@ -449,9 +478,10 @@ def main(argv=None):
             hot_keys=args.hot_keys,
             sweep_keyspace=sweep_sizes,
             sweep_clients=client_counts,
-            slo_p99_ms=args.slo_p99_ms,
-            slo_error_rate_pct=args.slo_error_rate,
+            slo_p99_ms=slo_p99_ms,
+            slo_error_rate_pct=slo_error_rate,
             slo_per_op=slo_per_op,
+            slo_preset=args.slo_preset,
         )
     except ValueError as exc:
         print(f"kvbench: {exc}", file=sys.stderr)
@@ -570,8 +600,8 @@ def main(argv=None):
             args.compare_file, args.regression_threshold)
     # The SLO gate is evaluated before the reports are written, so
     # the verdict lands in both reports even when the run fails.
-    slo = evaluate_slo(results, args.slo_p99_ms, args.slo_error_rate,
-                       slo_per_op)
+    slo = evaluate_slo(results, slo_p99_ms, slo_error_rate,
+                       slo_per_op, preset=args.slo_preset)
     write_report(results, workload, command_line, args.output,
                  comparison, slo)
     print(f"report written to {args.output}")
