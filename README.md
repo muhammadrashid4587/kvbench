@@ -35,6 +35,13 @@ C. Pure Python 3 standard library, no dependencies.
   percentiles down. Warmup ops and latencies never reach the
   results, and the measured phase is re-seeded, so its keys and op
   mix are identical to a run with no warmup at all.
+  With `--hot-keys N` (default 5) the reports show per-key latency
+  stats — count, mean, p50, p95 and p99 — for the N hottest keys
+  by access count, so a hot key slower than the overall p99 points
+  at contention on that key rather than the server as a whole.
+  Under a zipfian distribution these are the keys the skew
+  concentrates on; counters report under their own key
+  (`kvbench:counter:<rank>`).
 - Latency stats (`kvbench/stats.py`): ops/sec, mean, p50, p95, p99,
   plus a log-spaced latency histogram and a per-second time series
   (ops, mean and max latency per second) to spot stalls.
@@ -118,7 +125,9 @@ or a preset: `read-heavy` 15:80:5, `balanced` 45:45:10,
 `write-heavy` 80:15:5), `--pipeline` (default 1, sequential),
 `--distribution` (`uniform` or `zipfian`, default `uniform`),
 `--zipf-skew` (default 1.0, the Zipf exponent for zipfian key
-picking; 0 is uniform), `--warmup` (e.g. `2s` or `1m`; run the
+picking; 0 is uniform), `--hot-keys` (default 5, how many of the
+hottest keys by access count get per-key latency stats in the
+reports; 0 disables), `--warmup` (e.g. `2s` or `1m`; run the
 workload for this long before measurement, warming caches and
 connections — warmup ops and latencies are excluded from the
 results, and in duration mode the duration clock starts after
@@ -164,6 +173,12 @@ INCR. Ops that never ran (e.g. INCR in an `80:20` read:write mix)
 are left out. The JSON report carries the same split per result
 under `per_op`.
 
+Below that, each backend gets a per-key latency table: count,
+mean, p50, p95 and p99 for the hottest keys by access count (top
+5 by default, `--hot-keys` to change it, 0 to disable). The JSON
+report carries the same entries per result under `hot_keys`, and
+the workload section carries the count under `hot_keys`.
+
 Below the histograms, each backend gets a latency-over-time table:
 one row per second of the run with the ops completed in that second
 and their mean and max latency. A second with 0 ops marks a stall —
@@ -201,6 +216,9 @@ make test
 
 ## Roadmap
 
+- ~~Per-key latency for hot keys (`--hot-keys N`): count, mean,
+  p50/p95/p99 per key for the hottest keys by access count, in both
+  reports.~~ Done in 0.7.0.
 - ~~Warmup phase (`--warmup 2s` / `1m`): run the same workload
   before measurement to warm caches and connections, with warmup
   ops and latencies excluded from both reports.~~ Done in 0.6.0.

@@ -170,6 +170,64 @@ class TestZipfianDistribution(unittest.TestCase):
                      distribution="zipfian", zipf_skew=-1.0)
 
 
+class TestHotKeyLatency(unittest.TestCase):
+    def test_zipfian_hot_key_is_rank_zero(self):
+        # Under zipfian the hottest key by access count is rank 0:
+        # it takes the largest share of ops, far above the rest.
+        workload = Workload(ops=20000, clients=4, keys=1000,
+                            value_size=8, distribution="zipfian",
+                            zipf_skew=1.0)
+        result = run_workload(DictClient, workload, "baseline (dict)")
+        hot = result.hot_key_summary()
+        self.assertEqual(len(hot), 5)
+        self.assertEqual(hot[0]["key"], "kvbench:0")
+        # Counts descend by rank; rank 0 alone takes ~13% at skew 1.
+        counts = [entry["count"] for entry in hot]
+        self.assertEqual(counts, sorted(counts, reverse=True))
+        self.assertGreater(hot[0]["count"], 2000)
+        for entry in hot:
+            self.assertGreater(entry["count"], 0)
+            self.assertGreaterEqual(entry["mean_ms"], 0)
+            self.assertGreaterEqual(entry["p50_ms"], 0)
+            self.assertGreaterEqual(entry["p95_ms"], entry["p50_ms"])
+            self.assertGreaterEqual(entry["p99_ms"], entry["p95_ms"])
+        # Per-key counts add back up to the total op count.
+        total = sum(len(samples)
+                    for samples in result.latencies_by_key.values())
+        self.assertEqual(total, result.ops)
+
+    def test_hot_key_summary_top_n_and_zero(self):
+        workload = Workload(ops=2000, clients=2, keys=20, value_size=8)
+        result = run_workload(DictClient, workload, "baseline (dict)")
+        self.assertEqual(len(result.hot_key_summary(3)), 3)
+        self.assertEqual(result.hot_key_summary(0), [])
+        self.assertEqual(len(result.hot_key_summary(100)),
+                         min(100, len(result.latencies_by_key)))
+
+    def test_hot_keys_zero_disables_tracking(self):
+        workload = Workload(ops=200, clients=2, keys=20, value_size=8,
+                            hot_keys=0)
+        result = run_workload(DictClient, workload, "baseline (dict)")
+        self.assertEqual(result.latencies_by_key, {})
+        self.assertEqual(result.hot_key_summary(), [])
+        self.assertEqual(result.ops, 200)
+
+    def test_hot_keys_validation(self):
+        with self.assertRaises(ValueError):
+            Workload(ops=10, clients=1, keys=10, hot_keys=-1)
+
+    def test_warmup_excluded_from_per_key_stats(self):
+        # Warmup ops run against the backend but must not land in
+        # the per-key stats: counts still add up to the measured ops.
+        workload = Workload(ops=200, clients=2, keys=20, value_size=8,
+                            warmup_s=0.2)
+        result = run_workload(DictClient, workload, "baseline (dict)")
+        self.assertGreater(result.warmup_ops, 0)
+        total = sum(len(samples)
+                    for samples in result.latencies_by_key.values())
+        self.assertEqual(total, result.ops)
+
+
 class TestDurationMode(unittest.TestCase):
     def test_duration_run_stops_near_requested_time(self):
         # A 0.5s run against the fast dict baseline should stop

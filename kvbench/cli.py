@@ -168,6 +168,10 @@ def build_parser():
     parser.add_argument("--zipf-skew", type=float, default=1.0,
                         help="Zipf exponent for --distribution zipfian "
                         "(0 = uniform, 1.0 = classic YCSB default)")
+    parser.add_argument("--hot-keys", type=int, default=5,
+                        help="how many of the hottest keys (by access "
+                        "count) get per-key latency stats in the "
+                        "reports (0 disables; default 5)")
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--baseline", action="store_true",
                         help="also run the in-process dict baseline")
@@ -217,6 +221,7 @@ def main(argv=None):
             warmup_s=warmup_s,
             distribution=args.distribution,
             zipf_skew=args.zipf_skew,
+            hot_keys=args.hot_keys,
         )
     except ValueError as exc:
         print(f"kvbench: {exc}", file=sys.stderr)

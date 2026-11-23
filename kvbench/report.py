@@ -34,10 +34,12 @@ def _workload_dict(workload):
         # The skew only means anything for zipfian; null otherwise.
         "zipf_skew": (workload.zipf_skew
                       if workload.distribution == "zipfian" else None),
+        # How many of the hottest keys get per-key stats (0 disables).
+        "hot_keys": workload.hot_keys,
     }
 
 
-def _result_dict(result):
+def _result_dict(result, top_n=5):
     return {
         "name": result.name,
         "ops": result.ops,
@@ -47,6 +49,9 @@ def _result_dict(result):
         "error_sample": result.error_sample,
         "summary": result.summary,
         "per_op": result.per_op_summary,
+        # Per-key latency stats for the hottest keys by access count:
+        # count, mean, p50, p95, p99, min and max per key.
+        "hot_keys": result.hot_key_summary(top_n),
         "histogram": result.histogram,
         "time_series": result.time_series,
         # Share of successful ops that hit the hottest 1% of keys
@@ -70,7 +75,7 @@ def to_json_dict(results, workload, command_line):
         ),
         "command": command_line,
         "workload": _workload_dict(workload),
-        "results": [_result_dict(r) for r in results],
+        "results": [_result_dict(r, workload.hot_keys) for r in results],
     }
 
 
@@ -139,6 +144,27 @@ def _per_op_lines(result):
             f"| {op} | {s['count']} | {s['ops_per_sec']:,.0f} | "
             f"{s['mean_ms']:.3f} | {s['p50_ms']:.3f} | "
             f"{s['p95_ms']:.3f} | {s['p99_ms']:.3f} |"
+        )
+    lines.append("")
+    return lines
+
+
+def _hot_key_lines(result, top_n=5):
+    """Per-key latency table for one result, or [] when empty."""
+    hot_keys = result.hot_key_summary(top_n)
+    if not hot_keys:
+        return []
+    lines = [
+        f"### Per-key latency — {result.name}",
+        "",
+        "| Key | Ops | Mean (ms) | p50 (ms) | p95 (ms) | p99 (ms) |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for entry in hot_keys:
+        lines.append(
+            f"| `{entry['key']}` | {entry['count']} | "
+            f"{entry['mean_ms']:.3f} | {entry['p50_ms']:.3f} | "
+            f"{entry['p95_ms']:.3f} | {entry['p99_ms']:.3f} |"
         )
     lines.append("")
     return lines
@@ -227,6 +253,12 @@ def render_markdown(results, workload, command_line):
         per_op_lines += _per_op_lines(result)
     if per_op_lines:
         lines += ["", "## Per-operation stats", ""] + per_op_lines
+    hot_key_lines = []
+    for result in results:
+        hot_key_lines += _hot_key_lines(result, workload.hot_keys)
+    if hot_key_lines:
+        lines += ["", "## Per-key latency (hottest keys)", ""] + \
+            hot_key_lines
     hist_lines = []
     for result in results:
         hist_lines += _histogram_lines(result)
@@ -254,6 +286,17 @@ def render_markdown(results, workload, command_line):
         "percentiles by operation (SET, GET, INCR), so a read-heavy "
         "mix shows whether reads or writes dominate the tail.",
     ]
+    if workload.hot_keys > 0 and hot_key_lines:
+        lines.append(
+            "- The Per-key latency section shows count, mean, p50, p95 "
+            "and p99 for the hottest keys by access count (top "
+            f"{workload.hot_keys} by default, --hot-keys to change it): "
+            "under a zipfian distribution these are the keys the skew "
+            "concentrates on, so a hot key slower than the overall p99 "
+            "points at contention on that key rather than the server as "
+            "a whole. Counters report under their own key "
+            "(`kvbench:counter:<rank>`)."
+        )
     if workload.duration_s is not None:
         lines.append(
             "- In duration mode the run stops after the requested "

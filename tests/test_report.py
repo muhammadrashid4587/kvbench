@@ -37,6 +37,21 @@ def _result_with_per_op():
     )
 
 
+def _result_with_per_key():
+    return BenchmarkResult(
+        name="cinder (127.0.0.1:6379)",
+        ops=100,
+        elapsed_s=0.01,
+        errors=0,
+        latencies_ns=[100_000] * 60 + [200_000] * 40,
+        latencies_by_key={
+            "kvbench:0": [100_000] * 40,
+            "kvbench:1": [200_000] * 30,
+            "kvbench:2": [100_000] * 30,
+        },
+    )
+
+
 class TestReport(unittest.TestCase):
     def test_report_contains_results(self):
         workload = Workload(ops=100, clients=2, keys=10, value_size=8,
@@ -100,7 +115,7 @@ class TestReport(unittest.TestCase):
         doc.pop("generated")
         self.assertEqual(parsed, doc)
         self.assertEqual(parsed["tool"], "kvbench")
-        self.assertEqual(parsed["version"], "0.6.0")
+        self.assertEqual(parsed["version"], "0.7.0")
         self.assertEqual(parsed["command"], "kvbench --ops 100 --clients 2")
         self.assertEqual(parsed["workload"]["ops"], 100)
         self.assertEqual(parsed["workload"]["clients"], 2)
@@ -229,6 +244,69 @@ class TestReport(unittest.TestCase):
         self.assertEqual(parsed["results"][0]["per_op"], {})
         text = render_markdown([_result()], _workload(), "kvbench")
         self.assertNotIn("## Per-operation stats", text)
+
+    def test_hot_keys_in_json(self):
+        parsed = json.loads(render_json([_result_with_per_key()],
+                                        _workload(), "kvbench"))
+        self.assertEqual(parsed["workload"]["hot_keys"], 5)
+        hot = parsed["results"][0]["hot_keys"]
+        self.assertEqual(len(hot), 3)
+        # Ordered by access count: kvbench:0 (40) first, then the
+        # two 30-op keys in key order.
+        self.assertEqual(hot[0]["key"], "kvbench:0")
+        self.assertEqual(hot[0]["count"], 40)
+        self.assertAlmostEqual(hot[0]["mean_ms"], 0.1)
+        self.assertEqual(hot[1]["key"], "kvbench:1")
+        self.assertAlmostEqual(hot[1]["mean_ms"], 0.2)
+        self.assertEqual(hot[2]["key"], "kvbench:2")
+
+    def test_hot_keys_in_markdown(self):
+        text = render_markdown([_result_with_per_key()], _workload(),
+                               "kvbench")
+        self.assertIn("## Per-key latency (hottest keys)", text)
+        self.assertIn(
+            "Per-key latency — cinder (127.0.0.1:6379)", text)
+        self.assertIn(
+            "| Key | Ops | Mean (ms) | p50 (ms) | p95 (ms) | p99 (ms) |",
+            text)
+        self.assertIn("| `kvbench:0` | 40 | 0.100 |", text)
+        self.assertIn("| `kvbench:1` | 30 | 0.200 |", text)
+        self.assertIn("hottest keys by access count", text)
+
+    def test_hot_keys_absent_without_per_key_data(self):
+        # Results built without per-key latencies (e.g. older callers
+        # or --hot-keys 0) render no per-key section and an empty
+        # list in JSON.
+        parsed = json.loads(render_json([_result()], _workload(),
+                                        "kvbench"))
+        self.assertEqual(parsed["results"][0]["hot_keys"], [])
+        text = render_markdown([_result()], _workload(), "kvbench")
+        self.assertNotIn("## Per-key latency", text)
+        self.assertNotIn("hottest keys by access count", text)
+
+    def test_hot_keys_zero_omits_section(self):
+        workload = Workload(ops=100, clients=2, keys=10, value_size=8,
+                            hot_keys=0)
+        parsed = json.loads(render_json([_result_with_per_key()],
+                                        workload, "kvbench"))
+        self.assertEqual(parsed["workload"]["hot_keys"], 0)
+        self.assertEqual(parsed["results"][0]["hot_keys"], [])
+        text = render_markdown([_result_with_per_key()], workload,
+                               "kvbench")
+        self.assertNotIn("## Per-key latency", text)
+
+    def test_hot_keys_top_n_respected(self):
+        workload = Workload(ops=100, clients=2, keys=10, value_size=8,
+                            hot_keys=2)
+        parsed = json.loads(render_json([_result_with_per_key()],
+                                        workload, "kvbench"))
+        hot = parsed["results"][0]["hot_keys"]
+        self.assertEqual(len(hot), 2)
+        self.assertEqual(hot[0]["key"], "kvbench:0")
+        text = render_markdown([_result_with_per_key()], workload,
+                               "kvbench")
+        self.assertIn("| `kvbench:0` | 40 |", text)
+        self.assertNotIn("`kvbench:2`", text)
 
     def test_mix_label_in_reports(self):
         workload = Workload(ops=100, clients=2, keys=10, value_size=8,

@@ -76,6 +76,10 @@ class Workload:
     # 0 degenerates to uniform; 1.0 is the classic YCSB default.
     # Ignored unless distribution is "zipfian".
     zipf_skew: float = 1.0
+    # How many of the hottest keys (by access count) get their own
+    # per-key latency stats in the reports. 0 disables per-key
+    # tracking entirely.
+    hot_keys: int = 5
 
     def __post_init__(self):
         if self.clients <= 0 or self.keys <= 0:
@@ -95,6 +99,8 @@ class Workload:
             raise ValueError("ops must be positive")
         if self.warmup_s < 0:
             raise ValueError("warmup must be non-negative")
+        if self.hot_keys < 0:
+            raise ValueError("hot_keys must be non-negative")
         if self.pipeline < 1:
             raise ValueError("pipeline depth must be at least 1")
         total = self.set_weight + self.get_weight + self.incr_weight
@@ -120,6 +126,15 @@ class BenchmarkResult:
     # latencies_ns, split by operation, so the report can show
     # per-type ops/sec and latency percentiles.
     latencies_by_op: dict = field(default_factory=dict)
+    # Per-key latencies (ns), keyed by the full key string
+    # ("kvbench:0", "kvbench:counter:3", ...). Each list holds the
+    # same amortized per-op latencies as latencies_ns, split by key,
+    # so the report can show latency stats for the hottest keys.
+    # This duplicates the latencies in latencies_ns (one extra
+    # reference per op), so a very long duration run uses roughly
+    # twice the latency memory; per-key tracking is off when the
+    # workload sets hot_keys to 0.
+    latencies_by_key: dict = field(default_factory=dict)
     # Successful ops whose key was in the hot set: the hottest 1% of
     # the keyspace. Under a uniform distribution this is ~1% of ops;
     # under zipfian it is the measured hot-set hit rate, so a report
@@ -167,6 +182,30 @@ class BenchmarkResult:
     @property
     def histogram(self):
         return histogram(self.latencies_ns)
+
+    def hot_key_summary(self, top_n=5):
+        """Latency stats for the ``top_n`` hottest keys, by access count.
+
+        Each entry is the :func:`summarize` dict for that key plus its
+        ``key`` string, ordered by access count descending (ties broken
+        by key, so the order is deterministic). Keys that never ran
+        are absent, and ``top_n`` of 0 returns []. A key that was
+        both SET/GET and INCRed reports under one key string each:
+        ``kvbench:<rank>`` for SET/GET and ``kvbench:counter:<rank>``
+        for INCR, because counters live in their own keyspace.
+        """
+        if top_n <= 0 or not self.latencies_by_key:
+            return []
+        ranked = sorted(
+            self.latencies_by_key.items(),
+            key=lambda item: (-len(item[1]), item[0]),
+        )
+        out = []
+        for key, samples in ranked[:top_n]:
+            entry = summarize(samples)
+            entry["key"] = key
+            out.append(entry)
+        return out
 
     @property
     def time_series(self):
@@ -269,6 +308,7 @@ def run_workload(client_factory, workload, name):
     latencies = []
     times = []
     latencies_by_op = {}
+    latencies_by_key = {}
     hot_ops = 0
     warmup_ops = 0
     errors = 0
@@ -299,7 +339,7 @@ def run_workload(client_factory, workload, name):
         def run_phase(count, phase_deadline, collect, time_base):
             """Run batches until ``count`` is exhausted or the
             deadline is reached; return (latencies, times, by_op,
-            hot, errors, sample, ops_run).
+            by_key, hot, errors, sample, ops_run).
 
             With ``collect`` False this is a warmup phase: batches
             still run against the backend, but no latencies, times,
@@ -311,6 +351,7 @@ def run_workload(client_factory, workload, name):
             local_lat = []
             local_times = []
             local_by_op = {}
+            local_by_key = {}
             local_hot = 0
             local_errors = 0
             local_sample = ""
@@ -395,23 +436,26 @@ def run_workload(client_factory, workload, name):
                         local_lat.append(per_op_ns)
                         local_times.append(end_s)
                         local_by_op.setdefault(cmd[0], []).append(per_op_ns)
+                        if workload.hot_keys > 0:
+                            local_by_key.setdefault(
+                                cmd[1], []).append(per_op_ns)
                         if is_hot:
                             local_hot += 1
                 if remaining is not None:
                     remaining -= batch_size
-            return (local_lat, local_times, local_by_op, local_hot,
-                    local_errors, local_sample, done)
+            return (local_lat, local_times, local_by_op, local_by_key,
+                    local_hot, local_errors, local_sample, done)
 
         try:
             local_warmup = 0
             if warmup_deadline is not None:
-                (_, _, _, _, _, _, local_warmup) = run_phase(
+                (_, _, _, _, _, _, _, local_warmup) = run_phase(
                     None, warmup_deadline, collect=False, time_base=start)
                 # Re-seed so the measured phase draws the same keys
                 # and op mix as a run with no warmup at all.
                 rng = random.Random(workload.seed + thread_index)
-            (local_lat, local_times, local_by_op, local_hot,
-             local_errors, local_sample, _) = run_phase(
+            (local_lat, local_times, local_by_op, local_by_key,
+             local_hot, local_errors, local_sample, _) = run_phase(
                 op_count, deadline, collect=True,
                 time_base=measure_start)
         finally:
@@ -421,6 +465,8 @@ def run_workload(client_factory, workload, name):
             times.extend(local_times)
             for op, samples in local_by_op.items():
                 latencies_by_op.setdefault(op, []).extend(samples)
+            for key, samples in local_by_key.items():
+                latencies_by_key.setdefault(key, []).extend(samples)
             hot_ops += local_hot
             warmup_ops += local_warmup
             errors += local_errors
@@ -460,6 +506,7 @@ def run_workload(client_factory, workload, name):
         latencies_ns=latencies,
         times_s=times,
         latencies_by_op=latencies_by_op,
+        latencies_by_key=latencies_by_key,
         hot_ops=hot_ops,
         warmup_ops=warmup_ops,
     )
