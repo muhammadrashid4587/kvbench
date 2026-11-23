@@ -366,6 +366,49 @@ first run and in CI, where the question is not "did we get
 slower than last time" but "is this fast and reliable enough to
 ship".
 
+## Continuous benchmarking
+
+`.github/workflows/bench.yml` runs kvbench against cinder on every
+push to this repo (and on manual dispatch): it checks out cinder,
+builds it with `make`, starts it on port 6379, and runs
+
+```sh
+python3 -m kvbench.cli --host 127.0.0.1 --port 6379 \
+    --ops 20000 --clients 4 --slo-preset slo.json --output report.md
+```
+
+The SLO gate is the gate: kvbench exits 4 when a backend breaches
+the preset, which fails the workflow, so a push that makes cinder
+too slow or too error-prone goes red. Both reports are uploaded as
+the `kvbench-report` artifact even when the gate fails, so a failed
+run still leaves its report behind to look at.
+
+The budgets live in `slo.json`, the checked-in preset: global p99
+at most 5 ms, error rate at most 1%, SET p99 at most 10 ms and
+GET p99 at most 5 ms (each with error rate at most 0.1%). The
+numbers are deliberately loose — about 4x the p99 measured on a
+dev VM (~1 ms), where run-to-run jitter alone moves p99 between
+0.8 and 1.2 ms — so the gate catches a real regression, not
+runner noise. Tighten them only from numbers measured on the
+runner itself.
+
+The workflow itself cannot be executed end-to-end from a dev VM
+(there is no GitHub Actions runner there); the exact commands it
+runs are verified locally instead — build cinder, start it, run
+the command above — and `tests/test_workflow.py` checks the
+workflow file parses, triggers on push, checks out the real
+cinder repo, and passes only flags the real CLI parser accepts.
+To run what CI runs, locally:
+
+```sh
+# in the cinder repo
+make
+./cinder --port 6379 --data-dir ./data --aof-fsync everysec &
+# in this repo
+python3 -m kvbench.cli --host 127.0.0.1 --port 6379 \
+    --ops 20000 --clients 4 --slo-preset slo.json --output report.md
+```
+
 ## Report format
 
 `report.md` contains the workload settings and one row per backend:
@@ -475,6 +518,15 @@ make test
 
 ## Roadmap
 
+- GitHub Actions workflow (`.github/workflows/bench.yml`): run
+  kvbench against cinder on every push, gated by the checked-in
+  SLO preset (`slo.json`: global p99 5 ms, error rate 1%, SET
+  p99 10 ms, GET p99 5 ms), with the Markdown and JSON reports
+  uploaded as an artifact even when the gate fails. The
+  workflow itself cannot run on a dev VM, so its exact commands
+  are verified locally and `tests/test_workflow.py` checks the
+  workflow file parses and passes only real CLI flags. Done in
+  0.17.0.
 - ~~SLO preset file (`--slo-preset PATH`): load SLO thresholds
   from a JSON preset file (`p99_ms`, `error_rate_pct`, `per_op`),
   validatable (a bad file exits 2 before any benchmark runs),

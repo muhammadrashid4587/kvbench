@@ -1,0 +1,14 @@
+{
+  "p99_ms": 5,
+  "error_rate_pct": 1,
+  "per_op": {
+    "GET": {
+      "error_rate_pct": 0.1,
+      "p99_ms": 5
+    },
+    "SET": {
+      "error_rate_pct": 0.1,
+      "p99_ms": 10
+    }
+  }
+}
