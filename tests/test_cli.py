@@ -263,5 +263,53 @@ class TestDurationRun(unittest.TestCase):
         self.assertEqual(main(["--duration=-5s"]), 2)
 
 
+class TestWarmupFlag(unittest.TestCase):
+    def test_defaults_no_warmup(self):
+        args = build_parser().parse_args([])
+        self.assertIsNone(args.warmup)
+
+    def test_warmup_value_kept(self):
+        args = build_parser().parse_args(["--warmup", "2s"])
+        self.assertEqual(args.warmup, "2s")
+
+
+class TestWarmupRun(unittest.TestCase):
+    def test_warmup_run_reports_warmup(self):
+        server = _start_server()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                output = os.path.join(tmp, "report.md")
+                code = main([
+                    "--host", "127.0.0.1",
+                    "--port", str(server.server_address[1]),
+                    "--ops", "200", "--clients", "2",
+                    "--warmup", "0.2s",
+                    "--output", output,
+                ])
+                self.assertEqual(code, 0)
+                with open(output, encoding="utf-8") as f:
+                    text = f.read()
+                self.assertIn("Warmup: 0.2s", text)
+                self.assertIn("Warmup ops on cinder", text)
+                with open(os.path.join(tmp, "report.json"),
+                          encoding="utf-8") as f:
+                    parsed = json.load(f)
+                self.assertEqual(parsed["workload"]["warmup_s"], 0.2)
+                row = parsed["results"][0]
+                self.assertEqual(row["ops"], 200)
+                self.assertGreater(row["warmup_ops"], 0)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_bad_warmup_rejected(self):
+        for bad in ("bogus", "0s", "1h"):
+            code = main(["--warmup", bad, "--ops", "10"])
+            self.assertEqual(code, 2, msg=bad)
+        # A leading dash would be read as an option flag, so pass it
+        # with "="; the parser must still reject the value itself.
+        self.assertEqual(main(["--warmup=-5s", "--ops", "10"]), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

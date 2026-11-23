@@ -215,5 +215,64 @@ class TestDurationMode(unittest.TestCase):
         self.assertEqual(format_duration(90), "90s")
 
 
+class TestWarmupMode(unittest.TestCase):
+    def test_warmup_excluded_from_results(self):
+        # A 0.3s warmup runs real ops, but none of them land in the
+        # measured result: ops, latencies and elapsed cover the
+        # measured phase only.
+        workload = Workload(ops=200, clients=2, keys=20, value_size=8,
+                            warmup_s=0.3)
+        result = run_workload(DictClient, workload, "baseline (dict)")
+        self.assertEqual(result.ops, 200)
+        self.assertEqual(result.errors, 0)
+        self.assertEqual(result.summary["count"], 200)
+        self.assertGreater(result.warmup_ops, 0)
+        self.assertEqual(result.summary["count"] + result.warmup_ops,
+                         result.ops + result.warmup_ops)
+        # Elapsed excludes the 0.3s warmup: the measured 200 dict ops
+        # finish far faster than the warmup took.
+        self.assertLess(result.elapsed_s, 1.0)
+        self.assertLess(max(result.times_s), 1.0)
+
+    def test_warmup_with_duration_mode(self):
+        # In duration mode the duration clock starts after warmup
+        # ends, so elapsed is the duration, not duration + warmup.
+        workload = Workload(clients=2, keys=20, value_size=8,
+                            duration_s=0.5, warmup_s=0.3)
+        result = run_workload(DictClient, workload, "baseline (dict)")
+        self.assertGreater(result.ops, 0)
+        self.assertEqual(result.errors, 0)
+        self.assertGreater(result.warmup_ops, 0)
+        self.assertGreaterEqual(result.elapsed_s, 0.4)
+        self.assertLess(result.elapsed_s, 2.0)
+
+    def test_warmup_keeps_measured_workload_identical(self):
+        # The measured phase is re-seeded after warmup, so the same
+        # workload draws the same keys and op mix with or without
+        # a warmup: per-op counts and hot counts match exactly.
+        warmed = Workload(ops=2000, clients=2, keys=20, value_size=8,
+                          warmup_s=0.2)
+        plain = Workload(ops=2000, clients=2, keys=20, value_size=8)
+        warmed_result = run_workload(DictClient, warmed,
+                                     "baseline (dict)")
+        plain_result = run_workload(DictClient, plain, "baseline (dict)")
+        # Latencies differ run to run, but the op counts per type
+        # must be identical: the same keys and op mix were drawn.
+        warmed_counts = {op: s["count"] for op, s in
+                         warmed_result.per_op_summary.items()}
+        plain_counts = {op: s["count"] for op, s in
+                        plain_result.per_op_summary.items()}
+        self.assertEqual(warmed_counts, plain_counts)
+        self.assertEqual(warmed_result.hot_ops, plain_result.hot_ops)
+
+    def test_warmup_validation(self):
+        with self.assertRaises(ValueError):
+            Workload(ops=10, clients=1, keys=10, warmup_s=-1)
+        # Zero warmup is the default: no warmup phase at all.
+        workload = Workload(ops=10, clients=1, keys=10, warmup_s=0)
+        result = run_workload(DictClient, workload, "baseline (dict)")
+        self.assertEqual(result.warmup_ops, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

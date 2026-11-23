@@ -49,6 +49,13 @@ class Workload:
     # workers run until the deadline and the total op count is
     # whatever completed in that time.
     duration_s: float = None
+    # Warmup period in seconds, run before measurement: workers run
+    # the same workload against the backend (warming caches,
+    # connections and JITs) and the warmup ops are discarded — they
+    # are not counted in ``ops`` and their latencies never reach the
+    # result. The measured phase is re-seeded after warmup, so the
+    # measured workload is identical with or without a warmup.
+    warmup_s: float = 0.0
     # Human-readable name of the mix, when it came from a named
     # preset (``read-heavy`` etc.). Empty for an explicit weight
     # string; the report shows the preset name next to the weights.
@@ -86,6 +93,8 @@ class Workload:
             self.ops = 0
         elif self.ops <= 0:
             raise ValueError("ops must be positive")
+        if self.warmup_s < 0:
+            raise ValueError("warmup must be non-negative")
         if self.pipeline < 1:
             raise ValueError("pipeline depth must be at least 1")
         total = self.set_weight + self.get_weight + self.incr_weight
@@ -116,6 +125,10 @@ class BenchmarkResult:
     # under zipfian it is the measured hot-set hit rate, so a report
     # can show whether the skewed traffic actually landed on hot keys.
     hot_ops: int = 0
+    # Ops run during the warmup phase, before measurement. They are
+    # not part of ``ops`` and contribute no latencies; the count is
+    # kept so a report can show how much warming actually happened.
+    warmup_ops: int = 0
 
     @property
     def hot_hit_rate(self):
@@ -240,6 +253,16 @@ def run_workload(client_factory, workload, name):
     With ``workload.duration_s`` set, workers run until the shared
     wall-clock deadline instead of a fixed op count, and the result's
     ``ops`` is however many completed in that time.
+
+    With ``workload.warmup_s`` set, workers first run the same
+    workload for that long and discard everything it produces —
+    latencies, errors, hot counts — so the measured phase starts
+    with a warm server. The measured phase is re-seeded after
+    warmup, so its keys and op mix are identical to a run with no
+    warmup at all. Warmup ops are reported on the result as
+    ``warmup_ops``; the result's ``elapsed_s`` covers the measured
+    phase only, and in duration mode the duration clock starts
+    after warmup ends.
     """
     per_thread = workload.ops // workload.clients
     remainder = workload.ops % workload.clients
@@ -247,6 +270,7 @@ def run_workload(client_factory, workload, name):
     times = []
     latencies_by_op = {}
     hot_ops = 0
+    warmup_ops = 0
     errors = 0
     error_sample = ""
     thread_errors = []
@@ -255,7 +279,7 @@ def run_workload(client_factory, workload, name):
     hot_count = max(1, workload.keys // 100)
 
     def worker(thread_index, op_count):
-        nonlocal errors, error_sample, hot_ops
+        nonlocal errors, error_sample, hot_ops, warmup_ops
         rng = random.Random(workload.seed + thread_index)
         # One sampler per thread: cheap to build, and sharing one
         # across threads would need a lock on every pick.
@@ -271,19 +295,33 @@ def run_workload(client_factory, workload, name):
             with lock:
                 thread_errors.append(exc)
             return
-        local_lat = []
-        local_times = []
-        local_by_op = {}
-        local_hot = 0
-        local_errors = 0
-        local_sample = ""
-        try:
-            # ``remaining`` is None in duration mode: workers run
-            # until the shared deadline instead of a fixed op count.
-            remaining = op_count
+
+        def run_phase(count, phase_deadline, collect, time_base):
+            """Run batches until ``count`` is exhausted or the
+            deadline is reached; return (latencies, times, by_op,
+            hot, errors, sample, ops_run).
+
+            With ``collect`` False this is a warmup phase: batches
+            still run against the backend, but no latencies, times,
+            hot counts or errors are kept — only the op count.
+            ``time_base`` is the perf_counter origin for completion
+            times; warmup phases pass the run start, measured phases
+            pass the moment warmup ended.
+            """
+            local_lat = []
+            local_times = []
+            local_by_op = {}
+            local_hot = 0
+            local_errors = 0
+            local_sample = ""
+            done = 0
+            # ``remaining`` is None in duration mode and in warmup:
+            # workers run until the shared deadline instead of a
+            # fixed op count.
+            remaining = count
             while remaining is None or remaining > 0:
-                if deadline is not None and \
-                        time.perf_counter() >= deadline:
+                if phase_deadline is not None and \
+                        time.perf_counter() >= phase_deadline:
                     break
                 batch_size = (workload.pipeline if remaining is None
                               else min(workload.pipeline, remaining))
@@ -326,9 +364,11 @@ def run_workload(client_factory, workload, name):
                 except Exception as exc:  # noqa: BLE001 - count and continue
                     # The whole batch failed (e.g. transport error):
                     # every op in it counts as an error.
-                    local_errors += batch_size
-                    if not local_sample:
-                        local_sample = f"{type(exc).__name__}: {exc}"
+                    done += batch_size
+                    if collect:
+                        local_errors += batch_size
+                        if not local_sample:
+                            local_sample = f"{type(exc).__name__}: {exc}"
                     if remaining is not None:
                         remaining -= batch_size
                     continue
@@ -337,25 +377,43 @@ def run_workload(client_factory, workload, name):
                 # by the batch size (see Workload.pipeline).
                 per_op_ns = batch_ns // batch_size
                 # Completion time of this batch, in seconds since the
-                # run started; every op in the batch shares it, so the
-                # per-second series buckets by batch completion.
-                end_s = time.perf_counter() - start
+                # phase's time base; every op in the batch shares it,
+                # so the per-second series buckets by batch completion.
+                end_s = time.perf_counter() - time_base
+                done += batch_size
                 # Replies come back in batch order, so each reply pairs
                 # with its command's op for the per-op split.
                 for cmd, is_hot, reply in zip(batch, batch_hot, replies):
                     if isinstance(reply, Exception):
-                        local_errors += 1
-                        if not local_sample:
-                            local_sample = (f"{type(reply).__name__}: "
-                                            f"{reply}")
+                        if collect:
+                            local_errors += 1
+                            if not local_sample:
+                                local_sample = (f"{type(reply).__name__}: "
+                                                f"{reply}")
                         continue
-                    local_lat.append(per_op_ns)
-                    local_times.append(end_s)
-                    local_by_op.setdefault(cmd[0], []).append(per_op_ns)
-                    if is_hot:
-                        local_hot += 1
+                    if collect:
+                        local_lat.append(per_op_ns)
+                        local_times.append(end_s)
+                        local_by_op.setdefault(cmd[0], []).append(per_op_ns)
+                        if is_hot:
+                            local_hot += 1
                 if remaining is not None:
                     remaining -= batch_size
+            return (local_lat, local_times, local_by_op, local_hot,
+                    local_errors, local_sample, done)
+
+        try:
+            local_warmup = 0
+            if warmup_deadline is not None:
+                (_, _, _, _, _, _, local_warmup) = run_phase(
+                    None, warmup_deadline, collect=False, time_base=start)
+                # Re-seed so the measured phase draws the same keys
+                # and op mix as a run with no warmup at all.
+                rng = random.Random(workload.seed + thread_index)
+            (local_lat, local_times, local_by_op, local_hot,
+             local_errors, local_sample, _) = run_phase(
+                op_count, deadline, collect=True,
+                time_base=measure_start)
         finally:
             client.close()
         with lock:
@@ -364,15 +422,21 @@ def run_workload(client_factory, workload, name):
             for op, samples in local_by_op.items():
                 latencies_by_op.setdefault(op, []).extend(samples)
             hot_ops += local_hot
+            warmup_ops += local_warmup
             errors += local_errors
             if local_sample and not error_sample:
                 error_sample = local_sample
 
     threads = []
     start = time.perf_counter()
+    # Warmup runs first, against the same clock: the measured phase
+    # starts when warmup ends, so elapsed and the duration-mode
+    # deadline both count from there, not from thread start.
+    measure_start = start + workload.warmup_s
+    warmup_deadline = (measure_start if workload.warmup_s > 0 else None)
     # In duration mode every worker runs until this deadline; the
     # total op count is whatever completes in that time.
-    deadline = (start + workload.duration_s
+    deadline = (measure_start + workload.duration_s
                 if workload.duration_s is not None else None)
     for i in range(workload.clients):
         # None means "run until the deadline" for that worker.
@@ -385,7 +449,7 @@ def run_workload(client_factory, workload, name):
         t.join()
     if thread_errors:
         raise thread_errors[0]
-    elapsed = time.perf_counter() - start
+    elapsed = time.perf_counter() - measure_start
 
     return BenchmarkResult(
         name=name,
@@ -397,4 +461,5 @@ def run_workload(client_factory, workload, name):
         times_s=times,
         latencies_by_op=latencies_by_op,
         hot_ops=hot_ops,
+        warmup_ops=warmup_ops,
     )

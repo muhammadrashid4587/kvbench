@@ -29,6 +29,12 @@ C. Pure Python 3 standard library, no dependencies.
   The report records the expected hot-set share and the measured
   hot-set hit rate per backend, so a run shows whether the skewed
   traffic actually landed on hot keys.
+  With `--warmup 2s` (or `1m`) the runner first runs the same
+  workload for that long and throws it away — warming caches,
+  connections and JITs — so the cold first seconds do not drag the
+  percentiles down. Warmup ops and latencies never reach the
+  results, and the measured phase is re-seeded, so its keys and op
+  mix are identical to a run with no warmup at all.
 - Latency stats (`kvbench/stats.py`): ops/sec, mean, p50, p95, p99,
   plus a log-spaced latency histogram and a per-second time series
   (ops, mean and max latency per second) to spot stalls.
@@ -90,6 +96,10 @@ python -m kvbench.cli --host 127.0.0.1 --port 6379 \
 # take most of the traffic (skew 1.0 is the classic YCSB default)
 python -m kvbench.cli --ops 20000 --clients 4 \
     --distribution zipfian --zipf-skew 1.0
+
+# warm up for 2 seconds before measuring, so the cold first
+# seconds do not drag the percentiles down
+python -m kvbench.cli --ops 20000 --clients 4 --warmup 2s
 ```
 
 Pipelined latencies are the batch round-trip time divided by the batch
@@ -108,7 +118,11 @@ or a preset: `read-heavy` 15:80:5, `balanced` 45:45:10,
 `write-heavy` 80:15:5), `--pipeline` (default 1, sequential),
 `--distribution` (`uniform` or `zipfian`, default `uniform`),
 `--zipf-skew` (default 1.0, the Zipf exponent for zipfian key
-picking; 0 is uniform),
+picking; 0 is uniform), `--warmup` (e.g. `2s` or `1m`; run the
+workload for this long before measurement, warming caches and
+connections — warmup ops and latencies are excluded from the
+results, and in duration mode the duration clock starts after
+warmup ends),
 `--seed` (default 1234), `--baseline`, `--compare HOST:PORT`
 (repeatable: also run the same workload against another server and
 add it to the report), `--output` (default report.md), `--json`
@@ -161,6 +175,13 @@ and the expected hot-set share, and the notes list the measured
 hot-set hit rate per backend: the share of ops that hit the hottest
 1% of keys.
 
+With `--warmup` the workload section shows the warmup length, and
+the notes list how many warmup ops each backend ran: those ops and
+their latencies are excluded from the results, and the elapsed time
+covers the measured phase only. The JSON report carries the warmup
+under `workload.warmup_s` and each result's warmup op count under
+`warmup_ops`.
+
 ## Reproducing numbers
 
 Numbers are machine-dependent. To reproduce a report, run the exact
@@ -180,6 +201,9 @@ make test
 
 ## Roadmap
 
+- ~~Warmup phase (`--warmup 2s` / `1m`): run the same workload
+  before measurement to warm caches and connections, with warmup
+  ops and latencies excluded from both reports.~~ Done in 0.6.0.
 - ~~Zipfian key distribution (`--distribution zipfian` /
   `--zipf-skew`): skewed traffic where a hot set of keys takes most
   of the ops, with the expected and measured hot-set hit rate in

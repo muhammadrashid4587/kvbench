@@ -16,6 +16,9 @@ def _workload_dict(workload):
         # and the run length is under duration_s.
         "ops": None if workload.duration_s is not None else workload.ops,
         "duration_s": workload.duration_s,
+        # Warmup seconds before measurement (0 when no warmup); the
+        # warmup ops themselves are per-result, under warmup_ops.
+        "warmup_s": workload.warmup_s,
         "clients": workload.clients,
         "keys": workload.keys,
         "value_size": workload.value_size,
@@ -49,6 +52,9 @@ def _result_dict(result):
         # Share of successful ops that hit the hottest 1% of keys
         # (~0.01 under uniform; much higher under zipfian).
         "hot_hit_rate": result.hot_hit_rate,
+        # Ops run in the warmup phase, before measurement. They are
+        # not part of ``ops`` and contribute no latencies.
+        "warmup_ops": result.warmup_ops,
     }
 
 
@@ -176,6 +182,14 @@ def render_markdown(results, workload, command_line):
         )
     else:
         distribution_line = "- Key distribution: uniform"
+    if workload.warmup_s > 0:
+        warmup_line = (
+            f"- Warmup: {format_duration(workload.warmup_s)} "
+            "(same workload, before measurement; warmup ops and "
+            "latencies are excluded from the results)"
+        )
+    else:
+        warmup_line = None
     lines = [
         "# kvbench report",
         "",
@@ -195,6 +209,10 @@ def render_markdown(results, workload, command_line):
         f"INCR {workload.incr_weight}"
         + (f" ({workload.mix_label})" if workload.mix_label else ""),
         f"- Pipeline depth: {workload.pipeline} command(s) per round trip",
+    ]
+    if warmup_line is not None:
+        lines.append(warmup_line)
+    lines += [
         "",
         "## Results",
         "",
@@ -254,6 +272,19 @@ def render_markdown(results, workload, command_line):
                 f"- Hot-set hit rate on {result.name}: "
                 f"{result.hot_hit_rate * 100:.1f}% of ops hit the "
                 "hottest 1% of keys."
+            )
+    if workload.warmup_s > 0:
+        lines.append(
+            "- Before measurement each backend ran the same workload "
+            f"for {format_duration(workload.warmup_s)} as a warmup, so "
+            "caches and connections were warm; warmup ops and their "
+            "latencies are excluded from the results, and the elapsed "
+            "time covers the measured phase only."
+        )
+        for result in results:
+            lines.append(
+                f"- Warmup ops on {result.name}: {result.warmup_ops} "
+                "(excluded from results)."
             )
     for result in results:
         if result.error_sample:

@@ -12,6 +12,10 @@ Usage:
     # fixed wall-clock run instead of a fixed op count
     python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
         --duration 10s --clients 4 --output report.md
+    # warm up for 2s before measuring, so caches and connections
+    # are warm and the first seconds do not drag the percentiles down
+    python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
+        --ops 20000 --clients 4 --warmup 2s --output report.md
 """
 
 import argparse
@@ -140,6 +144,11 @@ def build_parser():
     parser.add_argument("--duration", default=None, metavar="DURATION",
                         help="run for a fixed wall-clock time instead of "
                         "a fixed op count, e.g. 10s or 2m")
+    parser.add_argument("--warmup", default=None, metavar="DURATION",
+                        help="run the workload for this long before "
+                        "measurement (e.g. 2s or 1m) to warm caches and "
+                        "connections; warmup ops are excluded from the "
+                        "results")
     parser.add_argument("--clients", type=int, default=4)
     parser.add_argument("--keys", type=int, default=1_000)
     parser.add_argument("--value-size", type=int, default=32)
@@ -182,6 +191,8 @@ def main(argv=None):
         compare_targets = [_parse_host_port(t) for t in args.compare]
         duration_s = (_parse_duration(args.duration)
                       if args.duration else None)
+        warmup_s = (_parse_duration(args.warmup)
+                    if args.warmup else 0.0)
         if duration_s is not None and args.ops is not None:
             raise ValueError(
                 "--ops and --duration are mutually exclusive: "
@@ -203,6 +214,7 @@ def main(argv=None):
             pipeline=args.pipeline,
             mix_label=mix_label,
             duration_s=duration_s,
+            warmup_s=warmup_s,
             distribution=args.distribution,
             zipf_skew=args.zipf_skew,
         )
@@ -212,11 +224,17 @@ def main(argv=None):
     command_line = " ".join(sys.argv)
     results = []
 
+    def _warmup_note(result):
+        return (f", warmup {result.warmup_ops} ops"
+                if result.warmup_ops else "")
+
     def server_factory():
         return RespClient(args.host, args.port)
 
     scope = (f"{format_duration(duration_s)} duration"
              if duration_s is not None else f"{workload.ops} ops")
+    if warmup_s:
+        scope += f", {format_duration(warmup_s)} warmup"
     print(f"kvbench {__version__}: {scope}, "
           f"{workload.clients} clients, pipeline depth "
           f"{workload.pipeline} against {args.host}:{args.port}")
@@ -231,7 +249,7 @@ def main(argv=None):
     print(f"  {result.name}: {result.ops_per_sec:,.0f} ops/sec, "
           f"p50 {result.summary['p50_ms']:.3f} ms, "
           f"p95 {result.summary['p95_ms']:.3f} ms, "
-          f"errors {result.errors}")
+          f"errors {result.errors}{_warmup_note(result)}")
 
     for host, port in compare_targets:
         def compare_factory(host=host, port=port):
@@ -250,14 +268,15 @@ def main(argv=None):
         print(f"  {compared.name}: {compared.ops_per_sec:,.0f} ops/sec, "
               f"p50 {compared.summary['p50_ms']:.3f} ms, "
               f"p95 {compared.summary['p95_ms']:.3f} ms, "
-              f"errors {compared.errors}")
+              f"errors {compared.errors}{_warmup_note(compared)}")
 
     if args.baseline:
         baseline = run_workload(DictClient, workload, "baseline (dict)")
         results.append(baseline)
         print(f"  {baseline.name}: {baseline.ops_per_sec:,.0f} ops/sec, "
               f"p50 {baseline.summary['p50_ms']:.3f} ms, "
-              f"p95 {baseline.summary['p95_ms']:.3f} ms")
+              f"p95 {baseline.summary['p95_ms']:.3f} ms"
+              f"{_warmup_note(baseline)}")
 
     write_report(results, workload, command_line, args.output)
     print(f"report written to {args.output}")

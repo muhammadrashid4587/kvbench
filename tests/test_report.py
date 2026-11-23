@@ -35,6 +35,9 @@ def _result_with_per_op():
             "GET": [200_000] * 40,
         },
     )
+
+
+class TestReport(unittest.TestCase):
     def test_report_contains_results(self):
         workload = Workload(ops=100, clients=2, keys=10, value_size=8,
                             set_weight=50, get_weight=40, incr_weight=10)
@@ -97,7 +100,7 @@ def _result_with_per_op():
         doc.pop("generated")
         self.assertEqual(parsed, doc)
         self.assertEqual(parsed["tool"], "kvbench")
-        self.assertEqual(parsed["version"], "0.4.0")
+        self.assertEqual(parsed["version"], "0.6.0")
         self.assertEqual(parsed["command"], "kvbench --ops 100 --clients 2")
         self.assertEqual(parsed["workload"]["ops"], 100)
         self.assertEqual(parsed["workload"]["clients"], 2)
@@ -239,6 +242,29 @@ def _result_with_per_op():
         parsed_plain = json.loads(render_json([_result()], _workload(),
                                               "kvbench"))
         self.assertIsNone(parsed_plain["workload"]["mix_label"])
+
+    def test_warmup_in_reports(self):
+        workload = Workload(ops=100, clients=2, keys=10, value_size=8,
+                            warmup_s=2)
+        result = BenchmarkResult(
+            name="cinder", ops=100, elapsed_s=0.01, errors=0,
+            latencies_ns=[100_000] * 100, warmup_ops=1234)
+        text = render_markdown([result], workload, "kvbench")
+        self.assertIn("Warmup: 2s", text)
+        self.assertIn("Warmup ops on cinder: 1234", text)
+        self.assertIn("excluded from the results", text)
+        parsed = json.loads(render_json([result], workload, "kvbench"))
+        self.assertEqual(parsed["workload"]["warmup_s"], 2)
+        self.assertEqual(parsed["results"][0]["warmup_ops"], 1234)
+
+    def test_no_warmup_omits_warmup_lines(self):
+        workload = _workload()
+        text = render_markdown([_result()], workload, "kvbench")
+        self.assertNotIn("Warmup:", text)
+        self.assertNotIn("Warmup ops on", text)
+        parsed = json.loads(render_json([_result()], workload, "kvbench"))
+        self.assertEqual(parsed["workload"]["warmup_s"], 0.0)
+        self.assertEqual(parsed["results"][0]["warmup_ops"], 0)
 
     def test_json_path_for(self):
         self.assertEqual(json_path_for("report.md", None), "report.json")
