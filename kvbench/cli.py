@@ -38,6 +38,12 @@ Usage:
     # per operation; --compare-same-workload limits it to runs
     # that used the latest recorded run's workload
     python -m kvbench.cli --best-worst --compare-same-workload
+    # prune old runs from the history file, per backend: keep the
+    # 20 most recent runs of each backend, or drop runs older
+    # than a date — --dry-run shows what would be removed
+    python -m kvbench.cli --prune --prune-keep 20
+    python -m kvbench.cli --prune --prune-before 2026-11-01T00:00:00Z \
+        --dry-run
     # compare this run against a previous run's JSON report, side
     # by side, and fail the run when it regressed past 5%
     python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
@@ -76,6 +82,7 @@ Usage:
 import argparse
 import os
 import sys
+from datetime import datetime, timezone
 
 from . import __version__
 from .bench import DictClient, Workload, format_duration, \
@@ -83,8 +90,9 @@ from .bench import DictClient, Workload, format_duration, \
 from .compare import compare_results, format_verdict, load_baseline, \
     load_history_baseline
 from .history import DEFAULT_HISTORY_FILE, format_best_worst, \
-    format_history, format_trend, load_history, record_run, \
-    write_best_worst, write_best_worst_json, write_trend
+    format_history, format_prune, format_trend, load_history, \
+    prune_history, record_run, write_best_worst, \
+    write_best_worst_json, write_trend
 from .report import _workload_dict, render_csv, write_csv, write_json, \
     write_report
 from .resp import RespClient
@@ -275,6 +283,29 @@ def _parse_slo_op(text):
     return op, p99_ms, error_rate_pct
 
 
+def _parse_prune_before(text):
+    """Parse a ``--prune-before`` value into an aware datetime.
+
+    An ISO timestamp (``2026-11-01T00:00:00Z`` or ``2026-11-01
+    00:00``); a timestamp with no timezone is read as UTC, the
+    same rule ``--compare-history`` uses for timestamps.
+    """
+    if not text:
+        raise ValueError(
+            "prune-before must be an ISO timestamp, "
+            "e.g. 2026-11-01T00:00:00Z")
+    candidate = (text[:-1] + "+00:00" if text.endswith("Z") else text)
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError as exc:
+        raise ValueError(
+            "prune-before must be an ISO timestamp, "
+            "e.g. 2026-11-01T00:00:00Z") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 def _parse_host_port(text):
     """Parse a HOST:PORT target, e.g. ``127.0.0.1:6380``."""
     if ":" not in text:
@@ -394,6 +425,35 @@ def build_parser():
     parser.add_argument("--history-limit", type=int, default=20,
                         help="how many recent runs --show-history and "
                         "--trend print per backend (default 20)")
+    parser.add_argument("--prune", action="store_true",
+                        help="prune old runs from the history file "
+                        "(see --history-file) and exit (no benchmark "
+                        "is run): keep the N most recent runs per "
+                        "backend (--prune-keep), drop runs older than "
+                        "a date (--prune-before), or clear it out "
+                        "(--prune-all)")
+    parser.add_argument("--prune-keep", type=int, default=None,
+                        metavar="N",
+                        help="with --prune, keep the N most recent "
+                        "runs of each backend and drop the rest "
+                        "(e.g. --prune-keep 20)")
+    parser.add_argument("--prune-before", default=None,
+                        metavar="TIMESTAMP",
+                        help="with --prune, drop runs older than this "
+                        "ISO timestamp, e.g. 2026-11-01T00:00:00Z "
+                        "(a timestamp with no timezone is read as UTC)")
+    parser.add_argument("--prune-backend", action="append", default=[],
+                        metavar="NAME",
+                        help="with --prune, only prune runs of this "
+                        "backend (e.g. cinder (127.0.0.1:6379)); "
+                        "repeatable, other backends are left alone")
+    parser.add_argument("--prune-all", action="store_true",
+                        help="with --prune, remove every run of the "
+                        "selected backends: the explicit flag for "
+                        "clearing a backend's history out entirely")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="with --prune, show what would be removed "
+                        "without changing the history file")
     parser.add_argument("--compare-file", default=None, metavar="PATH",
                         help="compare this run against a previous run's "
                         "JSON report (e.g. report.json): ops/sec and "
@@ -476,6 +536,18 @@ def main(argv=None):
               "there is no comparison without --best-worst",
               file=sys.stderr)
         return 2
+    if not args.prune:
+        for flag, given in (
+                ("--prune-keep", args.prune_keep is not None),
+                ("--prune-before", args.prune_before is not None),
+                ("--prune-backend", bool(args.prune_backend)),
+                ("--prune-all", args.prune_all),
+                ("--dry-run", args.dry_run)):
+            if given:
+                print(f"kvbench: {flag} needs --prune: it only "
+                      "applies when pruning the history file",
+                      file=sys.stderr)
+                return 2
     if args.trend:
         # Trend-only mode: same history file, rendered as a
         # per-backend ops/sec-over-time chart instead of a table.
@@ -510,6 +582,34 @@ def main(argv=None):
                                   workload=workload)
             print(f"Best vs worst JSON written to "
                   f"{args.best_worst_json}")
+        return 0
+    if args.prune:
+        # Prune-only mode: no server is contacted. A prune that
+        # would empty a backend is refused unless --prune-all was
+        # given — the explicit flag for clearing a backend out.
+        try:
+            if args.prune_all and (args.prune_keep is not None
+                                   or args.prune_before is not None):
+                raise ValueError(
+                    "--prune-all removes every run: it cannot be "
+                    "combined with --prune-keep or --prune-before")
+            if args.prune_keep is not None and args.prune_keep < 1:
+                raise ValueError("--prune-keep must be at least 1")
+            if not args.prune_all and args.prune_keep is None \
+                    and args.prune_before is None:
+                raise ValueError(
+                    "--prune needs --prune-keep, --prune-before or "
+                    "--prune-all: pick what to prune")
+            before = (_parse_prune_before(args.prune_before)
+                      if args.prune_before else None)
+            summary = prune_history(
+                history_path, keep=args.prune_keep, before=before,
+                backends=args.prune_backend, allow_all=args.prune_all,
+                dry_run=args.dry_run)
+        except ValueError as exc:
+            print(f"kvbench: {exc}", file=sys.stderr)
+            return 2
+        print(format_prune(summary, history_path))
         return 0
     try:
         set_w, get_w, incr_w, mix_label = _parse_mix(args.mix)

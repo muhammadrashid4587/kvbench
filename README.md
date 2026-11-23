@@ -162,6 +162,13 @@ python -m kvbench.cli --show-history
 # same history file
 python -m kvbench.cli --trend
 
+# prune old runs from the history file, per backend — keep the
+# 20 most recent runs of each backend, or drop runs older than
+# a date; --dry-run shows what would be removed first
+python -m kvbench.cli --prune --prune-keep 20
+python -m kvbench.cli --prune --prune-before 2026-11-01T00:00:00Z \
+    --dry-run
+
 # same trend chart, written to a Markdown file as well, so it
 # can be committed or attached to a report
 python -m kvbench.cli --trend --trend-out trend.md
@@ -263,6 +270,22 @@ comparison to a Markdown file; needs `--best-worst`),
 comparison as JSON; needs `--best-worst`),
 `--history-limit` (how many recent runs `--show-history` and
 default 20),
+`--prune` (prune old runs from the history file and exit, no
+benchmark is run — see below),
+`--prune-keep N` (with `--prune`, keep the N most recent runs
+of each backend and drop the rest, e.g. `--prune-keep 20`),
+`--prune-before TIMESTAMP` (with `--prune`, drop runs older
+than this ISO timestamp, e.g. `2026-11-01T00:00:00Z`; a
+timestamp with no timezone is read as UTC),
+`--prune-backend NAME` (with `--prune`, only prune runs of
+this backend, e.g. `cinder (127.0.0.1:6379)`; repeatable, other
+backends are left alone),
+`--prune-all` (with `--prune`, remove every run of the selected
+backends — the explicit flag for clearing a backend's history
+out entirely; it cannot be combined with `--prune-keep` or
+`--prune-before`),
+`--dry-run` (with `--prune`, show what would be removed
+without changing the history file),
 `--compare-file` (compare this run against a previous run's JSON
 report — ops/sec and p99 side by side per backend, with the
 percentage change and a verdict in both reports; see below),
@@ -367,6 +390,30 @@ per backend and per op, with ops/sec, p99 and the deltas), so a
 script can read the spread without parsing the table. Both need
 `--best-worst` (exit 2 otherwise), like `--trend-out` needs
 `--trend`.
+
+With `--prune` old runs are removed from the history file, per
+backend, so a history that grows by a run a day stays small
+enough to read: `--prune-keep N` keeps the N most recent runs
+of each backend and drops the rest, `--prune-before TIMESTAMP`
+drops runs older than that ISO timestamp (a timestamp with no
+timezone is read as UTC, the same rule `--compare-history`
+uses), and both may be given — a run must pass both to stay.
+`--prune-backend NAME` (repeatable) limits the prune to the
+named backends; other backends are left alone entirely. A
+prune never empties a backend on its own: a selection that
+would remove every recorded run of a backend is refused (exit
+2) unless `--prune-all` is given — the explicit flag for
+clearing a backend's history out entirely, which cannot be
+combined with `--prune-keep` or `--prune-before`. With
+`--dry-run` the same selection is computed and printed — one
+line per backend with how many runs would be removed, the
+timestamp range of those runs, and how many would be kept —
+but the file is not changed. The prune rewrites the file
+atomically (temp file + rename) and keeps the surviving runs in
+their original order; corrupt lines are dropped on rewrite,
+since loading already skips them, and a run whose timestamp
+cannot be parsed is kept by `--prune-before` — its age cannot
+be known, so the prune does not guess.
 
 ## Comparing against a previous run
 
@@ -662,6 +709,13 @@ make test
 
 ## Roadmap
 
+- ~~Per-backend history pruning (`--prune`): keep the N most
+  recent runs per backend (`--prune-keep`), or drop runs older
+  than a date (`--prune-before`), with a per-backend filter
+  (`--prune-backend`), a dry run showing what would be removed
+  (`--dry-run`), and an explicit `--prune-all` to clear a
+  backend out entirely — a prune never empties a backend
+  without it.~~ Done in 0.24.0.
 - ~~Best vs worst run comparison (`--best-worst`): pick the best
   and worst runs per backend out of the history file (by ops/sec,
   overall and per operation) and render a Markdown/JSON comparison

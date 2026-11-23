@@ -22,6 +22,7 @@ throughput swings run to run reads at a glance.
 
 import json
 import os
+import tempfile
 from datetime import datetime, timezone
 
 from . import __version__
@@ -600,6 +601,167 @@ def write_best_worst_json(path, entries, workload=None):
         json.dump(comparison, f, indent=2)
         f.write("\n")
     return comparison
+
+
+def _parse_record_timestamp(record):
+    """A record's timestamp as an aware datetime, or None.
+
+    Records written by kvbench carry ISO timestamps with a UTC
+    offset; a record with a missing or unparseable timestamp
+    cannot be dated, so pruning by age leaves it alone rather
+    than guessing.
+    """
+    text = record.get("timestamp")
+    if not isinstance(text, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def prune_history(path, keep=None, before=None, backends=None,
+                  allow_all=False, dry_run=False):
+    """Prune old runs from the history file, per backend.
+
+    ``keep`` keeps the N most recent runs of each backend;
+    ``before`` (an aware datetime) drops runs older than that
+    time; both may be given, and a run must pass both to stay.
+    ``backends`` limits the prune to the named backends — other
+    backends are left alone entirely. With ``allow_all`` every
+    run of the selected backends is removed (``keep`` and
+    ``before`` must be None then); without it a backend is never
+    left with zero runs, so a prune that would empty a backend
+    raises ValueError instead of deleting its whole history —
+    pass ``allow_all`` explicitly to clear a backend out. A dry
+    run computes the same selection but writes nothing.
+
+    Returns a summary dict: total removed and kept counts, and
+    per backend the removed and kept counts plus the timestamp
+    range of the removed runs (oldest to newest, or None when
+    nothing was removed for that backend). The file is rewritten
+    atomically (temp file + rename), keeping the surviving runs
+    in their original order; corrupt lines are dropped on
+    rewrite, since ``load_history`` already skips them.
+    """
+    entries = load_history(path)
+    if not entries:
+        return {"removed": 0, "kept": 0, "backends": {},
+                "dry_run": dry_run}
+    # Group runs per backend, keeping first-seen backend order;
+    # the selection is per backend, so a busy backend never
+    # crowds a quiet one out of the history.
+    by_backend = {}
+    for entry in entries:
+        by_backend.setdefault(entry.get("backend", "?"), []).append(entry)
+    selected = set(backends) if backends else None
+    kept_ids = set()
+    summary_backends = {}
+    for backend, runs in by_backend.items():
+        if selected is not None and backend not in selected:
+            for entry in runs:
+                kept_ids.add(id(entry))
+            summary_backends[backend] = {
+                "removed": 0, "kept": len(runs), "removed_range": None,
+            }
+            continue
+        if allow_all:
+            remove = list(runs)
+        else:
+            remove = []
+            keep_from = len(runs) - keep if keep is not None else 0
+            for index, entry in enumerate(runs):
+                if index < keep_from:
+                    remove.append(entry)
+                    continue
+                timestamp = _parse_record_timestamp(entry)
+                if (before is not None and timestamp is not None
+                        and timestamp < before):
+                    remove.append(entry)
+        remove_ids = {id(entry) for entry in remove}
+        kept = [entry for entry in runs
+                if id(entry) not in remove_ids]
+        if not allow_all and not kept:
+            raise ValueError(
+                f"pruning would remove every recorded run of "
+                f"{backend!r}: pass --prune-all to clear a backend "
+                f"out entirely")
+        for entry in kept:
+            kept_ids.add(id(entry))
+        timestamps = sorted(str(e.get("timestamp", "")) for e in remove)
+        summary_backends[backend] = {
+            "removed": len(remove),
+            "kept": len(kept),
+            "removed_range": (
+                (timestamps[0][:19].replace("T", " "),
+                 timestamps[-1][:19].replace("T", " "))
+                if timestamps else None),
+        }
+    removed = sum(b["removed"] for b in summary_backends.values())
+    kept_total = sum(b["kept"] for b in summary_backends.values())
+    if removed and not dry_run:
+        kept_entries = [entry for entry in entries
+                        if id(entry) in kept_ids]
+        directory = os.path.dirname(os.path.abspath(path))
+        os.makedirs(directory, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(
+            dir=directory, prefix=".history-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                for entry in kept_entries:
+                    f.write(json.dumps(entry) + "\n")
+            os.replace(tmp_path, path)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+    return {"removed": removed, "kept": kept_total,
+            "backends": summary_backends, "dry_run": dry_run}
+
+
+def format_prune(summary, path):
+    """Render a prune summary as text.
+
+    One line per backend — how many runs were removed (with the
+    timestamp range of the removed runs) and how many were kept —
+    plus a total. A dry run says so up front and reports what
+    would be removed; an empty history prints the same "No runs
+    recorded yet" message as ``--show-history``.
+    """
+    if not summary["backends"]:
+        return "No runs recorded yet. Re-run a benchmark with --history."
+    verb = "would remove" if summary["dry_run"] else "removed"
+    lines = []
+    if summary["dry_run"]:
+        lines.append(f"Dry run — nothing was removed from {path}:")
+    else:
+        lines.append(f"Pruned {path}:")
+    lines.append("")
+    for backend, counts in summary["backends"].items():
+        removed = counts["removed"]
+        kept = counts["kept"]
+        if removed:
+            oldest, newest = counts["removed_range"]
+            lines.append(
+                f"- {backend}: {verb} {removed} run(s) "
+                f"({oldest} to {newest}), kept {kept} run(s)")
+        else:
+            lines.append(
+                f"- {backend}: nothing to prune, kept {kept} run(s)")
+    lines.append("")
+    if summary["removed"]:
+        lines.append(
+            f"{'Would remove' if summary['dry_run'] else 'Removed'} "
+            f"{summary['removed']} run(s), kept {summary['kept']} "
+            f"run(s) in total.")
+    else:
+        lines.append("Nothing to prune.")
+    return "\n".join(lines)
 
 
 def format_history(entries, limit=20):
