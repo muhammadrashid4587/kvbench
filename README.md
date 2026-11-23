@@ -316,7 +316,15 @@ alongside, plus a sparkline of ops/sec over those runs (oldest to
 newest) and the first-to-last change. A backend with a single
 recorded run shows its one value with no delta and a single
 block; an empty history prints the same "No runs recorded yet"
-message as `--show-history`.
+message as `--show-history`. Below the overall chart each backend
+also gets a per-operation trend section — one table per op (SET,
+GET, INCR) that ran, with that op's ops/sec, its change versus
+the previous run that ran the same op, and its p99, plus its own
+sparkline and first-to-last change — so a SET regression reads
+at a glance even when GETs dominate the mix. Runs recorded
+before 0.22.0 carry no per-op data and simply show no per-op
+sections; a run that never ran an op (a read-only mix has no
+SET) leaves that op out of its own table.
 
 With `--trend-out PATH` the same chart is also written to a
 Markdown file — the exact text printed to stdout — so the trend
@@ -620,6 +628,13 @@ make test
 
 ## Roadmap
 
+- ~~Per-op trend tracking in `--trend`: each history record
+  carries per-op ops/sec and latency, and the trend chart renders
+  a per-op section per backend (SET, GET, INCR) with its own
+  table, sparkline and first-to-last change, so a slow op type
+  no longer hides inside the overall ops/sec. Records written
+  before 0.22.0 carry no per-op data and render no per-op
+  sections.~~ Done in 0.22.0.
 - ~~Trend chart as a Markdown file (`--trend-out PATH`): write
   the same ops/sec trend chart `--trend` prints to stdout to a
   Markdown file as well, so it can be committed or attached to a

@@ -11,7 +11,10 @@ Records are plain JSON lines; a corrupt line is skipped on load
 rather than failing the whole history, so a half-written file never
 blocks the trend view. ``--trend`` renders the same history as an
 ops/sec-over-time chart per backend, with a sparkline and the
-change versus the previous run.
+change versus the previous run, and since 0.22.0 each record also
+carries per-op throughput and latency, so the trend view tracks
+SET, GET and INCR separately — a slow write no longer hides
+inside the overall ops/sec.
 """
 
 import json
@@ -64,6 +67,24 @@ def build_record(result, workload, command_line):
         "p95_ms": summary["p95_ms"],
         "p99_ms": summary["p99_ms"],
         "errors": result.errors,
+        # Per-op throughput and latency, so the trend view can track
+        # each operation type on its own: a SET regression hides
+        # inside the overall ops/sec when GETs dominate the mix.
+        # Ops that never ran are left out, so a read-only mix
+        # records GET alone; records written before 0.22.0 have no
+        # "per_op" key at all, and the trend view skips those runs
+        # for the per-op sections instead of failing.
+        "per_op": {
+            op: {
+                "ops": entry["count"],
+                "ops_per_sec": entry["ops_per_sec"],
+                "mean_ms": entry["mean_ms"],
+                "p50_ms": entry["p50_ms"],
+                "p95_ms": entry["p95_ms"],
+                "p99_ms": entry["p99_ms"],
+            }
+            for op, entry in result.per_op_summary.items()
+        },
         "workload": _workload_record(workload),
     }
 
@@ -142,6 +163,73 @@ def _sparkline(values):
         for v in values)
 
 
+def _per_op_trend_lines(runs, window):
+    """Per-operation trend sections for one backend.
+
+    ``runs`` are all recorded runs of the backend (oldest first),
+    ``window`` the most recent ones being rendered. Each operation
+    type that ran gets its own table — ops/sec, the change versus
+    the previous run of this backend that ran the same op, and p99
+    — plus a sparkline and the first-to-last change. Runs recorded
+    before 0.22.0 carry no ``per_op`` data and are skipped for
+    these sections; an op that never ran in the window gets no
+    section at all.
+    """
+    lines = []
+    for op in ("SET", "GET", "INCR"):
+        # The delta is against the previous run that actually ran
+        # this op, scanning all runs so a run outside the window
+        # still counts as the previous one — the same rule the
+        # overall table uses.
+        previous_by_id = {}
+        previous = None
+        for entry in runs:
+            op_entry = (entry.get("per_op") or {}).get(op)
+            if op_entry is None:
+                previous_by_id[id(entry)] = None
+                continue
+            previous_by_id[id(entry)] = _ops_sec_delta(op_entry, previous)
+            previous = op_entry
+        values = [
+            (entry.get("per_op") or {}).get(op, {}).get("ops_per_sec")
+            for entry in window
+        ]
+        values = [v for v in values if isinstance(v, (int, float))]
+        if not values:
+            continue
+        lines.append(f"#### {op} ops/sec trend")
+        lines.append("")
+        lines.append("| Time (UTC) | Ops/sec | Ops/sec vs prev | "
+                     "p99 (ms) |")
+        lines.append("| --- | ---: | ---: | ---: |")
+        for entry in reversed(window):
+            op_entry = (entry.get("per_op") or {}).get(op)
+            if op_entry is None:
+                continue
+            timestamp = entry.get("timestamp", "")[:19].replace("T", " ")
+            ops_sec = op_entry.get("ops_per_sec")
+            ops_cell = (f"{ops_sec:,.0f}"
+                        if isinstance(ops_sec, (int, float)) else "-")
+            p99 = op_entry.get("p99_ms")
+            p99_cell = (f"{p99:.3f}"
+                        if isinstance(p99, (int, float)) else "-")
+            lines.append(
+                f"| {timestamp} | {ops_cell} | "
+                f"{previous_by_id[id(entry)]} | {p99_cell} |"
+            )
+        lines.append("")
+        lines.append(
+            f"{op} trend (oldest → newest): {_sparkline(values)}")
+        if len(values) >= 2:
+            first, last = values[0], values[-1]
+            change = (last - first) / first * 100 if first else 0.0
+            lines.append(
+                f"{op} first → last: {first:,.0f} → {last:,.0f} "
+                f"ops/sec ({change:+.1f}%)")
+        lines.append("")
+    return lines
+
+
 def format_trend(entries, limit=20):
     """Render an ops/sec-over-time trend chart per backend.
 
@@ -149,10 +237,12 @@ def format_trend(entries, limit=20):
     its own section: a table of its most recent ``limit`` runs with
     ops/sec, the change versus the previous run of that backend,
     and p99 alongside, plus a sparkline of ops/sec over those runs
-    (oldest to newest) and the first-to-last change. A corrupt line
-    never reaches here — ``load_history`` already skips it — and
-    a backend with a single recorded run shows no delta, just its
-    one value.
+    (oldest to newest) and the first-to-last change, followed by
+    the same chart per operation type (SET, GET, INCR) for the ops
+    that ran, so each op's throughput trend reads on its own. A
+    corrupt line never reaches here — ``load_history`` already
+    skips it — and a backend with a single recorded run shows no
+    delta, just its one value.
     """
     if not entries:
         return "No runs recorded yet. Re-run a benchmark with --history."
@@ -197,6 +287,9 @@ def format_trend(entries, limit=20):
                 f"First → last: {first:,.0f} → {last:,.0f} ops/sec "
                 f"({change:+.1f}%)")
         sections.append("")
+        # Per-op trend, same shape as the overall chart, one section
+        # per operation type that ran in this window.
+        sections.extend(_per_op_trend_lines(runs, window))
     return "\n".join(sections)
 
 

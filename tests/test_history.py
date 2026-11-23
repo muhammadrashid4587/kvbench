@@ -16,11 +16,24 @@ from kvbench.history import DEFAULT_HISTORY_FILE, build_record, \
 
 
 def _make_result(name="cinder (127.0.0.1:6379)", ops=1000,
-                 ops_per_sec=50000.0):
+                 ops_per_sec=50000.0, latencies_by_op=None):
     # 1000 samples of 20_000 ns each: mean/p50/p95/p99 all 0.020 ms.
     return BenchmarkResult(
         name=name, ops=ops, elapsed_s=ops / ops_per_sec,
-        latencies_ns=[20_000] * ops)
+        latencies_ns=[20_000] * ops,
+        latencies_by_op=latencies_by_op or {})
+
+
+def _make_mixed_result(ops_per_sec=50000.0):
+    # A 50:40:10 SET:GET:INCR mix, so per-op trends have three ops
+    # to track: SET 500 samples, GET 400, INCR 100, all 20_000 ns.
+    return _make_result(
+        ops=1000, ops_per_sec=ops_per_sec,
+        latencies_by_op={
+            "SET": [20_000] * 500,
+            "GET": [20_000] * 400,
+            "INCR": [20_000] * 100,
+        })
 
 
 def _make_workload():
@@ -51,6 +64,25 @@ class TestBuildRecord(unittest.TestCase):
         record = build_record(_make_result(), workload, "kvbench")
         self.assertIsNone(record["workload"]["ops"])
         self.assertEqual(record["workload"]["duration_s"], 10.0)
+
+    def test_record_carries_per_op_stats(self):
+        # Elapsed is 1000 / 50000 = 0.02 s, so SET at 500 samples
+        # runs 25,000 ops/sec, GET 20,000, INCR 5,000.
+        record = build_record(_make_mixed_result(), _make_workload(),
+                              "kvbench --ops 1000")
+        per_op = record["per_op"]
+        self.assertEqual(per_op["SET"]["ops"], 500)
+        self.assertEqual(per_op["SET"]["ops_per_sec"], 25000.0)
+        self.assertEqual(per_op["SET"]["p99_ms"], 0.020)
+        self.assertEqual(per_op["GET"]["ops"], 400)
+        self.assertEqual(per_op["GET"]["ops_per_sec"], 20000.0)
+        self.assertEqual(per_op["INCR"]["ops"], 100)
+        self.assertEqual(per_op["INCR"]["ops_per_sec"], 5000.0)
+
+    def test_record_with_no_per_op_latencies_has_empty_per_op(self):
+        record = build_record(_make_result(), _make_workload(),
+                              "kvbench --ops 1000")
+        self.assertEqual(record["per_op"], {})
 
 
 class TestRecordAndLoad(unittest.TestCase):
@@ -239,6 +271,73 @@ class TestFormatTrend(unittest.TestCase):
         self.assertNotIn("10,000", text)
         self.assertIn("Trend (oldest → newest): ▁█", text)
 
+    def test_per_op_sections_track_each_op_separately(self):
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(_make_mixed_result(ops_per_sec=50000.0),
+                         workload, "kvbench"),
+        ]
+        text = format_trend(entries)
+        # SET: 500 samples over 0.025 s is 20,000 ops/sec, over
+        # 0.02 s is 25,000 — a +25.0% delta, same as the overall
+        # trend; GET 16,000 -> 20,000 and INCR 4,000 -> 5,000.
+        self.assertIn("#### SET ops/sec trend", text)
+        self.assertIn("#### GET ops/sec trend", text)
+        self.assertIn("#### INCR ops/sec trend", text)
+        self.assertIn("20,000", text)
+        self.assertIn("25,000", text)
+        self.assertIn("16,000", text)
+        self.assertIn("4,000", text)
+        self.assertIn("SET trend (oldest → newest): ▁█", text)
+        self.assertIn("SET first → last: 20,000 → 25,000 ops/sec "
+                      "(+25.0%)", text)
+        self.assertIn("GET first → last: 16,000 → 20,000 ops/sec "
+                      "(+25.0%)", text)
+
+    def test_per_op_delta_skips_runs_without_that_op(self):
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            # A read-only run in between: no SET or INCR samples.
+            build_record(_make_result(
+                ops_per_sec=60000.0,
+                latencies_by_op={"GET": [20_000] * 1000}),
+                workload, "kvbench"),
+            build_record(_make_mixed_result(ops_per_sec=50000.0),
+                         workload, "kvbench"),
+        ]
+        text = format_trend(entries)
+        # SET's delta is 25,000 vs the first run's 20,000 (+25.0%),
+        # not against the read-only run, which never ran SET. The
+        # SET section shows only the two mixed runs.
+        self.assertIn("SET first → last: 20,000 → 25,000 ops/sec "
+                      "(+25.0%)", text)
+        self.assertEqual(text.count("#### SET ops/sec trend"), 1)
+        # The read-only run still appears in the GET section.
+        self.assertIn("GET first → last: 16,000 → 20,000 ops/sec "
+                      "(+25.0%)", text)
+
+    def test_records_without_per_op_render_no_per_op_sections(self):
+        # History written before 0.22.0 has no "per_op" key: the
+        # overall trend still renders and nothing crashes.
+        workload = _make_workload()
+        entries = [
+            build_record(_make_result(ops_per_sec=rate), workload,
+                         "kvbench")
+            for rate in (40000.0, 50000.0)
+        ]
+        for entry in entries:
+            del entry["per_op"]
+        text = format_trend(entries)
+        self.assertIn("40,000", text)
+        self.assertIn("+25.0%", text)
+        self.assertNotIn("#### SET ops/sec trend", text)
+        self.assertNotIn("#### GET ops/sec trend", text)
+        self.assertNotIn("#### INCR ops/sec trend", text)
+
     def test_corrupt_lines_never_reach_the_chart(self):
         # load_history skips the corrupt line; the trend renders
         # from the records that survived.
@@ -311,6 +410,23 @@ class TestTrendCli(unittest.TestCase):
             self.assertIn("ops/sec trend", text)
             self.assertIn("+25.0%", text)
             self.assertIn("▁█", text)
+
+    def test_trend_flag_prints_per_op_sections(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "history.jsonl")
+            record_run(path, [_make_mixed_result(ops_per_sec=40000.0),
+                              _make_mixed_result(ops_per_sec=50000.0)],
+                       _make_workload(), "kvbench")
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = main(["--trend", "--history-file", path])
+            self.assertEqual(code, 0)
+            text = out.getvalue()
+            self.assertIn("#### SET ops/sec trend", text)
+            self.assertIn("#### GET ops/sec trend", text)
+            self.assertIn("#### INCR ops/sec trend", text)
+            self.assertIn("SET first → last: 20,000 → 25,000 ops/sec "
+                          "(+25.0%)", text)
 
     def test_trend_with_empty_history_exits_zero(self):
         with tempfile.TemporaryDirectory() as tmp:
