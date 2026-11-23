@@ -253,6 +253,14 @@ recorded run history and exit, no benchmark is run),
 `--trend-out PATH` (with `--trend`, also write the trend chart to
 a Markdown file — the same text printed to stdout — so it can be
 committed or attached to a report; needs `--trend`),
+`--best-worst` (print a best-run vs worst-run comparison per
+backend from the recorded run history and exit, no benchmark is
+run — ops/sec and p99 for the best and worst runs, overall and
+per operation, with the percentage change between them),
+`--best-worst-out PATH` (with `--best-worst`, also write the
+comparison to a Markdown file; needs `--best-worst`),
+`--best-worst-json PATH` (with `--best-worst`, also write the
+comparison as JSON; needs `--best-worst`),
 `--history-limit` (how many recent runs `--show-history` and
 default 20),
 `--compare-file` (compare this run against a previous run's JSON
@@ -267,7 +275,9 @@ default `~/.kvbench/history.jsonl`; mutually exclusive with
 `--compare-file`),
 `--compare-same-workload` (with `--compare-history`, only
 consider recorded runs whose workload matches this run's, so the
-baseline is the latest run that measured the same workload),
+baseline is the latest run that measured the same workload; with
+`--best-worst`, only consider runs whose workload matches the
+latest recorded run's),
 `--regression-threshold` (with `--compare-file` or
 `--compare-history`, exit 3 when any backend's ops/sec fell by
 more than that many percent, or its p99 rose by more than that
@@ -333,6 +343,30 @@ being re-rendered from the history file each time. The parent
 directory is created when needed, and `--trend-out` without
 `--trend` is rejected (exit 2), since there is no chart to
 write without it.
+
+With `--best-worst` the same history renders as a best-run vs
+worst-run comparison, one section per backend: a table with the
+best and worst runs' ops/sec and p99 side by side and the
+percentage change between them, so a backend whose throughput
+swings run to run reads at a glance — a wide spread says the
+runs vary a lot, a narrow one says the backend is steady. Each
+backend also gets the same table per operation type (SET, GET,
+INCR) that ran, picked independently by that op's ops/sec, so a
+slow-write run that still won overall still shows up as the
+worst SET run. A backend with a single recorded run has that run
+as both best and worst, with 0.0% deltas. With
+`--compare-same-workload` only runs whose workload matches the
+latest recorded run's are considered — the same
+apples-to-apples rule `--compare-history` uses, so a quick smoke
+run never becomes the worst run next to a full-size one — and
+the header names the workload that was matched.
+`--best-worst-out PATH` writes the same comparison to a Markdown
+file (the exact text printed to stdout), and
+`--best-worst-json PATH` writes it as JSON (best and worst run
+per backend and per op, with ops/sec, p99 and the deltas), so a
+script can read the spread without parsing the table. Both need
+`--best-worst` (exit 2 otherwise), like `--trend-out` needs
+`--trend`.
 
 ## Comparing against a previous run
 
@@ -628,6 +662,13 @@ make test
 
 ## Roadmap
 
+- ~~Best vs worst run comparison (`--best-worst`): pick the best
+  and worst runs per backend out of the history file (by ops/sec,
+  overall and per operation) and render a Markdown/JSON comparison
+  with ops/sec, p99 and the delta between them, with the same
+  workload filter behaviour as `--compare-same-workload` (matching
+  the latest recorded run's workload), plus `--best-worst-out` and
+  `--best-worst-json` file exports.~~ Done in 0.23.0.
 - ~~Per-op trend tracking in `--trend`: each history record
   carries per-op ops/sec and latency, and the trend chart renders
   a per-op section per backend (SET, GET, INCR) with its own

@@ -10,9 +10,10 @@ from contextlib import redirect_stdout
 from kvbench import __version__
 from kvbench.bench import BenchmarkResult, Workload
 from kvbench.cli import main
-from kvbench.history import DEFAULT_HISTORY_FILE, build_record, \
+from kvbench.history import DEFAULT_HISTORY_FILE, \
+    best_worst_comparison, build_record, format_best_worst, \
     format_history, format_trend, load_history, record_run, \
-    write_trend, _sparkline
+    write_best_worst, write_best_worst_json, write_trend, _sparkline
 
 
 def _make_result(name="cinder (127.0.0.1:6379)", ops=1000,
@@ -473,6 +474,360 @@ class TestTrendCli(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertIn("--trend-out needs --trend", err.getvalue())
             self.assertFalse(os.path.exists(out_path))
+
+
+class TestBestWorstComparison(unittest.TestCase):
+    def _entries(self, rates=(40000.0, 60000.0, 50000.0)):
+        workload = _make_workload()
+        return [
+            build_record(_make_result(ops_per_sec=rate), workload,
+                         "kvbench")
+            for rate in rates
+        ]
+
+    def _result_with_latency(self, ops_per_sec, latency_ns,
+                             latencies_by_op=None):
+        # 1000 samples of latency_ns each: p99 is latency_ns ns.
+        return BenchmarkResult(
+            name="cinder (127.0.0.1:6379)", ops=1000,
+            elapsed_s=1000 / ops_per_sec,
+            latencies_ns=[latency_ns] * 1000,
+            latencies_by_op=latencies_by_op or {})
+
+    def test_picks_best_and_worst_by_ops_sec(self):
+        comparison = best_worst_comparison(self._entries())
+        self.assertEqual(len(comparison["backends"]), 1)
+        backend = comparison["backends"][0]
+        self.assertEqual(backend["runs"], 3)
+        self.assertEqual(backend["best"]["ops_per_sec"], 60000.0)
+        self.assertEqual(backend["worst"]["ops_per_sec"], 40000.0)
+        # 60000 vs 40000 is +50.0%; p99 is 0.020 ms in both.
+        self.assertAlmostEqual(backend["ops_sec_delta_pct"], 50.0)
+        self.assertAlmostEqual(backend["p99_delta_pct"], 0.0)
+
+    def test_p99_delta_between_best_and_worst(self):
+        workload = _make_workload()
+        entries = [
+            build_record(
+                self._result_with_latency(40000.0, 40_000),
+                workload, "kvbench"),
+            build_record(
+                self._result_with_latency(60000.0, 10_000),
+                workload, "kvbench"),
+        ]
+        backend = best_worst_comparison(entries)["backends"][0]
+        self.assertEqual(backend["best"]["p99_ms"], 0.010)
+        self.assertEqual(backend["worst"]["p99_ms"], 0.040)
+        # Best p99 0.010 vs worst 0.040 is -75.0%.
+        self.assertAlmostEqual(backend["p99_delta_pct"], -75.0)
+
+    def test_single_run_is_both_best_and_worst(self):
+        backend = best_worst_comparison(
+            self._entries(rates=(50000.0,)))["backends"][0]
+        self.assertEqual(backend["runs"], 1)
+        self.assertEqual(backend["best"]["ops_per_sec"], 50000.0)
+        self.assertEqual(backend["worst"]["ops_per_sec"], 50000.0)
+        self.assertAlmostEqual(backend["ops_sec_delta_pct"], 0.0)
+        self.assertAlmostEqual(backend["p99_delta_pct"], 0.0)
+
+    def test_empty_entries_have_no_backends(self):
+        self.assertEqual(best_worst_comparison([])["backends"], [])
+
+    def test_each_backend_is_compared_on_its_own(self):
+        workload = _make_workload()
+        entries = [
+            build_record(_make_result(name="baseline (dict)",
+                                      ops_per_sec=90000.0),
+                         workload, "kvbench"),
+            build_record(_make_result(name="baseline (dict)",
+                                      ops_per_sec=100000.0),
+                         workload, "kvbench"),
+            build_record(_make_result(ops_per_sec=40000.0), workload,
+                         "kvbench"),
+        ]
+        comparison = best_worst_comparison(entries)
+        by_name = {b["backend"]: b for b in comparison["backends"]}
+        self.assertEqual(
+            by_name["baseline (dict)"]["best"]["ops_per_sec"], 100000.0)
+        self.assertEqual(
+            by_name["baseline (dict)"]["worst"]["ops_per_sec"], 90000.0)
+        self.assertEqual(
+            by_name["cinder (127.0.0.1:6379)"]["best"]["ops_per_sec"],
+            40000.0)
+
+    def test_per_op_picks_are_independent_of_the_overall_pick(self):
+        workload = _make_workload()
+        # Run A: slower overall, but SET-heavy (500 SET samples).
+        # Run B: faster overall, but SET-light (100 SET samples).
+        entries = [
+            build_record(
+                self._result_with_latency(
+                    40000.0, 20_000,
+                    {"SET": [20_000] * 500, "GET": [20_000] * 400,
+                     "INCR": [20_000] * 100}),
+                workload, "kvbench"),
+            build_record(
+                self._result_with_latency(
+                    50000.0, 20_000,
+                    {"SET": [20_000] * 100, "GET": [20_000] * 800,
+                     "INCR": [20_000] * 100}),
+                workload, "kvbench"),
+        ]
+        per_op = best_worst_comparison(entries)["backends"][0]["per_op"]
+        # SET: 500 samples over 0.025 s is 20,000/s in run A,
+        # 100 over 0.02 s is 5,000/s in run B — run A wins SET
+        # even though run B wins overall.
+        self.assertEqual(per_op["SET"]["best"]["ops_per_sec"], 20000.0)
+        self.assertEqual(per_op["SET"]["worst"]["ops_per_sec"], 5000.0)
+        self.assertAlmostEqual(per_op["SET"]["ops_sec_delta_pct"], 300.0)
+        # GET: 16,000/s in run A, 40,000/s in run B.
+        self.assertEqual(per_op["GET"]["best"]["ops_per_sec"], 40000.0)
+        self.assertEqual(per_op["GET"]["worst"]["ops_per_sec"], 16000.0)
+
+    def test_workload_filter_keeps_only_matching_runs(self):
+        workload = _make_workload()
+        other_workload = Workload(
+            ops=1000, clients=8, keys=1000, value_size=32,
+            set_weight=50, get_weight=40, incr_weight=10,
+            seed=1234, pipeline=1)
+        entries = [
+            # A 90000 ops/sec run with a different workload must
+            # not become the best run when the filter is on.
+            build_record(_make_result(ops_per_sec=90000.0),
+                         other_workload, "kvbench"),
+            build_record(_make_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(_make_result(ops_per_sec=60000.0),
+                         workload, "kvbench"),
+        ]
+        reference = entries[1]["workload"]
+        backend = best_worst_comparison(
+            entries, workload=reference)["backends"][0]
+        self.assertEqual(backend["runs"], 2)
+        self.assertEqual(backend["best"]["ops_per_sec"], 60000.0)
+        self.assertEqual(backend["worst"]["ops_per_sec"], 40000.0)
+
+    def test_records_without_per_op_have_no_per_op_sections(self):
+        entries = self._entries(rates=(40000.0, 50000.0))
+        for entry in entries:
+            del entry["per_op"]
+        backend = best_worst_comparison(entries)["backends"][0]
+        self.assertEqual(backend["per_op"], {})
+        self.assertEqual(backend["best"]["ops_per_sec"], 50000.0)
+
+
+class TestFormatBestWorst(unittest.TestCase):
+    def _entries(self, rates=(40000.0, 60000.0, 50000.0)):
+        workload = _make_workload()
+        return [
+            build_record(_make_result(ops_per_sec=rate), workload,
+                         "kvbench")
+            for rate in rates
+        ]
+
+    def test_empty_history_message(self):
+        self.assertIn("No runs recorded yet", format_best_worst([]))
+
+    def test_table_shows_best_worst_and_delta(self):
+        text = format_best_worst(self._entries())
+        self.assertIn("best vs worst", text)
+        self.assertIn("60,000", text)
+        self.assertIn("40,000", text)
+        self.assertIn("+50.0%", text)
+        self.assertIn("0.020", text)  # p99 alongside
+
+    def test_single_run_note(self):
+        text = format_best_worst(self._entries(rates=(50000.0,)))
+        self.assertIn("single recorded run is both the best and the "
+                      "worst", text)
+        self.assertIn("50,000", text)
+        self.assertIn("+0.0%", text)
+
+    def test_per_op_tables(self):
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(_make_mixed_result(ops_per_sec=50000.0),
+                         workload, "kvbench"),
+        ]
+        text = format_best_worst(entries)
+        self.assertIn("#### SET", text)
+        self.assertIn("#### GET", text)
+        self.assertIn("#### INCR", text)
+        self.assertIn("25,000", text)  # best SET ops/sec
+        self.assertIn("20,000", text)  # worst SET ops/sec
+
+    def test_workload_note_names_the_workload(self):
+        entries = self._entries()
+        text = format_best_worst(entries,
+                                 workload=entries[0]["workload"])
+        self.assertIn("same workload as the latest recorded run",
+                      text)
+        self.assertIn("ops=1,000", text)
+        self.assertIn("clients=4", text)
+
+    def test_filter_with_no_matching_runs_reports_empty(self):
+        entries = self._entries()
+        other = Workload(ops=1000, clients=8, keys=1000,
+                         value_size=32, set_weight=50, get_weight=40,
+                         incr_weight=10, seed=1234, pipeline=1)
+        reference = build_record(_make_result(), other,
+                                 "kvbench")["workload"]
+        self.assertIn("No runs recorded yet",
+                      format_best_worst(entries, workload=reference))
+
+
+class TestWriteBestWorst(unittest.TestCase):
+    def _entries(self, rates=(40000.0, 50000.0)):
+        workload = _make_workload()
+        return [
+            build_record(_make_result(ops_per_sec=rate), workload,
+                         "kvbench")
+            for rate in rates
+        ]
+
+    def test_markdown_file_matches_stdout_text(self):
+        entries = self._entries()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "best-worst.md")
+            text = write_best_worst(path, entries)
+            self.assertEqual(text, format_best_worst(entries))
+            with open(path, encoding="utf-8") as f:
+                self.assertEqual(f.read(), text)
+
+    def test_json_file_carries_best_and_worst(self):
+        entries = self._entries()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "best-worst.json")
+            comparison = write_best_worst_json(path, entries)
+            with open(path, encoding="utf-8") as f:
+                parsed = json.load(f)
+            self.assertEqual(parsed, comparison)
+            backend = parsed["backends"][0]
+            self.assertEqual(backend["best"]["ops_per_sec"], 50000.0)
+            self.assertEqual(backend["worst"]["ops_per_sec"], 40000.0)
+            self.assertAlmostEqual(backend["ops_sec_delta_pct"], 25.0)
+
+    def test_creates_parent_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "reports", "best-worst.md")
+            write_best_worst(path, self._entries())
+            with open(path, encoding="utf-8") as f:
+                self.assertIn("50,000", f.read())
+
+
+class TestBestWorstCli(unittest.TestCase):
+    def _record(self, path, rates, clients=4):
+        workload = Workload(ops=1000, clients=clients, keys=1000,
+                            value_size=32, set_weight=50,
+                            get_weight=40, incr_weight=10, seed=1234,
+                            pipeline=1)
+        record_run(path,
+                   [_make_result(ops_per_sec=rate) for rate in rates],
+                   workload, "kvbench")
+
+    def test_best_worst_flag_prints_comparison_and_exits_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "history.jsonl")
+            self._record(path, (40000.0, 60000.0))
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = main(["--best-worst", "--history-file", path])
+            self.assertEqual(code, 0)
+            text = out.getvalue()
+            self.assertIn("best vs worst", text)
+            self.assertIn("60,000", text)
+            self.assertIn("40,000", text)
+            self.assertIn("+50.0%", text)
+
+    def test_best_worst_with_empty_history_exits_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "history.jsonl")
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = main(["--best-worst", "--history-file", path])
+            self.assertEqual(code, 0)
+            self.assertIn("No runs recorded yet", out.getvalue())
+
+    def test_best_worst_out_and_json_write_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            history = os.path.join(tmp, "history.jsonl")
+            self._record(history, (40000.0, 50000.0))
+            md_path = os.path.join(tmp, "best-worst.md")
+            json_path = os.path.join(tmp, "best-worst.json")
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = main(["--best-worst", "--history-file", history,
+                             "--best-worst-out", md_path,
+                             "--best-worst-json", json_path])
+            self.assertEqual(code, 0)
+            stdout = out.getvalue()
+            self.assertIn(f"Best vs worst written to {md_path}", stdout)
+            self.assertIn(
+                f"Best vs worst JSON written to {json_path}", stdout)
+            with open(md_path, encoding="utf-8") as f:
+                self.assertIn("+25.0%", f.read())
+            with open(json_path, encoding="utf-8") as f:
+                parsed = json.load(f)
+            self.assertEqual(
+                parsed["backends"][0]["best"]["ops_per_sec"], 50000.0)
+
+    def test_best_worst_out_without_flag_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = os.path.join(tmp, "best-worst.md")
+            err = io.StringIO()
+            with redirect_stdout(io.StringIO()):
+                from contextlib import redirect_stderr
+                with redirect_stderr(err):
+                    code = main(["--best-worst-out", out_path])
+            self.assertEqual(code, 2)
+            self.assertIn("--best-worst-out needs --best-worst",
+                          err.getvalue())
+            self.assertFalse(os.path.exists(out_path))
+
+    def test_best_worst_json_without_flag_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = os.path.join(tmp, "best-worst.json")
+            err = io.StringIO()
+            with redirect_stdout(io.StringIO()):
+                from contextlib import redirect_stderr
+                with redirect_stderr(err):
+                    code = main(["--best-worst-json", out_path])
+            self.assertEqual(code, 2)
+            self.assertIn("--best-worst-json needs --best-worst",
+                          err.getvalue())
+            self.assertFalse(os.path.exists(out_path))
+
+    def test_best_worst_with_same_workload_filters(self):
+        # A 90000 ops/sec run with 8 clients must not become the
+        # best run: the latest recorded run used 4 clients, so the
+        # filter only sees the 4-client runs.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "history.jsonl")
+            self._record(path, (90000.0,), clients=8)
+            self._record(path, (40000.0, 60000.0), clients=4)
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = main(["--best-worst", "--history-file", path,
+                             "--compare-same-workload"])
+            self.assertEqual(code, 0)
+            text = out.getvalue()
+            self.assertIn("same workload as the latest recorded run",
+                          text)
+            self.assertIn("60,000", text)
+            self.assertIn("40,000", text)
+            self.assertNotIn("90,000", text)
+
+    def test_compare_same_workload_without_compare_history_or_best_worst(self):
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()):
+            from contextlib import redirect_stderr
+            with redirect_stderr(err):
+                code = main(["--compare-same-workload"])
+        self.assertEqual(code, 2)
+        self.assertIn("--compare-same-workload needs --compare-history "
+                      "or --best-worst", err.getvalue())
 
 
 class TestDefaultPath(unittest.TestCase):

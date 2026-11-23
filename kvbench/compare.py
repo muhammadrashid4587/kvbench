@@ -32,24 +32,7 @@ import json
 import os
 from datetime import datetime, timezone
 
-from .history import load_history
-
-# Workload settings that have to match for a comparison to be
-# apples-to-apples. Compared key by key; a difference is reported
-# by name, not as a hard failure.
-_WORKLOAD_KEYS = (
-    "ops",
-    "duration_s",
-    "clients",
-    "keys",
-    "value_size",
-    "mix",
-    "mix_label",
-    "seed",
-    "pipeline",
-    "distribution",
-    "zipf_skew",
-)
+from .history import _WORKLOAD_KEYS, load_history
 
 
 def _parse_history_selector(selector):

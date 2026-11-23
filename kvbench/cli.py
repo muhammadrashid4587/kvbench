@@ -33,6 +33,11 @@ Usage:
     # ops/sec trend chart per backend, with sparklines, from the
     # same history file
     python -m kvbench.cli --trend
+    # best-run vs worst-run comparison per backend from the same
+    # history file, with the spread between them, overall and
+    # per operation; --compare-same-workload limits it to runs
+    # that used the latest recorded run's workload
+    python -m kvbench.cli --best-worst --compare-same-workload
     # compare this run against a previous run's JSON report, side
     # by side, and fail the run when it regressed past 5%
     python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
@@ -77,8 +82,9 @@ from .bench import DictClient, Workload, format_duration, \
     run_client_sweep, run_keyspace_sweep, run_workload
 from .compare import compare_results, format_verdict, load_baseline, \
     load_history_baseline
-from .history import DEFAULT_HISTORY_FILE, format_history, \
-    format_trend, load_history, record_run, write_trend
+from .history import DEFAULT_HISTORY_FILE, format_best_worst, \
+    format_history, format_trend, load_history, record_run, \
+    write_best_worst, write_best_worst_json, write_trend
 from .report import _workload_dict, render_csv, write_csv, write_json, \
     write_report
 from .resp import RespClient
@@ -372,6 +378,19 @@ def build_parser():
                         help="with --trend, also write the trend chart "
                         "to this Markdown file (e.g. trend.md) so it "
                         "can be committed or attached to a report")
+    parser.add_argument("--best-worst", action="store_true",
+                        help="print a best-run vs worst-run comparison "
+                        "per backend from the recorded run history and "
+                        "exit (no benchmark is run)")
+    parser.add_argument("--best-worst-out", default=None, metavar="PATH",
+                        help="with --best-worst, also write the "
+                        "comparison to this Markdown file (e.g. "
+                        "best-worst.md) so it can be committed or "
+                        "attached to a report")
+    parser.add_argument("--best-worst-json", default=None, metavar="PATH",
+                        help="with --best-worst, also write the "
+                        "comparison as JSON to this file, so a script "
+                        "can read the spread without parsing Markdown")
     parser.add_argument("--history-limit", type=int, default=20,
                         help="how many recent runs --show-history and "
                         "--trend print per backend (default 20)")
@@ -394,7 +413,9 @@ def build_parser():
                         help="with --compare-history, only consider "
                         "recorded runs whose workload matches this "
                         "run's, so the baseline is the latest run "
-                        "that measured the same workload")
+                        "that measured the same workload; with "
+                        "--best-worst, only consider runs whose "
+                        "workload matches the latest recorded run's")
     parser.add_argument("--regression-threshold", type=float, default=None,
                         metavar="PCT",
                         help="with --compare-file or --compare-history, "
@@ -444,6 +465,17 @@ def main(argv=None):
               "trend chart to a file, and there is no trend chart "
               "without --trend", file=sys.stderr)
         return 2
+    if args.best_worst_out and not args.best_worst:
+        print("kvbench: --best-worst-out needs --best-worst: it writes "
+              "the best-vs-worst comparison to a file, and there is "
+              "no comparison without --best-worst", file=sys.stderr)
+        return 2
+    if args.best_worst_json and not args.best_worst:
+        print("kvbench: --best-worst-json needs --best-worst: it "
+              "writes the best-vs-worst comparison to a file, and "
+              "there is no comparison without --best-worst",
+              file=sys.stderr)
+        return 2
     if args.trend:
         # Trend-only mode: same history file, rendered as a
         # per-backend ops/sec-over-time chart instead of a table.
@@ -454,6 +486,30 @@ def main(argv=None):
             write_trend(args.trend_out, entries,
                         limit=args.history_limit)
             print(f"Trend written to {args.trend_out}")
+        return 0
+    if args.best_worst:
+        # Best-vs-worst mode: same history file, rendered as a
+        # per-backend comparison of the fastest and slowest runs
+        # instead of a chart over time. With
+        # --compare-same-workload there is no current run to match
+        # against, so the reference workload is the latest
+        # recorded run's — the comparison stays apples-to-apples
+        # within the runs that measured the same thing.
+        entries = load_history(history_path)
+        workload = None
+        if args.compare_same_workload and entries:
+            workload = entries[-1].get("workload")
+        text = format_best_worst(entries, workload=workload)
+        print(text)
+        if args.best_worst_out:
+            write_best_worst(args.best_worst_out, entries,
+                             workload=workload)
+            print(f"Best vs worst written to {args.best_worst_out}")
+        if args.best_worst_json:
+            write_best_worst_json(args.best_worst_json, entries,
+                                  workload=workload)
+            print(f"Best vs worst JSON written to "
+                  f"{args.best_worst_json}")
         return 0
     try:
         set_w, get_w, incr_w, mix_label = _parse_mix(args.mix)
@@ -477,11 +533,12 @@ def main(argv=None):
                 "exclusive: pick a JSON report or a history run, "
                 "not both")
         if args.compare_same_workload \
-                and args.compare_history is None:
+                and args.compare_history is None \
+                and not args.best_worst:
             raise ValueError(
-                "--compare-same-workload needs --compare-history: "
-                "it filters which recorded history run is picked "
-                "as the baseline")
+                "--compare-same-workload needs --compare-history or "
+                "--best-worst: it filters which recorded history "
+                "runs are compared")
         if args.regression_threshold is not None \
                 and args.compare_file is None \
                 and args.compare_history is None:

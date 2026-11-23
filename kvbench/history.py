@@ -14,7 +14,10 @@ ops/sec-over-time chart per backend, with a sparkline and the
 change versus the previous run, and since 0.22.0 each record also
 carries per-op throughput and latency, so the trend view tracks
 SET, GET and INCR separately — a slow write no longer hides
-inside the overall ops/sec.
+inside the overall ops/sec. ``--best-worst`` picks the best and
+worst runs per backend (and per operation) out of the same
+history, with the spread between them, so a backend whose
+throughput swings run to run reads at a glance.
 """
 
 import json
@@ -26,6 +29,40 @@ from . import __version__
 DEFAULT_HISTORY_FILE = os.path.join(
     os.path.expanduser("~"), ".kvbench", "history.jsonl"
 )
+
+# Workload settings that have to match for a comparison to be
+# apples-to-apples. Compared key by key; a difference is reported
+# by name, not as a hard failure. This is the same key set
+# ``kvbench.compare.workload_differences`` uses, so the best/worst
+# workload filter and the --compare-same-workload filter agree.
+_WORKLOAD_KEYS = (
+    "ops",
+    "duration_s",
+    "clients",
+    "keys",
+    "value_size",
+    "mix",
+    "mix_label",
+    "seed",
+    "pipeline",
+    "distribution",
+    "zipf_skew",
+)
+
+
+def workload_matches(record_workload, reference_workload):
+    """Whether a recorded run's workload matches a reference one.
+
+    True when every compared setting is equal. A record with no
+    workload dict never matches — it measured something unknown,
+    so it cannot be an apples-to-apples comparison.
+    """
+    if not isinstance(record_workload, dict):
+        return False
+    if not isinstance(reference_workload, dict):
+        return False
+    return all(record_workload.get(key) == reference_workload.get(key)
+               for key in _WORKLOAD_KEYS)
 
 
 def _workload_record(workload):
@@ -308,6 +345,261 @@ def write_trend(path, entries, limit=20):
         if not text.endswith("\n"):
             f.write("\n")
     return text
+
+
+def _run_numbers(entry):
+    """A run's headline numbers as a small dict, or None.
+
+    The timestamp is kept for the table; a run with no numeric
+    ops/sec cannot be ranked, so it is skipped instead of
+    crashing the comparison.
+    """
+    ops_sec = entry.get("ops_per_sec")
+    if not isinstance(ops_sec, (int, float)):
+        return None
+    p99 = entry.get("p99_ms")
+    return {
+        "timestamp": entry.get("timestamp", "")[:19].replace("T", " "),
+        "ops_per_sec": ops_sec,
+        "p99_ms": p99 if isinstance(p99, (int, float)) else None,
+    }
+
+
+def _delta_pct(best, worst):
+    """Percentage change of ``best`` versus ``worst``.
+
+    None when the worst value is zero or missing — there is no
+    meaningful percentage change from nothing.
+    """
+    if not worst:
+        return None
+    return (best - worst) / worst * 100
+
+
+def _best_worst_pair(runs):
+    """The best and worst runs of ``runs`` by ops/sec.
+
+    ``runs`` are (entry, numbers) pairs. Best is the highest
+    ops/sec, worst the lowest; ties keep the earliest run, so
+    the pick is stable. Returns (best_numbers, worst_numbers,
+    ops_sec_delta_pct, p99_delta_pct), or None when there are
+    no usable runs.
+    """
+    if not runs:
+        return None
+    best = max(runs, key=lambda pair: pair[1]["ops_per_sec"])
+    worst = min(runs, key=lambda pair: pair[1]["ops_per_sec"])
+    return (
+        best[1],
+        worst[1],
+        _delta_pct(best[1]["ops_per_sec"], worst[1]["ops_per_sec"]),
+        _delta_pct(best[1]["p99_ms"], worst[1]["p99_ms"]),
+    )
+
+
+def best_worst_comparison(entries, workload=None):
+    """Best-run vs worst-run comparison per backend.
+
+    ``entries`` are in file order (oldest first). Each backend
+    gets its best run (highest ops/sec) and its worst run
+    (lowest), with ops/sec and p99 for each and the percentage
+    change between them — best vs worst, so a wide spread says
+    the backend's performance varies a lot run to run, while a
+    narrow one says it is steady. The same pick is made per
+    operation type (SET, GET, INCR) from the per-op data, so a
+    slow-write run that still won overall still shows up as the
+    worst SET run. When ``workload`` is given (a workload dict
+    in the shape of a history record's ``workload``), only runs
+    whose workload matches it are considered — the same
+    apples-to-apples rule ``--compare-same-workload`` uses, so a
+    quick smoke run never becomes the worst run next to a
+    full-size one. A backend with a single usable run has that
+    run as both best and worst, with 0.0% deltas; runs recorded
+    before 0.22.0 carry no ``per_op`` data and simply get no
+    per-op sections.
+
+    Returns a JSON-serializable dict with a ``backends`` list.
+    """
+    if workload is not None:
+        entries = [e for e in entries
+                   if workload_matches(e.get("workload"), workload)]
+    by_backend = {}
+    for entry in entries:
+        by_backend.setdefault(entry.get("backend", "?"), []).append(entry)
+    backends = []
+    for backend, runs in by_backend.items():
+        usable = [(e, _run_numbers(e)) for e in runs]
+        usable = [(e, n) for e, n in usable if n is not None]
+        pair = _best_worst_pair(usable)
+        if pair is None:
+            continue
+        best, worst, ops_delta, p99_delta = pair
+        per_op = {}
+        for op in ("SET", "GET", "INCR"):
+            op_runs = []
+            for entry in runs:
+                op_entry = (entry.get("per_op") or {}).get(op)
+                if not isinstance(op_entry, dict):
+                    continue
+                numbers = _run_numbers(op_entry)
+                if numbers is None:
+                    continue
+                # A per-op entry carries no timestamp of its own;
+                # the table shows the run it came from.
+                numbers["timestamp"] = entry.get(
+                    "timestamp", "")[:19].replace("T", " ")
+                op_runs.append((entry, numbers))
+            op_pair = _best_worst_pair(op_runs)
+            if op_pair is None:
+                continue
+            op_best, op_worst, op_ops_delta, op_p99_delta = op_pair
+            per_op[op] = {
+                "best": op_best,
+                "worst": op_worst,
+                "ops_sec_delta_pct": op_ops_delta,
+                "p99_delta_pct": op_p99_delta,
+            }
+        backends.append({
+            "backend": backend,
+            "runs": len(usable),
+            "best": best,
+            "worst": worst,
+            "ops_sec_delta_pct": ops_delta,
+            "p99_delta_pct": p99_delta,
+            "per_op": per_op,
+        })
+    return {
+        "workload": workload,
+        "backends": backends,
+    }
+
+
+def _fmt_ops_sec(value):
+    return f"{value:,.0f}" if isinstance(value, (int, float)) else "-"
+
+
+def _fmt_p99(value):
+    return f"{value:.3f}" if isinstance(value, (int, float)) else "-"
+
+
+def _fmt_delta(value):
+    return f"{value:+.1f}%" if value is not None else "n/a"
+
+
+def _best_worst_lines(title, best, worst, ops_delta, p99_delta):
+    """One best-vs-worst table: ops/sec and p99 side by side."""
+    return [
+        f"#### {title}",
+        "",
+        "| | Best run | Worst run | Best vs worst |",
+        "| --- | ---: | ---: | ---: |",
+        f"| Time (UTC) | {best['timestamp']} | "
+        f"{worst['timestamp']} | |",
+        f"| Ops/sec | {_fmt_ops_sec(best['ops_per_sec'])} | "
+        f"{_fmt_ops_sec(worst['ops_per_sec'])} | "
+        f"{_fmt_delta(ops_delta)} |",
+        f"| p99 (ms) | {_fmt_p99(best['p99_ms'])} | "
+        f"{_fmt_p99(worst['p99_ms'])} | "
+        f"{_fmt_delta(p99_delta)} |",
+        "",
+    ]
+
+
+def _describe_workload(workload):
+    """A one-line summary of a workload dict for the filter note."""
+    if not isinstance(workload, dict):
+        return ""
+    mix = workload.get("mix") or {}
+    parts = []
+    if workload.get("ops") is not None:
+        parts.append(f"ops={workload['ops']:,}")
+    if workload.get("duration_s") is not None:
+        parts.append(f"duration={workload['duration_s']}s")
+    parts.append(f"clients={workload.get('clients')}")
+    parts.append(f"keys={workload.get('keys')}")
+    parts.append(
+        f"mix={mix.get('set')}:{mix.get('get')}:{mix.get('incr')}")
+    parts.append(f"pipeline={workload.get('pipeline')}")
+    if workload.get("distribution") not in (None, "uniform"):
+        parts.append(f"distribution={workload['distribution']}")
+    return ", ".join(parts)
+
+
+def format_best_worst(entries, workload=None):
+    """Render the best-vs-worst comparison as Markdown.
+
+    One section per backend: a table with the best and worst
+    runs' ops/sec and p99 and the percentage change between
+    them, then the same table per operation type that ran. When
+    ``workload`` is given, only runs matching it were compared,
+    and the header says which workload that was. An empty
+    history — or a filter that matches nothing — prints the
+    same "No runs recorded yet" message as ``--trend``.
+    """
+    comparison = best_worst_comparison(entries, workload=workload)
+    if not comparison["backends"]:
+        return "No runs recorded yet. Re-run a benchmark with --history."
+    sections = ["## kvbench best vs worst run", ""]
+    if workload is not None:
+        sections.append(
+            "Only runs with the same workload as the latest "
+            "recorded run are compared "
+            f"({_describe_workload(workload)}).")
+        sections.append("")
+    for backend in comparison["backends"]:
+        sections.append(f"### {backend['backend']}")
+        sections.append("")
+        if backend["runs"] == 1:
+            sections.append(
+                "A single recorded run is both the best and the "
+                "worst — there is no spread to compare yet.")
+            sections.append("")
+        sections.extend(_best_worst_lines(
+            "Overall", backend["best"], backend["worst"],
+            backend["ops_sec_delta_pct"], backend["p99_delta_pct"]))
+        for op in ("SET", "GET", "INCR"):
+            op_entry = backend["per_op"].get(op)
+            if op_entry is None:
+                continue
+            sections.extend(_best_worst_lines(
+                f"{op}", op_entry["best"], op_entry["worst"],
+                op_entry["ops_sec_delta_pct"],
+                op_entry["p99_delta_pct"]))
+    return "\n".join(sections)
+
+
+def write_best_worst(path, entries, workload=None):
+    """Render the best-vs-worst comparison and write it to ``path``.
+
+    Creates the parent directory when needed. Returns the rendered
+    text — the same text ``--best-worst`` prints to stdout — so
+    the file can be committed or attached to a report.
+    """
+    text = format_best_worst(entries, workload=workload)
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+        if not text.endswith("\n"):
+            f.write("\n")
+    return text
+
+
+def write_best_worst_json(path, entries, workload=None):
+    """Write the best-vs-worst comparison as JSON to ``path``.
+
+    Creates the parent directory when needed. Returns the
+    comparison dict — the same shape ``best_worst_comparison``
+    returns — so a script can read the spread without parsing
+    the Markdown table.
+    """
+    comparison = best_worst_comparison(entries, workload=workload)
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(comparison, f, indent=2)
+        f.write("\n")
+    return comparison
 
 
 def format_history(entries, limit=20):
