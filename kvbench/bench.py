@@ -91,6 +91,13 @@ class Workload:
     # concurrency affects throughput — where adding clients stops
     # helping and the server saturates. Empty means no sweep.
     sweep_clients: list = field(default_factory=list)
+    # SLO gate thresholds: p99 latency cap in milliseconds and error
+    # rate cap in percent of attempted ops. None means that side of
+    # the gate is not set; the gate only applies when at least one
+    # threshold is given. The values are carried on the workload so
+    # the reports can record what the run was gated on.
+    slo_p99_ms: float = None
+    slo_error_rate_pct: float = None
 
     def __post_init__(self):
         if self.clients <= 0 or self.keys <= 0:
@@ -120,6 +127,12 @@ class Workload:
             raise ValueError("sweep client counts must be positive integers")
         if self.pipeline < 1:
             raise ValueError("pipeline depth must be at least 1")
+        if self.slo_p99_ms is not None and self.slo_p99_ms < 0:
+            raise ValueError("SLO p99 threshold must be non-negative")
+        if self.slo_error_rate_pct is not None and not (
+                0 <= self.slo_error_rate_pct <= 100):
+            raise ValueError(
+                "SLO error-rate threshold must be between 0 and 100")
         total = self.set_weight + self.get_weight + self.incr_weight
         if total <= 0:
             raise ValueError("at least one op weight must be positive")

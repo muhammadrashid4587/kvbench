@@ -5,6 +5,7 @@ import io
 import json
 import unittest
 
+from kvbench import __version__
 from kvbench.bench import BenchmarkResult, Workload
 from kvbench.cli import json_path_for
 from kvbench.report import render_csv, render_json, render_markdown, \
@@ -118,7 +119,7 @@ class TestReport(unittest.TestCase):
         doc.pop("generated")
         self.assertEqual(parsed, doc)
         self.assertEqual(parsed["tool"], "kvbench")
-        self.assertEqual(parsed["version"], "0.13.0")
+        self.assertEqual(parsed["version"], __version__)
         self.assertEqual(parsed["command"], "kvbench --ops 100 --clients 2")
         self.assertEqual(parsed["workload"]["ops"], 100)
         self.assertEqual(parsed["workload"]["clients"], 2)

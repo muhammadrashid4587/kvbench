@@ -44,6 +44,9 @@ def _workload_dict(workload):
         # Client counts swept in this run, or null when no sweep.
         "sweep_clients": (list(workload.sweep_clients)
                           if workload.sweep_clients else None),
+        # SLO gate thresholds for this run, or null when not set.
+        "slo_p99_ms": workload.slo_p99_ms,
+        "slo_error_rate_pct": workload.slo_error_rate_pct,
     }
 
 
@@ -81,7 +84,8 @@ def _result_dict(result, top_n=5):
     }
 
 
-def to_json_dict(results, workload, command_line, comparison=None):
+def to_json_dict(results, workload, command_line, comparison=None,
+                 slo=None):
     """Build the JSON-serializable report document."""
     doc = {
         "tool": "kvbench",
@@ -97,20 +101,24 @@ def to_json_dict(results, workload, command_line, comparison=None):
     }
     if comparison is not None:
         doc["comparison"] = comparison
+    if slo is not None:
+        doc["slo"] = slo
     return doc
 
 
-def render_json(results, workload, command_line, comparison=None):
+def render_json(results, workload, command_line, comparison=None,
+                slo=None):
     """Render the report as a JSON string."""
     return json.dumps(
-        to_json_dict(results, workload, command_line, comparison),
+        to_json_dict(results, workload, command_line, comparison, slo),
         indent=2,
     ) + "\n"
 
 
-def write_json(results, workload, command_line, path, comparison=None):
+def write_json(results, workload, command_line, path, comparison=None,
+               slo=None):
     """Write the JSON report to ``path`` and return its text."""
-    text = render_json(results, workload, command_line, comparison)
+    text = render_json(results, workload, command_line, comparison, slo)
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
     return text
@@ -456,7 +464,61 @@ def _comparison_lines(comparison):
     return lines
 
 
-def render_markdown(results, workload, command_line, comparison=None):
+def _slo_lines(slo):
+    """SLO gate section, or [] when no gate was set.
+
+    One row per backend with the measured p99 and error rate next
+    to the thresholds that were set, plus a pass/fail verdict. A
+    threshold that was not set shows as a dash — the gate only
+    applies to the thresholds that were given.
+    """
+    if not slo:
+        return []
+    thresholds = []
+    if slo["p99_threshold_ms"] is not None:
+        thresholds.append(
+            f"p99 at most {slo['p99_threshold_ms']:g} ms")
+    if slo["error_rate_threshold_pct"] is not None:
+        thresholds.append(
+            "error rate at most "
+            f"{slo['error_rate_threshold_pct']:g}%")
+    lines = [
+        "## SLO gate",
+        "",
+        "Thresholds: " + "; ".join(thresholds) + ".",
+        "",
+        "| Backend | p99 (ms) | p99 limit (ms) | Error rate | "
+        "Error limit | Verdict |",
+        "| --- | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for entry in slo["entries"]:
+        p99_limit = (
+            f"{entry['p99_threshold_ms']:g}"
+            if entry["p99_threshold_ms"] is not None else "—")
+        err_limit = (
+            f"{entry['error_rate_threshold_pct']:g}%"
+            if entry["error_rate_threshold_pct"] is not None else "—")
+        lines.append(
+            f"| {entry['name']} | {entry['p99_ms']:.3f} | "
+            f"{p99_limit} | {entry['error_rate_pct']:.2f}% | "
+            f"{err_limit} | {entry['verdict']} |"
+        )
+    lines.append("")
+    if slo["breaches"]:
+        lines.append(
+            f"SLO gate: FAILED — {slo['breaches']} backend(s) "
+            "breached a threshold (exit code 4)."
+        )
+    else:
+        lines.append(
+            "SLO gate: passed — no backend breached a threshold."
+        )
+    lines.append("")
+    return lines
+
+
+def render_markdown(results, workload, command_line, comparison=None,
+                    slo=None):
     """Render one or more BenchmarkResults as a Markdown report."""
     if workload.duration_s is not None:
         scope_line = (
@@ -541,6 +603,9 @@ def render_markdown(results, workload, command_line, comparison=None):
     comparison_lines = _comparison_lines(comparison)
     if comparison_lines:
         lines += [""] + comparison_lines
+    slo_lines = _slo_lines(slo)
+    if slo_lines:
+        lines += [""] + slo_lines
     sweep_lines = []
     for result in results:
         sweep_lines += _sweep_lines(result)
@@ -682,6 +747,26 @@ def render_markdown(results, workload, command_line, comparison=None):
                 f"by more than {comparison['threshold_pct']:g}%, "
                 "versus the baseline run."
             )
+    if slo is not None:
+        # Name only the thresholds that were set: the gate applies
+        # to whichever of the two was given, or both.
+        slo_thresholds = []
+        if slo["p99_threshold_ms"] is not None:
+            slo_thresholds.append(
+                f"p99 at most {slo['p99_threshold_ms']:g} ms")
+        if slo["error_rate_threshold_pct"] is not None:
+            slo_thresholds.append(
+                "error rate at most "
+                f"{slo['error_rate_threshold_pct']:g}%")
+        lines.append(
+            "- The SLO gate section checks each backend against "
+            + " and ".join(slo_thresholds)
+            + ": a backend breaches when its measured value is "
+            "above the threshold, and a breach fails the run with "
+            "exit code 4 — after the reports are written, so the "
+            "breach is visible in them. The JSON report carries "
+            "the same gate under `slo`."
+        )
     for result in results:
         if result.error_sample:
             lines.append(
@@ -691,9 +776,11 @@ def render_markdown(results, workload, command_line, comparison=None):
     return "\n".join(lines)
 
 
-def write_report(results, workload, command_line, path, comparison=None):
+def write_report(results, workload, command_line, path, comparison=None,
+                 slo=None):
     """Write the Markdown report to ``path`` and return its text."""
-    text = render_markdown(results, workload, command_line, comparison)
+    text = render_markdown(results, workload, command_line, comparison,
+                           slo)
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
     return text

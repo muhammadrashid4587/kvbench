@@ -35,6 +35,10 @@ Usage:
     python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
         --ops 20000 --clients 4 --compare-file report.json \\
         --regression-threshold 5
+    # SLO gate: fail the run (exit 4) when p99 is above 1 ms or
+    # more than 1% of ops error
+    python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
+        --ops 20000 --clients 4 --slo-p99-ms 1 --slo-error-rate 1
 """
 
 import argparse
@@ -50,6 +54,7 @@ from .history import DEFAULT_HISTORY_FILE, format_history, \
 from .report import _workload_dict, render_csv, write_csv, write_json, \
     write_report
 from .resp import RespClient
+from .slo import evaluate_slo, format_slo_verdict
 
 
 def json_path_for(output_path, json_arg):
@@ -301,6 +306,16 @@ def build_parser():
                         "when any backend's ops/sec fell by more than "
                         "PCT percent, or its p99 rose by more than PCT "
                         "percent, versus the baseline file")
+    parser.add_argument("--slo-p99-ms", type=float, default=None,
+                        metavar="MS",
+                        help="SLO gate: fail the run (exit 4) when any "
+                        "backend's measured p99 latency is above MS "
+                        "milliseconds")
+    parser.add_argument("--slo-error-rate", type=float, default=None,
+                        metavar="PCT",
+                        help="SLO gate: fail the run (exit 4) when any "
+                        "backend's error rate is above PCT percent of "
+                        "attempted ops")
     return parser
 
 
@@ -370,6 +385,8 @@ def main(argv=None):
             hot_keys=args.hot_keys,
             sweep_keyspace=sweep_sizes,
             sweep_clients=client_counts,
+            slo_p99_ms=args.slo_p99_ms,
+            slo_error_rate_pct=args.slo_error_rate,
         )
     except ValueError as exc:
         print(f"kvbench: {exc}", file=sys.stderr)
@@ -486,11 +503,15 @@ def main(argv=None):
         comparison = compare_results(
             results, baseline_doc, _workload_dict(workload),
             args.compare_file, args.regression_threshold)
+    # The SLO gate is evaluated before the reports are written, so
+    # the verdict lands in both reports even when the run fails.
+    slo = evaluate_slo(results, args.slo_p99_ms, args.slo_error_rate)
     write_report(results, workload, command_line, args.output,
-                 comparison)
+                 comparison, slo)
     print(f"report written to {args.output}")
     json_path = json_path_for(args.output, args.json)
-    write_json(results, workload, command_line, json_path, comparison)
+    write_json(results, workload, command_line, json_path, comparison,
+               slo)
     print(f"JSON report written to {json_path}")
     if args.csv:
         write_csv(results, args.csv)
@@ -498,6 +519,10 @@ def main(argv=None):
     if args.history:
         count = record_run(history_path, results, workload, command_line)
         print(f"recorded {count} run(s) in history file {history_path}")
+    # Exit codes: 3 when the regression gate fired, 4 when the SLO
+    # gate fired. A run that breaches both exits 4 — the SLO gate
+    # is the run's own explicit budget, so it takes precedence.
+    exit_code = 0
     if comparison is not None:
         for entry in comparison["entries"]:
             print("  " + format_verdict(entry,
@@ -515,8 +540,17 @@ def main(argv=None):
                 "regressed beyond the "
                 f"{comparison['threshold_pct']:g}% threshold",
                 file=sys.stderr)
-            return 3
-    return 0
+            exit_code = 3
+    if slo is not None:
+        for entry in slo["entries"]:
+            print("  " + format_slo_verdict(entry))
+        if slo["breaches"]:
+            print(
+                f"kvbench: SLO gate failed: {slo['breaches']} "
+                "backend(s) breached a threshold",
+                file=sys.stderr)
+            exit_code = 4
+    return exit_code
 
 
 if __name__ == "__main__":

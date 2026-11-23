@@ -62,6 +62,12 @@ C. Pure Python 3 standard library, no dependencies.
   plus a log-spaced latency histogram and a per-second time series
   (ops, mean and max latency per second) to spot stalls.
 - A Markdown report writer (`kvbench/report.py`).
+- An SLO gate (`kvbench/slo.py`): `--slo-p99-ms` and
+  `--slo-error-rate` cap the measured p99 latency and error rate,
+  and fail the run (exit code 4) when a backend breaches either
+  threshold, with the gate verdict in both reports — so a
+  benchmark in CI stays green only while the server stays fast
+  and reliable enough.
 - A baseline mode that runs the exact same workload against an
   in-process Python dict, so the report can compare the server with a
   no-network upper bound on the same machine.
@@ -143,6 +149,11 @@ python -m kvbench.cli --show-history
 python -m kvbench.cli --ops 20000 --clients 4 \
     --compare-file report.json --regression-threshold 5
 
+# SLO gate: fail the run (exit 4) when p99 is above 1 ms or more
+# than 1% of ops error — the verdict lands in both reports
+python -m kvbench.cli --ops 20000 --clients 4 \
+    --slo-p99-ms 1 --slo-error-rate 1
+
 # also write a per-second throughput CSV for plotting
 python -m kvbench.cli --ops 20000 --clients 4 --duration 10s \
     --csv timeseries.csv
@@ -195,7 +206,11 @@ report — ops/sec and p99 side by side per backend, with the
 percentage change and a verdict in both reports; see below),
 `--regression-threshold` (with `--compare-file`, exit 3 when any
 backend's ops/sec fell by more than that many percent, or its p99
-rose by more than that many percent, versus the baseline file).
+rose by more than that many percent, versus the baseline file),
+`--slo-p99-ms` (SLO gate: exit 4 when any backend's measured p99
+latency is above that many milliseconds),
+`--slo-error-rate` (SLO gate: exit 4 when any backend's error rate
+is above that many percent of attempted ops).
 
 Every run writes a JSON report alongside the Markdown one, with the
 same workload settings and per-backend results (ops, ops/sec, elapsed,
@@ -246,6 +261,36 @@ the run before any benchmark starts. `--regression-threshold`
 without `--compare-file` is rejected. Small runs are noisy on a
 shared machine, so use a threshold well above run-to-run jitter
 for the workload you gate on.
+
+## SLO gate
+
+With `--slo-p99-ms MS` the run is gated on absolute latency: any
+backend whose measured p99 is above MS milliseconds breaches the
+gate. With `--slo-error-rate PCT` it is gated on reliability: any
+backend whose error rate — failed ops as a share of all ops
+attempted — is above PCT percent breaches it. Either flag on its
+own is a gate; both together gate on both, and a backend only
+needs to breach one of them to fail. Exactly at the threshold
+still passes, so a threshold of 0 only fails when something
+actually went wrong.
+
+Both reports carry the gate: the Markdown report gains an SLO
+gate section with the thresholds, the measured p99 and error rate
+per backend, and a `pass`/`breach` verdict, and the JSON report
+carries the same gate under `slo` (with the thresholds also
+recorded under `workload`). The gate is evaluated after the
+reports are written, so a breached run still leaves a report
+showing the verdict — and then the process exits 4, a distinct
+code from the regression gate's 3. A run that breaches both gates
+exits 4: the SLO gate is the run's own explicit budget, so it
+takes precedence. Negative thresholds are rejected, and the error
+rate must be between 0 and 100.
+
+Unlike the regression gate, the SLO gate needs no baseline file:
+it checks the run against budgets you choose, so it works on a
+first run and in CI, where the question is not "did we get
+slower than last time" but "is this fast and reliable enough to
+ship".
 
 ## Report format
 
@@ -356,6 +401,10 @@ make test
 
 ## Roadmap
 
+- ~~SLO gate (`--slo-p99-ms` / `--slo-error-rate`): fail the run
+  (exit 4) when a backend's measured p99 latency or error rate
+  breaches the threshold, with the gate verdict in both the
+  Markdown and JSON reports.~~ Done in 0.14.0.
 - ~~Compare against a previous run (`--compare-file PATH`):
   load an earlier run's JSON report and compare the current run
   against it side by side (ops/sec and p99 deltas, verdict lines),
