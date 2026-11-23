@@ -9,7 +9,9 @@ backend, so a regression — or a cinder speedup — reads at a glance.
 
 Records are plain JSON lines; a corrupt line is skipped on load
 rather than failing the whole history, so a half-written file never
-blocks the trend view.
+blocks the trend view. ``--trend`` renders the same history as an
+ops/sec-over-time chart per backend, with a sparkline and the
+change versus the previous run.
 """
 
 import json
@@ -119,6 +121,83 @@ def _ops_sec_delta(entry, previous):
         return "-"
     change = (current - prev) / prev * 100
     return f"{change:+.1f}%"
+
+
+def _sparkline(values):
+    """Render a list of numbers as a Unicode block sparkline.
+
+    ``▁`` is the lowest value, ``█`` the highest, oldest first.
+    A single value, or values that are all equal, render as the
+    middle block — there is no trend to show, only a level.
+    """
+    if not values:
+        return "-"
+    blocks = "▁▂▃▄▅▆▇█"
+    low, high = min(values), max(values)
+    if high == low:
+        return "▅" * len(values)
+    span = high - low
+    return "".join(
+        blocks[min(7, int((v - low) / span * 7 + 0.5))]
+        for v in values)
+
+
+def format_trend(entries, limit=20):
+    """Render an ops/sec-over-time trend chart per backend.
+
+    ``entries`` are in file order (oldest first). Each backend gets
+    its own section: a table of its most recent ``limit`` runs with
+    ops/sec, the change versus the previous run of that backend,
+    and p99 alongside, plus a sparkline of ops/sec over those runs
+    (oldest to newest) and the first-to-last change. A corrupt line
+    never reaches here — ``load_history`` already skips it — and
+    a backend with a single recorded run shows no delta, just its
+    one value.
+    """
+    if not entries:
+        return "No runs recorded yet. Re-run a benchmark with --history."
+    # Group runs per backend, keeping first-seen backend order.
+    by_backend = {}
+    for entry in entries:
+        by_backend.setdefault(entry.get("backend", "?"), []).append(entry)
+    sections = ["## kvbench ops/sec trend", ""]
+    for backend, runs in by_backend.items():
+        window = runs[-limit:]
+        # Ops/sec change versus the previous run of this backend.
+        previous_by_id = {}
+        previous = None
+        for entry in runs:
+            previous_by_id[id(entry)] = _ops_sec_delta(entry, previous)
+            previous = entry
+        values = [e.get("ops_per_sec") for e in window
+                  if isinstance(e.get("ops_per_sec"), (int, float))]
+        sections.append(f"### {backend}")
+        sections.append("")
+        sections.append("| Time (UTC) | Ops/sec | Ops/sec vs prev | "
+                        "p99 (ms) |")
+        sections.append("| --- | ---: | ---: | ---: |")
+        for entry in reversed(window):
+            timestamp = entry.get("timestamp", "")[:19].replace("T", " ")
+            ops_sec = entry.get("ops_per_sec")
+            ops_cell = (f"{ops_sec:,.0f}"
+                        if isinstance(ops_sec, (int, float)) else "-")
+            p99 = entry.get("p99_ms")
+            p99_cell = (f"{p99:.3f}"
+                        if isinstance(p99, (int, float)) else "-")
+            sections.append(
+                f"| {timestamp} | {ops_cell} | "
+                f"{previous_by_id[id(entry)]} | {p99_cell} |"
+            )
+        sections.append("")
+        sections.append(f"Trend (oldest → newest): {_sparkline(values)}")
+        if len(values) >= 2:
+            first, last = values[0], values[-1]
+            change = (last - first) / first * 100 if first else 0.0
+            sections.append(
+                f"First → last: {first:,.0f} → {last:,.0f} ops/sec "
+                f"({change:+.1f}%)")
+        sections.append("")
+    return "\n".join(sections)
 
 
 def format_history(entries, limit=20):

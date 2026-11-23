@@ -158,6 +158,10 @@ python -m kvbench.cli --ops 20000 --sweep-clients 1,2,4,8
 python -m kvbench.cli --ops 20000 --clients 4 --history
 python -m kvbench.cli --show-history
 
+# ops/sec trend chart per backend, with sparklines, from the
+# same history file
+python -m kvbench.cli --trend
+
 # compare this run against a previous run's JSON report, side by
 # side, and fail the run when it regressed past 5%
 python -m kvbench.cli --ops 20000 --clients 4 \
@@ -225,7 +229,9 @@ latency — see below),
 be compared against it), `--history-file` (where the history lives,
 default `~/.kvbench/history.jsonl`), `--show-history` (print the
 recorded run history and exit, no benchmark is run),
-`--history-limit` (how many recent runs `--show-history` prints,
+`--trend` (print an ops/sec trend chart per backend from the
+recorded run history and exit, no benchmark is run),
+`--history-limit` (how many recent runs `--show-history` and
 default 20),
 `--compare-file` (compare this run against a previous run's JSON
 report — ops/sec and p99 side by side per backend, with the
@@ -268,6 +274,16 @@ versus the previous run of the same backend, so a cinder speedup —
 or a regression — reads at a glance. The history file is plain
 JSONL, one record per line, and a corrupt line is skipped on load
 rather than failing the trend view.
+
+With `--trend` the same history renders as an ops/sec-over-time
+chart, one section per backend: a table of the most recent runs
+(20 by default, `--history-limit N` to change it) with ops/sec,
+the change versus the previous run of that backend, and p99
+alongside, plus a sparkline of ops/sec over those runs (oldest to
+newest) and the first-to-last change. A backend with a single
+recorded run shows its one value with no delta and a single
+block; an empty history prints the same "No runs recorded yet"
+message as `--show-history`.
 
 ## Comparing against a previous run
 
@@ -518,6 +534,17 @@ make test
 
 ## Roadmap
 
+- Compare against a run from the history file (`--compare-file`
+  against a history-file run): pick a backend's run out of
+  `~/.kvbench/history.jsonl` as the baseline instead of a JSON
+  report file, so a regression check needs no report file lying
+  around. Next.
+- ~~Ops/sec trend chart in Markdown (`--trend`): render the run
+  history as a per-backend ops/sec-over-time chart — a table with
+  ops/sec, the delta versus the previous run, and p99 alongside,
+  plus a sparkline and the first-to-last change — handling empty
+  history, corrupt lines (skipped, same as `--show-history`) and
+  single-run history.~~ Done in 0.18.0.
 - GitHub Actions workflow (`.github/workflows/bench.yml`): run
   kvbench against cinder on every push, gated by the checked-in
   SLO preset (`slo.json`: global p99 5 ms, error rate 1%, SET

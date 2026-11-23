@@ -1,14 +1,17 @@
 """Tests for kvbench.history: recording runs and the trend view."""
 
+import io
 import json
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 
 from kvbench import __version__
 from kvbench.bench import BenchmarkResult, Workload
+from kvbench.cli import main
 from kvbench.history import DEFAULT_HISTORY_FILE, build_record, \
-    format_history, load_history, record_run
+    format_history, format_trend, load_history, record_run, _sparkline
 
 
 def _make_result(name="cinder (127.0.0.1:6379)", ops=1000,
@@ -150,6 +153,131 @@ class TestFormatHistory(unittest.TestCase):
         self.assertIn("10,004", text)
         self.assertIn("10,003", text)
         self.assertNotIn("10,000", text)
+
+
+class TestSparkline(unittest.TestCase):
+    def test_rising_values_climb_the_blocks(self):
+        self.assertEqual(_sparkline([0, 50, 100]), "▁▅█")
+
+    def test_flat_values_are_the_middle_block(self):
+        self.assertEqual(_sparkline([100, 100, 100]), "▅▅▅")
+
+    def test_single_value_is_one_middle_block(self):
+        self.assertEqual(_sparkline([42]), "▅")
+
+    def test_empty_values_have_no_sparkline(self):
+        self.assertEqual(_sparkline([]), "-")
+
+
+class TestFormatTrend(unittest.TestCase):
+    def _entries(self, rates=(40000.0, 50000.0, 60000.0)):
+        workload = _make_workload()
+        return [
+            build_record(_make_result(ops_per_sec=rate), workload,
+                         "kvbench")
+            for rate in rates
+        ]
+
+    def test_empty_history_message(self):
+        self.assertIn("No runs recorded yet", format_trend([]))
+
+    def test_single_run_has_no_delta_and_one_block(self):
+        text = format_trend(self._entries(rates=(50000.0,)))
+        self.assertIn("50,000", text)
+        self.assertIn("0.020", text)  # p99 alongside
+        self.assertIn("| - |", text)
+        self.assertIn("Trend (oldest → newest): ▅", text)
+        self.assertNotIn("First → last", text)
+
+    def test_table_has_delta_and_p99_per_run(self):
+        # 50000 vs 40000 is +25.0%, 60000 vs 50000 is +20.0%.
+        text = format_trend(self._entries())
+        self.assertIn("+25.0%", text)
+        self.assertIn("+20.0%", text)
+        self.assertIn("0.020", text)
+        self.assertIn("40,000", text)
+        self.assertIn("60,000", text)
+
+    def test_sparkline_runs_oldest_to_newest(self):
+        text = format_trend(self._entries())
+        self.assertIn("Trend (oldest → newest): ▁▅█", text)
+        self.assertIn(
+            "First → last: 40,000 → 60,000 ops/sec (+50.0%)", text)
+
+    def test_each_backend_gets_its_own_section(self):
+        workload = _make_workload()
+        entries = [
+            build_record(_make_result(name="baseline (dict)",
+                                      ops_per_sec=90000.0),
+                         workload, "kvbench"),
+            build_record(_make_result(name="baseline (dict)",
+                                      ops_per_sec=100000.0),
+                         workload, "kvbench"),
+            build_record(_make_result(ops_per_sec=40000.0), workload,
+                         "kvbench"),
+        ]
+        text = format_trend(entries)
+        self.assertIn("### baseline (dict)", text)
+        self.assertIn("### cinder (127.0.0.1:6379)", text)
+        # The baseline delta is its own: +11.1%, not polluted by
+        # the cinder run between them; both backends' first runs
+        # have no previous run to compare against.
+        self.assertIn("+11.1%", text)
+        self.assertEqual(text.count("| - |"), 2)
+
+    def test_limit_keeps_most_recent_runs_per_backend(self):
+        workload = _make_workload()
+        entries = [
+            build_record(_make_result(ops_per_sec=float(10000 + i)),
+                         workload, "kvbench")
+            for i in range(5)
+        ]
+        text = format_trend(entries, limit=2)
+        self.assertIn("10,004", text)
+        self.assertIn("10,003", text)
+        self.assertNotIn("10,000", text)
+        self.assertIn("Trend (oldest → newest): ▁█", text)
+
+    def test_corrupt_lines_never_reach_the_chart(self):
+        # load_history skips the corrupt line; the trend renders
+        # from the records that survived.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "history.jsonl")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("not json at all\n")
+                for entry in self._entries(rates=(40000.0, 50000.0)):
+                    f.write(json.dumps(entry) + "\n")
+                f.write("[1, 2, 3]\n")
+            text = format_trend(load_history(path))
+            self.assertIn("40,000", text)
+            self.assertIn("50,000", text)
+            self.assertIn("+25.0%", text)
+
+
+class TestTrendCli(unittest.TestCase):
+    def test_trend_flag_prints_chart_and_exits_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "history.jsonl")
+            record_run(path, [_make_result(ops_per_sec=40000.0),
+                              _make_result(ops_per_sec=50000.0)],
+                       _make_workload(), "kvbench")
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = main(["--trend", "--history-file", path])
+            self.assertEqual(code, 0)
+            text = out.getvalue()
+            self.assertIn("ops/sec trend", text)
+            self.assertIn("+25.0%", text)
+            self.assertIn("▁█", text)
+
+    def test_trend_with_empty_history_exits_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "history.jsonl")
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = main(["--trend", "--history-file", path])
+            self.assertEqual(code, 0)
+            self.assertIn("No runs recorded yet", out.getvalue())
 
 
 class TestDefaultPath(unittest.TestCase):

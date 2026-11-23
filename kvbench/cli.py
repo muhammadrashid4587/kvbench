@@ -30,6 +30,9 @@ Usage:
     python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
         --ops 20000 --clients 4 --history
     python -m kvbench.cli --show-history
+    # ops/sec trend chart per backend, with sparklines, from the
+    # same history file
+    python -m kvbench.cli --trend
     # compare this run against a previous run's JSON report, side
     # by side, and fail the run when it regressed past 5%
     python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
@@ -60,7 +63,7 @@ from .bench import DictClient, Workload, format_duration, \
     run_client_sweep, run_keyspace_sweep, run_workload
 from .compare import compare_results, format_verdict, load_baseline
 from .history import DEFAULT_HISTORY_FILE, format_history, \
-    load_history, record_run
+    format_trend, load_history, record_run
 from .report import _workload_dict, render_csv, write_csv, write_json, \
     write_report
 from .resp import RespClient
@@ -346,9 +349,13 @@ def build_parser():
     parser.add_argument("--show-history", action="store_true",
                         help="print the recorded run history and exit "
                         "(no benchmark is run)")
+    parser.add_argument("--trend", action="store_true",
+                        help="print an ops/sec trend chart per backend "
+                        "from the recorded run history and exit "
+                        "(no benchmark is run)")
     parser.add_argument("--history-limit", type=int, default=20,
-                        help="how many recent runs --show-history prints "
-                        "(default 20)")
+                        help="how many recent runs --show-history and "
+                        "--trend print per backend (default 20)")
     parser.add_argument("--compare-file", default=None, metavar="PATH",
                         help="compare this run against a previous run's "
                         "JSON report (e.g. report.json): ops/sec and "
@@ -397,6 +404,12 @@ def main(argv=None):
         # even when nothing is listening.
         entries = load_history(history_path)
         print(format_history(entries, limit=args.history_limit))
+        return 0
+    if args.trend:
+        # Trend-only mode: same history file, rendered as a
+        # per-backend ops/sec-over-time chart instead of a table.
+        entries = load_history(history_path)
+        print(format_trend(entries, limit=args.history_limit))
         return 0
     try:
         set_w, get_w, incr_w, mix_label = _parse_mix(args.mix)
