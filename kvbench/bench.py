@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass, field, replace
 
 from .distribution import ZipfianSampler
-from .stats import histogram, summarize, time_series
+from .stats import attribute_tail, histogram, summarize, time_series
 
 
 def format_duration(seconds):
@@ -152,6 +152,17 @@ class BenchmarkResult:
     # twice the latency memory; per-key tracking is off when the
     # workload sets hot_keys to 0.
     latencies_by_key: dict = field(default_factory=dict)
+    # Per-client latencies (ns), keyed by thread index (each thread
+    # is one client). Same shape as latencies_by_op, so the report
+    # can show per-client p99 and attribute the tail to one slow
+    # client. This duplicates the latencies in latencies_ns (one
+    # extra reference per op), like latencies_by_key.
+    latencies_by_client: dict = field(default_factory=dict)
+    # Hot vs cold key latencies (ns): ops whose key was in the
+    # hottest 1% of the keyspace vs everything else, so the report
+    # can show whether the tail lives on hot keys or cold ones.
+    hot_latencies_ns: list = field(default_factory=list)
+    cold_latencies_ns: list = field(default_factory=list)
     # Successful ops whose key was in the hot set: the hottest 1% of
     # the keyspace. Under a uniform distribution this is ~1% of ops;
     # under zipfian it is the measured hot-set hit rate, so a report
@@ -244,6 +255,21 @@ class BenchmarkResult:
         if not self.times_s:
             return []
         return time_series(self.latencies_ns, self.times_s)
+
+    @property
+    def tail_report(self):
+        """Tail-latency attribution for this result.
+
+        See :func:`kvbench.stats.attribute_tail`: slow ops (at or
+        above the overall p99) are broken down by operation, by
+        client, by hot vs cold keys and by second, and the finding
+        names the factor that dominates the tail, if any.
+        """
+        return attribute_tail(
+            self.latencies_ns, self.times_s, self.latencies_by_op,
+            self.latencies_by_client, self.hot_latencies_ns,
+            self.cold_latencies_ns,
+        )
 
 
 class DictStore:
@@ -339,6 +365,9 @@ def run_workload(client_factory, workload, name):
     times = []
     latencies_by_op = {}
     latencies_by_key = {}
+    latencies_by_client = {}
+    hot_latencies = []
+    cold_latencies = []
     hot_ops = 0
     warmup_ops = 0
     errors = 0
@@ -369,7 +398,7 @@ def run_workload(client_factory, workload, name):
         def run_phase(count, phase_deadline, collect, time_base):
             """Run batches until ``count`` is exhausted or the
             deadline is reached; return (latencies, times, by_op,
-            by_key, hot, errors, sample, ops_run).
+            by_key, hot, hot_lat, cold_lat, errors, sample, ops_run).
 
             With ``collect`` False this is a warmup phase: batches
             still run against the backend, but no latencies, times,
@@ -383,6 +412,8 @@ def run_workload(client_factory, workload, name):
             local_by_op = {}
             local_by_key = {}
             local_hot = 0
+            local_hot_lat = []
+            local_cold_lat = []
             local_errors = 0
             local_sample = ""
             done = 0
@@ -471,21 +502,26 @@ def run_workload(client_factory, workload, name):
                                 cmd[1], []).append(per_op_ns)
                         if is_hot:
                             local_hot += 1
+                            local_hot_lat.append(per_op_ns)
+                        else:
+                            local_cold_lat.append(per_op_ns)
                 if remaining is not None:
                     remaining -= batch_size
             return (local_lat, local_times, local_by_op, local_by_key,
-                    local_hot, local_errors, local_sample, done)
+                    local_hot, local_hot_lat, local_cold_lat,
+                    local_errors, local_sample, done)
 
         try:
             local_warmup = 0
             if warmup_deadline is not None:
-                (_, _, _, _, _, _, _, local_warmup) = run_phase(
+                (_, _, _, _, _, _, _, _, _, local_warmup) = run_phase(
                     None, warmup_deadline, collect=False, time_base=start)
                 # Re-seed so the measured phase draws the same keys
                 # and op mix as a run with no warmup at all.
                 rng = random.Random(workload.seed + thread_index)
             (local_lat, local_times, local_by_op, local_by_key,
-             local_hot, local_errors, local_sample, _) = run_phase(
+             local_hot, local_hot_lat, local_cold_lat, local_errors,
+             local_sample, _) = run_phase(
                 op_count, deadline, collect=True,
                 time_base=measure_start)
         finally:
@@ -497,6 +533,12 @@ def run_workload(client_factory, workload, name):
                 latencies_by_op.setdefault(op, []).extend(samples)
             for key, samples in local_by_key.items():
                 latencies_by_key.setdefault(key, []).extend(samples)
+            # One worker is one client: its measured latencies are
+            # that client's latencies.
+            latencies_by_client.setdefault(
+                thread_index, []).extend(local_lat)
+            hot_latencies.extend(local_hot_lat)
+            cold_latencies.extend(local_cold_lat)
             hot_ops += local_hot
             warmup_ops += local_warmup
             errors += local_errors
@@ -537,6 +579,9 @@ def run_workload(client_factory, workload, name):
         times_s=times,
         latencies_by_op=latencies_by_op,
         latencies_by_key=latencies_by_key,
+        latencies_by_client=latencies_by_client,
+        hot_latencies_ns=hot_latencies,
+        cold_latencies_ns=cold_latencies,
         hot_ops=hot_ops,
         warmup_ops=warmup_ops,
     )

@@ -51,6 +51,13 @@ C. Pure Python 3 standard library, no dependencies.
   per client count, and the reports show ops/sec and p99 per
   count, so a run shows how concurrency affects throughput — where
   adding clients stops helping and the server saturates.
+  When the tail is high the reports attribute it: slow ops (at or
+  above the overall p99) are broken down by operation type, by
+  client, by hot vs cold keys, and by second, and the finding
+  names the factor that dominates the tail — one slow op type, one
+  slow client, hot or cold keys, or a single slow second — or says
+  no single factor does, so a high p99 points at the cause instead
+  of just the number.
 - Latency stats (`kvbench/stats.py`): ops/sec, mean, p50, p95, p99,
   plus a log-spaced latency histogram and a per-second time series
   (ops, mean and max latency per second) to spot stalls.
@@ -236,6 +243,21 @@ INCR. Ops that never ran (e.g. INCR in an `80:20` read:write mix)
 are left out. The JSON report carries the same split per result
 under `per_op`.
 
+Below that, each backend gets a tail-latency attribution section:
+a finding naming the factor the slowest ops come from — one
+operation type, one client, hot or cold keys, or a single slow
+second — or that no single factor dominates the tail, plus the
+tables the finding is drawn from: per-op p99 and slow-op share,
+per-client p99 and slow-op share, hot vs cold p99 and slow-op
+share, and whether slow ops cluster in one second or spread over
+the run. Slow ops are the ops at or above the overall p99
+latency. A factor only counts as dominant when slow ops land on
+it far more often than its share of all ops would predict (at
+least 10 points more) and it is genuinely slower than the rest of
+its dimension (p99 at least twice the p99 of everything else in
+that dimension, over at least 10 samples). The JSON report carries
+the same breakdown per result under `tail`.
+
 Below that, each backend gets a per-key latency table: count,
 mean, p50, p95 and p99 for the hottest keys by access count (top
 5 by default, `--hot-keys` to change it, 0 to disable). The JSON
@@ -279,6 +301,10 @@ make test
 
 ## Roadmap
 
+- ~~Tail-latency attribution: when p99 is high, break the slowest
+  ops down by operation type, by client, by hot vs cold keys and
+  by second, and name the factor that dominates the tail in both
+  reports.~~ Done in 0.11.0.
 - ~~Client-count sweep (`--sweep-clients 1,2,4,8`): re-run the
   same workload at several client counts, with ops/sec and p99
   per count in both reports.~~ Done in 0.10.0.

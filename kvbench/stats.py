@@ -43,6 +43,249 @@ def summarize(latencies_ns):
     }
 
 
+def attribute_tail(latencies_ns, times_s, by_op, by_client, hot_ns,
+                   cold_ns):
+    """Attribute a high tail latency to its contributing factor.
+
+    "Slow" ops are the ops at or above the overall p99 latency —
+    the slowest ~1% when latencies are distinct, more when many ops
+    tie at the p99 value. For each dimension (operation type,
+    client, hot vs cold keys, time) every factor reports its p99,
+    its share of all ops and its share of slow ops. A factor
+    "dominates" when slow ops land on it far more often than its
+    share of all ops would predict (slow share exceeds ops share by
+    at least 10 percentage points) and it is genuinely slower than
+    the rest of that dimension (its p99 is at least twice the p99
+    of all other ops in the dimension, over at least 10 samples —
+    a p99 over fewer samples is noise). The dominant factor is the
+    one with the largest such excess; when none qualifies, no single
+    factor dominates the tail.
+
+    Time clustering compares the busiest second's share of slow ops
+    against its share of all ops: slow ops are "clustered" when
+    they are at least twice as concentrated in one second as the
+    run's ops overall (concentration >= 2.0), "spread out"
+    otherwise, and time dominates when at least 10 slow ops land in
+    that second. A run that fits in a single second has
+    concentration 1.0 by construction — there is nowhere for slow
+    ops to cluster.
+
+    Returns a dict with the overall p95/p99, the slow threshold,
+    per-factor tables (``by_op``, ``by_client``, ``by_segment``),
+    a ``time`` dict, the ``dominant`` factor (or None) and a
+    human-readable ``finding``.
+    """
+    empty_time = {
+        "slow_seconds": 0,
+        "total_seconds": 0,
+        "busiest_second": None,
+        "busiest_slow_share": 0.0,
+        "busiest_ops_share": 0.0,
+        "concentration": 0.0,
+        "verdict": "no timing data",
+    }
+    if not latencies_ns:
+        return {
+            "p99_ms": 0.0,
+            "p95_ms": 0.0,
+            "slow_threshold_ms": 0.0,
+            "slow_ops": 0,
+            "finding": "no samples to attribute",
+            "dominant": None,
+            "by_op": [],
+            "by_client": [],
+            "by_segment": [],
+            "time": dict(empty_time, verdict="no samples"),
+        }
+    total = len(latencies_ns)
+    ordered = sorted(latencies_ns)
+    summary = summarize(latencies_ns)
+    threshold_ns = percentile(ordered, 99)
+    slow_total = sum(1 for v in latencies_ns if v >= threshold_ns)
+
+    def excess(entry):
+        return entry["slow_share"] - entry["ops_share"]
+
+    def p99_ratio(entry_p99_ms, rest_samples):
+        """Factor p99 divided by the p99 of everything else.
+
+        None when there is nothing else to compare against (a
+        dimension with a single factor); infinite when the rest is
+        all zero-latency and the factor is not.
+        """
+        if not rest_samples:
+            return None
+        rest_p99 = summarize(rest_samples)["p99_ms"]
+        if rest_p99 <= 0:
+            return float("inf") if entry_p99_ms > 0 else None
+        return entry_p99_ms / rest_p99
+
+    def factor(label, samples, rest_samples):
+        """Per-factor attribution entry, or None when empty.
+
+        ``rest_samples`` are the latencies outside this factor in
+        the same dimension, for the p99 ratio.
+        """
+        if not samples:
+            return None
+        slow = sum(1 for v in samples if v >= threshold_ns)
+        entry = summarize(samples)
+        return {
+            "factor": label,
+            "count": len(samples),
+            "p99_ms": entry["p99_ms"],
+            "p99_ratio": p99_ratio(entry["p99_ms"], rest_samples),
+            "slow_ops": slow,
+            "slow_share": slow / slow_total if slow_total else 0.0,
+            "ops_share": len(samples) / total,
+        }
+
+    by_op_map = by_op or {}
+    op_entries = []
+    for op in ("SET", "GET", "INCR"):
+        rest = [v for other, s in by_op_map.items()
+                if other != op for v in s]
+        entry = factor(op, by_op_map.get(op), rest)
+        if entry is not None:
+            op_entries.append(entry)
+    by_client_map = by_client or {}
+    client_entries = []
+    for index in sorted(by_client_map):
+        rest = [v for other, s in by_client_map.items()
+                if other != index for v in s]
+        entry = factor(index, by_client_map[index], rest)
+        if entry is not None:
+            client_entries.append(entry)
+    segment_entries = []
+    for label, samples, rest in (("hot", hot_ns, cold_ns),
+                                 ("cold", cold_ns, hot_ns)):
+        entry = factor(label, samples, rest)
+        if entry is not None:
+            segment_entries.append(entry)
+
+    time_info = dict(empty_time)
+    if times_s and len(times_s) == total:
+        total_seconds = max(0, int(max(times_s))) + 1
+        slow_per_second = [0] * total_seconds
+        ops_per_second = [0] * total_seconds
+        for latency_ns, t in zip(latencies_ns, times_s):
+            second = max(0, int(t))
+            ops_per_second[second] += 1
+            if latency_ns >= threshold_ns:
+                slow_per_second[second] += 1
+        busiest = max(range(total_seconds),
+                      key=lambda s: (slow_per_second[s], -s))
+        slow_share = (slow_per_second[busiest] / slow_total
+                      if slow_total else 0.0)
+        ops_share = ops_per_second[busiest] / total
+        concentration = slow_share / ops_share if ops_share else 0.0
+        time_info = {
+            "slow_seconds": sum(1 for n in slow_per_second if n),
+            "total_seconds": total_seconds,
+            "busiest_second": busiest,
+            "busiest_slow_share": slow_share,
+            "busiest_ops_share": ops_share,
+            "concentration": concentration,
+            "verdict": ("clustered" if concentration >= 2.0
+                        else "spread out"),
+        }
+
+    # The dominant factor is the largest significant excess across
+    # all dimensions; dimensions are checked in a fixed order so a
+    # tie resolves deterministically.
+    candidates = []
+    for entry in op_entries:
+        candidates.append(("operation", entry))
+    for entry in client_entries:
+        candidates.append(("client", entry))
+    for entry in segment_entries:
+        candidates.append(("keyspace", entry))
+    if time_info["verdict"] == "clustered":
+        time_entry = {
+            "factor": time_info["busiest_second"],
+            "count": ops_per_second[time_info["busiest_second"]],
+            "p99_ms": summary["p99_ms"],
+            "p99_ratio": None,
+            "slow_ops": slow_per_second[time_info["busiest_second"]],
+            "slow_share": time_info["busiest_slow_share"],
+            "ops_share": time_info["busiest_ops_share"],
+            "concentration": time_info["concentration"],
+        }
+        candidates.append(("time", time_entry))
+    dominant = None
+    best_excess = 0.0
+    for dimension, entry in candidates:
+        if dimension == "time":
+            # Time has no p99 ratio (the complement seconds hold
+            # slow ops too); it qualifies on concentration plus a
+            # minimum slow-op count in the busiest second.
+            qualifies = (entry["slow_ops"] >= 10
+                         and entry["concentration"] >= 2.0
+                         and excess(entry) >= 0.10)
+        else:
+            qualifies = (entry["count"] >= 10
+                         and excess(entry) >= 0.10
+                         and entry["p99_ratio"] is not None
+                         and entry["p99_ratio"] >= 2.0)
+        if qualifies and excess(entry) > best_excess:
+            best_excess = excess(entry)
+            dominant = {
+                "dimension": dimension,
+                "factor": entry["factor"],
+                "p99_ms": entry["p99_ms"],
+                "slow_share": entry["slow_share"],
+                "ops_share": entry["ops_share"],
+            }
+    if dominant is None:
+        finding = "no single factor dominates the tail"
+    elif dominant["dimension"] == "operation":
+        finding = (
+            f"{dominant['factor']} dominates the tail — p99 "
+            f"{dominant['p99_ms']:.3f} ms vs "
+            f"{summary['p99_ms']:.3f} ms overall, and "
+            f"{dominant['slow_share'] * 100:.0f}% of slow ops are "
+            f"{dominant['factor']} (vs "
+            f"{dominant['ops_share'] * 100:.0f}% of all ops)"
+        )
+    elif dominant["dimension"] == "client":
+        finding = (
+            f"client {dominant['factor']} dominates the tail — p99 "
+            f"{dominant['p99_ms']:.3f} ms vs "
+            f"{summary['p99_ms']:.3f} ms overall, and "
+            f"{dominant['slow_share'] * 100:.0f}% of slow ops ran on "
+            f"client {dominant['factor']} (vs "
+            f"{dominant['ops_share'] * 100:.0f}% of all ops)"
+        )
+    elif dominant["dimension"] == "keyspace":
+        finding = (
+            f"{dominant['factor']} keys dominate the tail — p99 "
+            f"{dominant['p99_ms']:.3f} ms vs "
+            f"{summary['p99_ms']:.3f} ms overall, and "
+            f"{dominant['slow_share'] * 100:.0f}% of slow ops hit "
+            f"{dominant['factor']} keys (vs "
+            f"{dominant['ops_share'] * 100:.0f}% of all ops)"
+        )
+    else:
+        finding = (
+            "slow ops cluster in time — second "
+            f"{dominant['factor']} holds "
+            f"{dominant['slow_share'] * 100:.0f}% of slow ops but "
+            f"only {dominant['ops_share'] * 100:.0f}% of all ops"
+        )
+    return {
+        "p99_ms": summary["p99_ms"],
+        "p95_ms": summary["p95_ms"],
+        "slow_threshold_ms": threshold_ns / 1_000_000,
+        "slow_ops": slow_total,
+        "finding": finding,
+        "dominant": dominant,
+        "by_op": op_entries,
+        "by_client": client_entries,
+        "by_segment": segment_entries,
+        "time": time_info,
+    }
+
+
 def time_series(latencies_ns, times_s):
     """Per-second latency buckets, to spot stalls over a run.
 

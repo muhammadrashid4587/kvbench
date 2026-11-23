@@ -58,6 +58,10 @@ def _result_dict(result, top_n=5):
         # Per-key latency stats for the hottest keys by access count:
         # count, mean, p50, p95, p99, min and max per key.
         "hot_keys": result.hot_key_summary(top_n),
+        # Tail-latency attribution: which op, client, keyspace
+        # segment or time window the slowest ops come from, and the
+        # finding naming the dominant factor, if any.
+        "tail": result.tail_report,
         "histogram": result.histogram,
         "time_series": result.time_series,
         # Share of successful ops that hit the hottest 1% of keys
@@ -177,6 +181,88 @@ def _hot_key_lines(result, top_n=5):
             f"| `{entry['key']}` | {entry['count']} | "
             f"{entry['mean_ms']:.3f} | {entry['p50_ms']:.3f} | "
             f"{entry['p95_ms']:.3f} | {entry['p99_ms']:.3f} |"
+        )
+    lines.append("")
+    return lines
+
+
+def _tail_lines(result):
+    """Tail-latency attribution section for one result.
+
+    The finding names the factor that dominates the tail (one slow
+    op type, one slow client, hot or cold keys, or a slow time
+    window), or says no single factor does. The tables underneath
+    show the same breakdown the finding is drawn from: per-op p99
+    and slow-op share, per-client p99 and slow-op share (only when
+    there is more than one client), hot vs cold p99 and slow-op
+    share, and whether slow ops cluster in one second or spread
+    over the run.
+    """
+    tail = result.tail_report
+    if not tail["by_op"] and not tail["by_client"] \
+            and not tail["by_segment"]:
+        return []
+    lines = [
+        f"### Tail-latency attribution — {result.name}",
+        "",
+        f"Finding: {tail['finding']}",
+        "",
+        f"Slow ops are the {tail['slow_ops']} ops at or above the "
+        f"p99 latency of {tail['p99_ms']:.3f} ms.",
+        "",
+    ]
+    if tail["by_op"]:
+        lines += [
+            "| Op | Ops | p99 (ms) | Slow ops | Slow share |",
+            "| --- | ---: | ---: | ---: | ---: |",
+        ]
+        for entry in tail["by_op"]:
+            lines.append(
+                f"| {entry['factor']} | {entry['count']} | "
+                f"{entry['p99_ms']:.3f} | {entry['slow_ops']} | "
+                f"{entry['slow_share'] * 100:.1f}% |"
+            )
+        lines.append("")
+    if len(tail["by_client"]) > 1:
+        lines += [
+            "| Client | Ops | p99 (ms) | Slow ops | Slow share |",
+            "| ---: | ---: | ---: | ---: | ---: |",
+        ]
+        for entry in tail["by_client"]:
+            lines.append(
+                f"| {entry['factor']} | {entry['count']} | "
+                f"{entry['p99_ms']:.3f} | {entry['slow_ops']} | "
+                f"{entry['slow_share'] * 100:.1f}% |"
+            )
+        lines.append("")
+    if tail["by_segment"]:
+        lines += [
+            "| Keys | Ops | p99 (ms) | Slow ops | Slow share |",
+            "| --- | ---: | ---: | ---: | ---: |",
+        ]
+        for entry in tail["by_segment"]:
+            lines.append(
+                f"| {entry['factor']} | {entry['count']} | "
+                f"{entry['p99_ms']:.3f} | {entry['slow_ops']} | "
+                f"{entry['slow_share'] * 100:.1f}% |"
+            )
+        lines.append("")
+    time_info = tail["time"]
+    if time_info["verdict"] == "clustered":
+        lines.append(
+            f"Slow ops cluster in time: second "
+            f"{time_info['busiest_second']} holds "
+            f"{time_info['busiest_slow_share'] * 100:.0f}% of slow "
+            f"ops but only "
+            f"{time_info['busiest_ops_share'] * 100:.0f}% of all ops."
+        )
+    elif time_info["verdict"] == "spread out":
+        lines.append(
+            f"Slow ops are spread out in time: they land in "
+            f"{time_info['slow_seconds']} of "
+            f"{time_info['total_seconds']} seconds, and the "
+            f"busiest second holds "
+            f"{time_info['busiest_slow_share'] * 100:.0f}% of them."
         )
     lines.append("")
     return lines
@@ -339,6 +425,11 @@ def render_markdown(results, workload, command_line):
         per_op_lines += _per_op_lines(result)
     if per_op_lines:
         lines += ["", "## Per-operation stats", ""] + per_op_lines
+    tail_lines = []
+    for result in results:
+        tail_lines += _tail_lines(result)
+    if tail_lines:
+        lines += ["", "## Tail-latency attribution", ""] + tail_lines
     hot_key_lines = []
     for result in results:
         hot_key_lines += _hot_key_lines(result, workload.hot_keys)
@@ -371,6 +462,13 @@ def render_markdown(results, workload, command_line):
         "- The Per-operation stats section splits ops/sec and latency "
         "percentiles by operation (SET, GET, INCR), so a read-heavy "
         "mix shows whether reads or writes dominate the tail.",
+        "- The Tail-latency attribution section names the factor the "
+        "slowest ops come from: one operation type, one client, hot "
+        "or cold keys, or a single slow second. Slow ops are the ops "
+        "at or above the overall p99 latency; a factor only counts "
+        "as dominant when slow ops land on it far more often than "
+        "its share of all ops would predict. The JSON report carries "
+        "the same breakdown per result under `tail`.",
     ]
     if workload.hot_keys > 0 and hot_key_lines:
         lines.append(
