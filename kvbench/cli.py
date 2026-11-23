@@ -21,6 +21,11 @@ Usage:
     python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
         --ops 20000 --clients 4 \\
         --sweep-keyspace 100,1000,10000,100000 --output report.md
+    # record the run in the history file, then compare later runs
+    # against it (ops/sec trend over time)
+    python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
+        --ops 20000 --clients 4 --history
+    python -m kvbench.cli --show-history
 """
 
 import argparse
@@ -30,6 +35,8 @@ import sys
 from . import __version__
 from .bench import DictClient, Workload, format_duration, \
     run_keyspace_sweep, run_workload
+from .history import DEFAULT_HISTORY_FILE, format_history, \
+    load_history, record_run
 from .report import write_json, write_report
 from .resp import RespClient
 
@@ -223,11 +230,31 @@ def build_parser():
     parser.add_argument("--json", default=None, metavar="PATH",
                         help="where to write the JSON report "
                         "(default: same name as --output, .json extension)")
+    parser.add_argument("--history", action="store_true",
+                        help="record this run in the history file "
+                        "(default ~/.kvbench/history.jsonl) so later "
+                        "runs can be compared against it")
+    parser.add_argument("--history-file", default=None, metavar="PATH",
+                        help="where to read/write run history "
+                        "(default ~/.kvbench/history.jsonl)")
+    parser.add_argument("--show-history", action="store_true",
+                        help="print the recorded run history and exit "
+                        "(no benchmark is run)")
+    parser.add_argument("--history-limit", type=int, default=20,
+                        help="how many recent runs --show-history prints "
+                        "(default 20)")
     return parser
 
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    history_path = args.history_file or DEFAULT_HISTORY_FILE
+    if args.show_history:
+        # History-only mode: no server is contacted, so this works
+        # even when nothing is listening.
+        entries = load_history(history_path)
+        print(format_history(entries, limit=args.history_limit))
+        return 0
     try:
         set_w, get_w, incr_w, mix_label = _parse_mix(args.mix)
         compare_targets = [_parse_host_port(t) for t in args.compare]
@@ -353,6 +380,9 @@ def main(argv=None):
     json_path = json_path_for(args.output, args.json)
     write_json(results, workload, command_line, json_path)
     print(f"JSON report written to {json_path}")
+    if args.history:
+        count = record_run(history_path, results, workload, command_line)
+        print(f"recorded {count} run(s) in history file {history_path}")
     return 0
 
 

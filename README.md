@@ -117,6 +117,11 @@ python -m kvbench.cli --ops 20000 --clients 4 --warmup 2s
 # 10000 and 100000 keys, with ops/sec and p99 per size
 python -m kvbench.cli --ops 20000 --clients 4 \
     --sweep-keyspace 100,1000,10000,100000
+
+# record the run in the history file, then look at the ops/sec
+# trend over time (default file: ~/.kvbench/history.jsonl)
+python -m kvbench.cli --ops 20000 --clients 4 --history
+python -m kvbench.cli --show-history
 ```
 
 Pipelined latencies are the batch round-trip time divided by the batch
@@ -148,7 +153,13 @@ add it to the report), `--sweep-keyspace` (comma-separated keyspace
 sizes, e.g. `100,1000,10000,100000`: re-run the same workload once
 per size and report ops/sec and p99 per size in both reports),
 `--output` (default report.md), `--json`
-(default: same name as `--output` with a `.json` extension).
+(default: same name as `--output` with a `.json` extension),
+`--history` (record this run in the history file so later runs can
+be compared against it), `--history-file` (where the history lives,
+default `~/.kvbench/history.jsonl`), `--show-history` (print the
+recorded run history and exit, no benchmark is run),
+`--history-limit` (how many recent runs `--show-history` prints,
+default 20).
 
 Every run writes a JSON report alongside the Markdown one, with the
 same workload settings and per-backend results (ops, ops/sec, elapsed,
@@ -158,6 +169,19 @@ workload section carries the key distribution (`distribution` and
 `zipf_skew`, null for uniform), and each result carries its measured
 hot-set hit rate (`hot_hit_rate`: the share of ops that hit the
 hottest 1% of keys).
+
+## Run history
+
+With `--history` every run appends one JSON record per backend to
+`~/.kvbench/history.jsonl` (use `--history-file PATH` to put it
+somewhere else): timestamp, backend, ops, ops/sec, mean/p50/p95/p99
+latency, errors, and the workload settings. `python -m kvbench.cli
+--show-history` prints the most recent runs (20 by default,
+`--history-limit N` to change it) as a table with the ops/sec change
+versus the previous run of the same backend, so a cinder speedup —
+or a regression — reads at a glance. The history file is plain
+JSONL, one record per line, and a corrupt line is skipped on load
+rather than failing the trend view.
 
 ## Report format
 
@@ -236,6 +260,10 @@ make test
 
 ## Roadmap
 
+- ~~Run history (`--history` / `--show-history`): record each run
+  in a local JSONL history file (`~/.kvbench/history.jsonl`) and
+  show the ops/sec trend over time, with the change versus the
+  previous run of the same backend.~~ Done in 0.9.0.
 - ~~Keyspace-size sweep (`--sweep-keyspace 100,1000,10000,100000`):
   re-run the same workload at several keyspace sizes, with ops/sec
   and p99 per size in both reports.~~ Done in 0.8.0.
