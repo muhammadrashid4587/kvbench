@@ -167,7 +167,7 @@ class TestLoadHistoryBaseline(unittest.TestCase):
         return path
 
     def _record(self, backend, ops_per_sec, p99_ms, timestamp,
-                errors=0):
+                errors=0, workload=None):
         return {
             "tool": "kvbench",
             "version": "0.18.0",
@@ -182,8 +182,30 @@ class TestLoadHistoryBaseline(unittest.TestCase):
             "p95_ms": p99_ms,
             "p99_ms": p99_ms,
             "errors": errors,
-            "workload": _workload_dict(_workload()),
+            "workload": workload if workload is not None
+            else _workload_dict(_workload()),
         }
+
+    def _other_workload(self):
+        # Same shape as the default workload, but 4 clients
+        # instead of 2 — a different workload, so it must never
+        # be picked as a baseline for the default one.
+        return _workload_dict(Workload(
+            ops=100, clients=4, keys=10, value_size=8,
+            set_weight=50, get_weight=40, incr_weight=10))
+
+    def _mixed_workload_history(self, tmp):
+        cinder = "cinder (127.0.0.1:6379)"
+        return self._write_history(tmp, [
+            self._record(cinder, 8_000, 0.12,
+                         "2026-11-21T10:00:00+00:00"),
+            self._record(cinder, 9_000, 0.11,
+                         "2026-11-22T10:00:00+00:00",
+                         workload=self._other_workload()),
+            self._record(cinder, 10_000, 0.10,
+                         "2026-11-23T10:00:00+00:00",
+                         workload=self._other_workload()),
+        ])
 
     def _history_path(self, tmp):
         cinder = "cinder (127.0.0.1:6379)"
@@ -327,6 +349,97 @@ class TestLoadHistoryBaseline(unittest.TestCase):
             self.assertEqual(entry["verdict"], "faster")
             self.assertEqual(comparison["source"], "history")
             self.assertTrue(comparison["workload_matches"])
+
+    def test_same_workload_latest_skips_newer_mismatched_runs(self):
+        # The two newest runs used a different workload (4
+        # clients); the latest run with the default workload is
+        # the oldest one, at 8,000 ops/sec.
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = load_history_baseline(
+                self._mixed_workload_history(tmp), "latest",
+                workload=_workload_dict(_workload()))
+            by_name = {r["name"]: r for r in doc["results"]}
+            self.assertEqual(by_name["cinder (127.0.0.1:6379)"]
+                             ["ops_per_sec"], 8_000)
+
+    def test_same_workload_without_filter_picks_latest_anyway(self):
+        # Without the filter the newest run wins, whatever its
+        # workload was — the default stays unchanged.
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = load_history_baseline(
+                self._mixed_workload_history(tmp), "latest")
+            by_name = {r["name"]: r for r in doc["results"]}
+            self.assertEqual(by_name["cinder (127.0.0.1:6379)"]
+                             ["ops_per_sec"], 10_000)
+
+    def test_same_workload_index_counts_within_matching_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_history(tmp, [
+                self._record("cinder (127.0.0.1:6379)", 8_000, 0.12,
+                             "2026-11-21T10:00:00+00:00"),
+                self._record("cinder (127.0.0.1:6379)", 9_000, 0.11,
+                             "2026-11-22T10:00:00+00:00",
+                             workload=self._other_workload()),
+                self._record("cinder (127.0.0.1:6379)", 10_000, 0.10,
+                             "2026-11-23T10:00:00+00:00"),
+            ])
+            doc = load_history_baseline(
+                path, "1", workload=_workload_dict(_workload()))
+            by_name = {r["name"]: r for r in doc["results"]}
+            # Index 1 among the matching runs is the Nov 23 run;
+            # the mismatched Nov 22 run is not counted.
+            self.assertEqual(by_name["cinder (127.0.0.1:6379)"]
+                             ["ops_per_sec"], 10_000)
+
+    def test_same_workload_timestamp_skips_mismatched_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = load_history_baseline(
+                self._mixed_workload_history(tmp),
+                "2026-11-23T12:00:00Z",
+                workload=_workload_dict(_workload()))
+            by_name = {r["name"]: r for r in doc["results"]}
+            self.assertEqual(by_name["cinder (127.0.0.1:6379)"]
+                             ["ops_per_sec"], 8_000)
+
+    def test_same_workload_no_matching_run_is_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_history(tmp, [
+                self._record("cinder (127.0.0.1:6379)", 9_000, 0.11,
+                             "2026-11-22T10:00:00+00:00",
+                             workload=self._other_workload()),
+            ])
+            with self.assertRaises(ValueError) as ctx:
+                load_history_baseline(
+                    path, "latest",
+                    workload=_workload_dict(_workload()))
+            self.assertIn("same workload", str(ctx.exception))
+
+    def test_same_workload_record_without_workload_never_matches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            record = self._record("cinder (127.0.0.1:6379)",
+                                  9_000, 0.11,
+                                  "2026-11-22T10:00:00+00:00")
+            del record["workload"]
+            path = self._write_history(tmp, [record])
+            with self.assertRaises(ValueError) as ctx:
+                load_history_baseline(
+                    path, "latest",
+                    workload=_workload_dict(_workload()))
+            self.assertIn("same workload", str(ctx.exception))
+
+    def test_same_workload_baseline_compares_clean(self):
+        # The filtered baseline used the same workload, so the
+        # comparison reports no workload differences.
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = load_history_baseline(
+                self._mixed_workload_history(tmp), "latest",
+                workload=_workload_dict(_workload()))
+            comparison = compare_results(
+                [_result()], doc, _workload_dict(_workload()),
+                "history.jsonl (history run latest, same workload)",
+                source="history")
+            self.assertTrue(comparison["workload_matches"])
+            self.assertEqual(comparison["workload_differences"], [])
 
 
 class TestCompareResults(unittest.TestCase):
@@ -750,6 +863,107 @@ class TestCompareHistoryCli(unittest.TestCase):
             history = self._run_with_history(tmp)
             code = main(self._argv(["--ops", "10",
                                     "--compare-history", "yesterday",
+                                    "--history-file", history]))
+            self.assertEqual(code, 1)
+
+    def _write_history_records(self, tmp, records):
+        """Write history records (dicts) to a temp history file."""
+        history = os.path.join(tmp, "history.jsonl")
+        with open(history, "w", encoding="utf-8") as f:
+            for record in records:
+                f.write(json.dumps(record) + "\n")
+        return history
+
+    def _history_record(self, ops_per_sec, p99_ms, timestamp,
+                        workload):
+        return {
+            "tool": "kvbench", "version": "0.20.0",
+            "timestamp": timestamp,
+            "command": "kvbench --ops 100 --clients 1",
+            "backend": f"cinder (127.0.0.1:{self.port})",
+            "ops": 100, "elapsed_s": 0.01,
+            "ops_per_sec": ops_per_sec, "mean_ms": p99_ms,
+            "p50_ms": p99_ms, "p95_ms": p99_ms,
+            "p99_ms": p99_ms, "errors": 0,
+            "workload": workload,
+        }
+
+    def test_compare_same_workload_picks_matching_run(self):
+        # The newest recorded run used 2 clients; this run uses
+        # 1, so with the filter the baseline is the older
+        # 1-client run at 8,000 ops/sec — not the newest run.
+        with tempfile.TemporaryDirectory() as tmp:
+            matching = _workload_dict(Workload(ops=100, clients=1))
+            other = _workload_dict(Workload(ops=100, clients=2))
+            history = self._write_history_records(tmp, [
+                self._history_record(
+                    8_000, 0.12, "2026-11-21T10:00:00+00:00", matching),
+                self._history_record(
+                    10**9, 0.0001, "2026-11-23T10:00:00+00:00", other),
+            ])
+            out = os.path.join(tmp, "run.md")
+            code = main(self._argv(["--ops", "100", "--clients", "1",
+                                    "--output", out,
+                                    "--compare-history", "-1",
+                                    "--compare-same-workload",
+                                    "--history-file", history]))
+            self.assertEqual(code, 0)
+            with open(out, encoding="utf-8") as f:
+                text = f.read()
+            self.assertIn("## Comparison with previous run", text)
+            self.assertIn("same workload", text)
+            parsed = json.loads(open(os.path.join(tmp, "run.json"),
+                                     encoding="utf-8").read())
+            comparison = parsed["comparison"]
+            self.assertTrue(comparison["workload_matches"])
+            self.assertEqual(
+                comparison["entries"][0]["baseline_ops_per_sec"],
+                8_000)
+
+    def test_compare_same_workload_off_picks_newest_run(self):
+        # Same history, no filter: the newest run wins even
+        # though its workload differs, and the report warns.
+        with tempfile.TemporaryDirectory() as tmp:
+            matching = _workload_dict(Workload(ops=100, clients=1))
+            other = _workload_dict(Workload(ops=100, clients=2))
+            history = self._write_history_records(tmp, [
+                self._history_record(
+                    8_000, 0.12, "2026-11-21T10:00:00+00:00", matching),
+                self._history_record(
+                    10**9, 0.0001, "2026-11-23T10:00:00+00:00", other),
+            ])
+            out = os.path.join(tmp, "run.md")
+            code = main(self._argv(["--ops", "100", "--clients", "1",
+                                    "--output", out,
+                                    "--compare-history", "-1",
+                                    "--history-file", history]))
+            self.assertEqual(code, 0)
+            parsed = json.loads(open(os.path.join(tmp, "run.json"),
+                                     encoding="utf-8").read())
+            comparison = parsed["comparison"]
+            self.assertFalse(comparison["workload_matches"])
+            self.assertEqual(
+                comparison["entries"][0]["baseline_ops_per_sec"],
+                10**9)
+
+    def test_compare_same_workload_without_compare_history(self):
+        code = main(self._argv(["--ops", "10",
+                                "--compare-same-workload"]))
+        self.assertEqual(code, 2)
+
+    def test_compare_same_workload_no_matching_run_fails_fast(self):
+        # The history holds only a 2-client run; this run uses 1
+        # client, so there is no same-workload baseline and the
+        # run fails before any benchmark starts.
+        with tempfile.TemporaryDirectory() as tmp:
+            other = _workload_dict(Workload(ops=100, clients=2))
+            history = self._write_history_records(tmp, [
+                self._history_record(
+                    10**9, 0.0001, "2026-11-23T10:00:00+00:00", other),
+            ])
+            code = main(self._argv(["--ops", "10",
+                                    "--compare-history", "-1",
+                                    "--compare-same-workload",
                                     "--history-file", history]))
             self.assertEqual(code, 1)
 

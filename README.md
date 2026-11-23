@@ -176,6 +176,12 @@ python -m kvbench.cli --ops 20000 --clients 4 \
 python -m kvbench.cli --ops 20000 --clients 4 \
     --compare-history 2026-11-22T15:00:00Z
 
+# same comparison, but only against a recorded run that used the
+# same workload as this run — the latest matching run per backend
+python -m kvbench.cli --ops 20000 --clients 4 \
+    --compare-history -1 --compare-same-workload \
+    --regression-threshold 5
+
 # SLO gate: fail the run (exit 4) when p99 is above 1 ms or more
 # than 1% of ops error — the verdict lands in both reports
 python -m kvbench.cli --ops 20000 --clients 4 \
@@ -252,6 +258,9 @@ ISO timestamp for the latest run at or before that time, e.g.
 `--compare-history -1`; the history file is `--history-file`,
 default `~/.kvbench/history.jsonl`; mutually exclusive with
 `--compare-file`),
+`--compare-same-workload` (with `--compare-history`, only
+consider recorded runs whose workload matches this run's, so the
+baseline is the latest run that measured the same workload),
 `--regression-threshold` (with `--compare-file` or
 `--compare-history`, exit 3 when any backend's ops/sec fell by
 more than that many percent, or its p99 rose by more than that
@@ -357,6 +366,23 @@ report carries the baseline under `comparison` with
 `"source": "history"` (a report-file baseline carries
 `"source": "report"`). `--compare-file` and `--compare-history`
 together are rejected — pick one baseline.
+
+With `--compare-same-workload` the selector only sees recorded
+runs whose workload matches this run's (same ops, clients, keys,
+mix, pipeline, distribution and seed — the same settings the
+workload-difference warning checks), so the baseline per backend
+is the latest run that measured the same workload. The selector
+then counts within the matching runs only: `-1` is the latest
+matching run, `0` the oldest matching run, and a timestamp picks
+the latest matching run at or before that time. A history file
+that mixes workloads — a quick 100-op smoke run recorded next to
+the nightly 20k-op run — no longer makes the regression gate
+compare against the wrong run; without the flag the latest run
+wins whatever its workload was, and the reports warn. When no
+recorded run has the same workload the run fails before any
+benchmark starts, and the reports name the baseline as e.g.
+`history.jsonl (history run -1, same workload)`. The flag needs
+`--compare-history`; on its own it is rejected.
 
 ## SLO gate
 
@@ -579,6 +605,12 @@ make test
 
 ## Roadmap
 
+- ~~Compare against a history run with the same workload
+  (`--compare-history` with `--compare-same-workload`): only
+  recorded runs whose workload matches this run's are considered
+  as baselines, so the selector picks the latest run that measured
+  the same workload and the regression gate stays apples-to-apples
+  when the history file mixes workloads.~~ Done in 0.20.0.
 - ~~Compare against a run from the history file (`--compare-file`
   against a history-file run): pick a backend's run out of
   `~/.kvbench/history.jsonl` as the baseline instead of a JSON

@@ -45,6 +45,13 @@ Usage:
     python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
         --ops 20000 --clients 4 --compare-history -1 \\
         --regression-threshold 5
+    # same comparison, but only against a recorded run that used
+    # the same workload as this run — the latest matching run per
+    # backend, so the gate stays apples-to-apples when the history
+    # file mixes workloads
+    python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
+        --ops 20000 --clients 4 --compare-history -1 \\
+        --compare-same-workload --regression-threshold 5
     # SLO gate: fail the run (exit 4) when p99 is above 1 ms or
     # more than 1% of ops error
     python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
@@ -379,6 +386,11 @@ def build_parser():
                         "the most recent) or by ISO timestamp (the "
                         "latest run at or before that time), "
                         "e.g. --compare-history -1")
+    parser.add_argument("--compare-same-workload", action="store_true",
+                        help="with --compare-history, only consider "
+                        "recorded runs whose workload matches this "
+                        "run's, so the baseline is the latest run "
+                        "that measured the same workload")
     parser.add_argument("--regression-threshold", type=float, default=None,
                         metavar="PCT",
                         help="with --compare-file or --compare-history, "
@@ -450,6 +462,12 @@ def main(argv=None):
                 "--compare-file and --compare-history are mutually "
                 "exclusive: pick a JSON report or a history run, "
                 "not both")
+        if args.compare_same_workload \
+                and args.compare_history is None:
+            raise ValueError(
+                "--compare-same-workload needs --compare-history: "
+                "it filters which recorded history run is picked "
+                "as the baseline")
         if args.regression_threshold is not None \
                 and args.compare_file is None \
                 and args.compare_history is None:
@@ -487,28 +505,11 @@ def main(argv=None):
     except ValueError as exc:
         print(f"kvbench: {exc}", file=sys.stderr)
         return 2
-    # Load the baseline run before running anything: a bad path or
-    # selector fails fast instead of after a benchmark that took
-    # minutes.
-    baseline_doc = None
-    baseline_source = "report"
-    baseline_label = args.compare_file
-    if args.compare_file:
-        try:
-            baseline_doc = load_baseline(args.compare_file)
-        except ValueError as exc:
-            print(f"kvbench: {exc}", file=sys.stderr)
-            return 1
-    elif args.compare_history is not None:
-        try:
-            baseline_doc = load_history_baseline(
-                history_path, args.compare_history)
-        except ValueError as exc:
-            print(f"kvbench: {exc}", file=sys.stderr)
-            return 1
-        baseline_source = "history"
-        baseline_label = (f"{history_path} "
-                          f"(history run {args.compare_history})")
+    # The workload is built before the baseline is loaded: the
+    # --compare-same-workload filter needs this run's workload to
+    # pick a matching recorded run, and building it is cheap — a
+    # bad baseline path or selector still fails fast, before any
+    # benchmark runs.
     try:
         workload = Workload(
             ops=(args.ops if args.ops is not None else
@@ -537,6 +538,33 @@ def main(argv=None):
     except ValueError as exc:
         print(f"kvbench: {exc}", file=sys.stderr)
         return 2
+    # Load the baseline run before running anything: a bad path or
+    # selector fails fast instead of after a benchmark that took
+    # minutes.
+    baseline_doc = None
+    baseline_source = "report"
+    baseline_label = args.compare_file
+    if args.compare_file:
+        try:
+            baseline_doc = load_baseline(args.compare_file)
+        except ValueError as exc:
+            print(f"kvbench: {exc}", file=sys.stderr)
+            return 1
+    elif args.compare_history is not None:
+        try:
+            baseline_doc = load_history_baseline(
+                history_path, args.compare_history,
+                workload=(_workload_dict(workload)
+                          if args.compare_same_workload else None))
+        except ValueError as exc:
+            print(f"kvbench: {exc}", file=sys.stderr)
+            return 1
+        baseline_source = "history"
+        baseline_label = (f"{history_path} "
+                          f"(history run {args.compare_history}"
+                          + (", same workload"
+                             if args.compare_same_workload else "")
+                          + ")")
     command_line = " ".join(sys.argv)
     results = []
 

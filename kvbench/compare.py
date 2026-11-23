@@ -15,7 +15,11 @@ check needs no report file lying around. The selector picks one
 recorded run per backend: ``latest`` (or a negative index) counts
 back from the most recent run, a non-negative index counts forward
 from the oldest, and an ISO timestamp picks the latest run at or
-before that time.
+before that time. With ``--compare-same-workload`` the selector
+only sees recorded runs whose workload matches the current run's,
+so the baseline is the latest run that measured the same thing —
+the regression gate stays apples-to-apples even when the history
+file mixes workloads.
 
 A comparison only means something when the two runs used the same
 workload, so the comparison also records which workload settings
@@ -90,25 +94,34 @@ def _record_timestamp(record):
     return when
 
 
-def load_history_baseline(path, selector):
+def load_history_baseline(path, selector, workload=None):
     """Load a baseline run from a history file.
 
     ``path`` is the JSONL history file (the one ``--history``
     writes and ``--trend`` reads); ``selector`` picks one recorded
     run per backend — an index, ``latest``, or an ISO timestamp
-    (see :func:`_parse_history_selector`). Returns a baseline
-    document in the same shape as a JSON report (``generated``,
-    ``command``, ``workload``, ``results`` with ``ops_per_sec``,
-    ``errors`` and a ``summary`` holding ``p99_ms``), so
-    :func:`compare_results` works on it unchanged.
+    (see :func:`_parse_history_selector`). When ``workload`` is
+    given (a workload dict in the shape of
+    :func:`kvbench.report._workload_dict`), only recorded runs
+    whose workload matches it are considered, so the selector
+    counts within the runs that measured the same workload as
+    this one. Returns a baseline document in the same shape as a
+    JSON report (``generated``, ``command``, ``workload``,
+    ``results`` with ``ops_per_sec``, ``errors`` and a ``summary``
+    holding ``p99_ms``), so :func:`compare_results` works on it
+    unchanged.
 
     Raises ValueError when the file does not exist, holds no runs,
     the selector is invalid, an index is out of range for a
     backend, or no recorded run falls at or before a timestamp.
-    A history record's workload has the same keys a JSON report's
-    does, so the workload comparison still applies — the baseline
-    workload carried here is the first chosen run's, since picks
-    for different backends can come from different runs.
+    With a workload filter, the same errors apply to the matching
+    runs only — a backend whose runs all used a different
+    workload is left out, and a filter that matches no backend
+    at all is an error. A history record's workload has the same
+    keys a JSON report's does, so the workload comparison still
+    applies — the baseline workload carried here is the first
+    chosen run's, since picks for different backends can come
+    from different runs.
     """
     if not os.path.exists(path):
         raise ValueError(f"history file not found: {path}")
@@ -120,6 +133,21 @@ def load_history_baseline(path, selector):
     by_backend = {}
     for entry in entries:
         by_backend.setdefault(entry.get("backend", "?"), []).append(entry)
+    if workload is not None:
+        # Only runs that measured the same workload count: a
+        # record with no workload (or a workload that differs in
+        # any compared setting) is not a baseline for this run.
+        by_backend = {
+            backend: [r for r in runs
+                      if not workload_differences(
+                          workload, r.get("workload"))]
+            for backend, runs in by_backend.items()
+        }
+        by_backend = {b: runs for b, runs in by_backend.items()
+                      if runs}
+        qualifier = " with the same workload"
+    else:
+        qualifier = ""
     chosen = []
     for backend, runs in by_backend.items():
         if kind == "index":
@@ -142,10 +170,11 @@ def load_history_baseline(path, selector):
         if kind == "index":
             raise ValueError(
                 f"history run {selector!r} is out of range for every "
-                f"backend in {path}: no backend has that many "
-                "recorded runs")
+                f"backend in {path}{qualifier}: no backend has that "
+                "many recorded runs")
         raise ValueError(
-            f"no run in history file {path} at or before {selector}")
+            f"no run in history file {path} at or before {selector}"
+            f"{qualifier}")
     first = chosen[0]
     results = [{
         "name": record.get("backend", "?"),
