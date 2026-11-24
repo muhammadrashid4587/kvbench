@@ -15,11 +15,11 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 
-from kvbench.bench import DictClient, Workload, run_repeated_workload
+from kvbench.bench import (DictClient, Workload, run_repeated_workload)
 from kvbench.cli import build_parser, main
 from kvbench.history import build_record
-from kvbench.report import to_json_dict
-from kvbench.stats import median
+from kvbench.report import render_json, render_markdown, to_json_dict
+from kvbench.stats import histogram, median
 
 try:
     from test_cli import _start_server
@@ -126,6 +126,64 @@ class TestRepeatedWorkload(unittest.TestCase):
         self.assertEqual(result.summary["p99_ms"],
                          result.repeat_runs[0]["p99_ms"])
 
+    def test_each_run_carries_per_op_histograms(self):
+        workload = Workload(ops=200, clients=2)
+        result = run_repeated_workload(DictClient, workload,
+                                       "baseline (dict)", 3)
+        for entry in result.repeat_runs:
+            per_op = entry["histograms_by_op"]
+            # The same ops that ran, with the same log-spaced
+            # buckets as the main run's histograms_by_op.
+            self.assertEqual(set(per_op), set(entry["per_op"]))
+            for op, buckets in per_op.items():
+                self.assertEqual(
+                    sum(b["count"] for b in buckets),
+                    entry["per_op"][op]["ops"])
+                # The bucket edges are the same fixed log-spaced
+                # edges as the main run's histogram, whatever the
+                # samples: compare against a histogram built from
+                # any sample set.
+                self.assertEqual(
+                    [b["upper_ms"] for b in buckets],
+                    [b["upper_ms"]
+                     for b in histogram(result.latencies_ns)])
+                self.assertTrue(all(b["count"] >= 0 for b in buckets))
+
+    def test_repeat_histograms_render_in_markdown_and_json(self):
+        workload = Workload(ops=200, clients=2, repeat=3)
+        result = run_repeated_workload(DictClient, workload,
+                                       "baseline (dict)", 3)
+        text = render_markdown([result], workload, "kvbench")
+        self.assertIn("#### Run 1 — per-op latency histogram", text)
+        self.assertIn("#### Run 3 — per-op latency histogram", text)
+        self.assertIn("SET (", text)
+        parsed = json.loads(render_json([result], workload, "kvbench"))
+        runs = parsed["results"][0]["repeat"]["runs"]
+        self.assertEqual(len(runs), 3)
+        for entry in runs:
+            self.assertEqual(set(entry["histograms_by_op"]),
+                             set(entry["per_op"]))
+            for op, buckets in entry["histograms_by_op"].items():
+                self.assertEqual(sum(b["count"] for b in buckets),
+                                 entry["per_op"][op]["ops"])
+
+    def test_repeat_without_histograms_renders_table_only(self):
+        # Entries recorded before 0.34.0 carry no
+        # histograms_by_op: the table still renders and no
+        # per-run histogram block is invented.
+        workload = Workload(ops=200, clients=2, repeat=3)
+        result = run_repeated_workload(DictClient, workload,
+                                       "baseline (dict)", 3)
+        for entry in result.repeat_runs:
+            del entry["histograms_by_op"]
+        text = render_markdown([result], workload, "kvbench")
+        self.assertIn("Repeat runs", text)
+        self.assertIn("Median of 3 runs", text)
+        self.assertNotIn("— per-op latency histogram", text)
+        parsed = json.loads(render_json([result], workload, "kvbench"))
+        for entry in parsed["results"][0]["repeat"]["runs"]:
+            self.assertNotIn("histograms_by_op", entry)
+
     def test_repeat_zero_raises(self):
         with self.assertRaises(ValueError):
             run_repeated_workload(DictClient, Workload(ops=10),
@@ -179,11 +237,24 @@ class TestRepeatCli(unittest.TestCase):
                 self.assertEqual(
                     entry["repeat"]["median_p99_ms"],
                     entry["summary"]["p99_ms"])
+                # Each run carries its own per-op histograms, in
+                # both reports.
+                for run in runs:
+                    self.assertEqual(set(run["histograms_by_op"]),
+                                     set(run["per_op"]))
+                    for op, buckets in run["histograms_by_op"].items():
+                        self.assertEqual(
+                            sum(b["count"] for b in buckets),
+                            run["per_op"][op]["ops"])
                 with open(output, encoding="utf-8") as f:
                     text = f.read()
                 self.assertIn("Repeat runs", text)
                 self.assertIn("Median of 3 runs", text)
                 self.assertIn("- Repeat: 3 runs", text)
+                self.assertIn("#### Run 1 — per-op latency histogram",
+                              text)
+                self.assertIn("#### Run 3 — per-op latency histogram",
+                              text)
         finally:
             server.shutdown()
             server.server_close()

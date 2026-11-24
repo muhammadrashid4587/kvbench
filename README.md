@@ -272,7 +272,9 @@ python -m kvbench.cli --ops 20000 --clients 4 \
 # run the same benchmark 3 times and report the median ops/sec and
 # p99 over the 3 runs, so one noisy run does not set the numbers —
 # the per-run values land in the JSON report under
-# results[].repeat.runs
+# results[].repeat.runs, each run with its own per-operation
+# latency histograms, and the Markdown report shows a per-run
+# per-op histogram block under the Repeat runs table
 python -m kvbench.cli --ops 20000 --clients 4 --repeat 3
 
 # prefix all keys, so a run against a shared store does not collide
@@ -784,6 +786,16 @@ same rows per result under `value_size_sweep`, with the
 per-op buckets per step under `histograms_by_op`, and the
 workload section carries the swept sizes under `sweep_value_size`.
 
+With `--repeat N` the report has a Repeat runs section: one table
+per backend with a row per run — ops, ops/sec, mean and p99 — so
+the spread behind the reported medians reads at a glance. Each
+run also gets its own per-operation latency histogram block under
+the table, with the same log-spaced buckets per op as the regular
+run's per-op histograms, so a run where one op type slows down
+names the op. The JSON report carries the same rows per result
+under `repeat.runs`, with the per-op buckets per run under
+`histograms_by_op`.
+
 Below the table, each backend gets a per-operation stats table:
 ops, ops/sec, mean, p50, p95 and p99 latency split by SET, GET,
 INCR and DEL. Ops that never ran (e.g. INCR in an `80:20` read:write mix)
@@ -857,7 +869,18 @@ make test
 
 ## Roadmap
 
-- Per-operation latency histograms for sweep runs: each sweep step
+- Per-operation latency histograms in the `--repeat` runs:
+  each run in the repeat table carries the same log-spaced
+  buckets per operation that ran as the regular run's
+  `histograms_by_op` — under `results[].repeat.runs[].histograms_by_op`
+  in JSON, and as a per-run per-op histogram block under the
+  Repeat runs table in Markdown, reusing the shared
+  histogram-block helper from the sweep work — so a repeat run
+  where one op type slows down names the op instead of just
+  moving the median. Repeat entries written before 0.34.0
+  carry no `histograms_by_op` and render the table only.
+  Done in 0.34.0.
+- ~~Per-operation latency histograms for sweep runs: each sweep step~~
   (keyspace, client count, value size) carries the same log-spaced
   buckets per operation that ran as the regular run's
   `histograms_by_op` — under `keyspace_sweep[]`,

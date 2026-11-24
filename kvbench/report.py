@@ -132,8 +132,11 @@ def _result_dict(result, top_n=5):
         # Only a repeated run carries this: a single run's result
         # dict is unchanged. ``runs`` is one summary per run (run
         # index, ops, elapsed, ops/sec, errors, mean/p50/p95/p99,
-        # per-op ops/sec and p99); the top-level ops/sec, summary
-        # p99 and per-op figures are the medians over them.
+        # per-op ops/sec and p99, and the per-operation latency
+        # histograms of that run under ``histograms_by_op`` — the
+        # same log-spaced buckets per op as the main run's); the
+        # top-level ops/sec, summary p99 and per-op figures are
+        # the medians over them.
         doc["repeat"] = {
             "runs": result.repeat_runs,
             "median_ops_per_sec": result.median_ops_per_sec,
@@ -480,7 +483,11 @@ def _repeat_lines(result):
 
     One row per run with its ops/sec and p99, so the spread behind
     the reported medians is visible; the summary table above
-    already shows the medians themselves.
+    already shows the medians themselves. The table is followed by
+    a per-operation latency histogram per run — the same shared
+    helper the sweep sections use, so a run where one op type
+    slows down names the op. Runs recorded before 0.34.0 carry no
+    ``histograms_by_op`` and render the table only.
     """
     if not result.repeat_runs:
         return []
@@ -503,6 +510,8 @@ def _repeat_lines(result):
             f"{entry['p99_ms']:.3f} | {entry['errors']} |"
         )
     lines.append("")
+    lines += _sweep_per_op_histogram_lines(
+        lambda entry: f"Run {entry['run']}", result.repeat_runs)
     return lines
 
 
@@ -1052,9 +1061,12 @@ def render_markdown(results, workload, command_line, comparison=None,
             "well as overall; the mean, p50, p95, histogram, tail "
             "attribution and per-second series come from the run "
             "whose ops/sec is the median, and the Repeat runs "
-            "section lists every run's ops/sec and p99. The JSON "
-            "report carries the same per-run values under "
-            "`results[].repeat.runs`."
+            "section lists every run's ops/sec and p99, each "
+            "followed by its own per-operation latency histograms, "
+            "so a run where one op type slows down names the op. "
+            "The JSON report carries the same per-run values under "
+            "`results[].repeat.runs`, with each run's buckets under "
+            "`histograms_by_op`."
         )
     if comparison is not None:
         baseline_desc = (

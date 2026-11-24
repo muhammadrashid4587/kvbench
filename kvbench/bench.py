@@ -297,9 +297,12 @@ class BenchmarkResult:
     value_sweep: list = field(default_factory=list)
     # Repeated-run detail (see run_repeated_workload): one summary
     # dict per run, in run order, each with the run index (``run``),
-    # ops, elapsed, ops/sec, errors, mean/p50/p95/p99 and the
-    # per-op ops/sec and p99. Empty for a single run — the JSON
-    # shape for a single run is unchanged.
+    # ops, elapsed, ops/sec, errors, mean/p50/p95/p99, the
+    # per-op ops/sec and p99, and the per-operation latency
+    # histograms of that run (``histograms_by_op`` — the same
+    # log-spaced buckets per op as the main run's, so a run where
+    # one op type slows down names the op). Empty for a single
+    # run — the JSON shape for a single run is unchanged.
     repeat_runs: list = field(default_factory=list)
     # Median ops/sec over the repeated runs, or None for a single
     # run. When set, ``ops_per_sec`` reports this instead of
@@ -790,8 +793,11 @@ def run_repeated_workload(client_factory, workload, name, repeat):
     medians over all ``repeat`` runs, per operation as well as
     overall, and ``repeat_runs`` carries one summary dict per run
     (run index, ops, elapsed, ops/sec, errors, mean/p50/p95/p99,
-    per-op ops/sec and p99), so a report can show the spread. A
-    run that cannot reach the backend raises, like
+    per-op ops/sec and p99, and the per-operation latency
+    histograms of that run under ``histograms_by_op`` — the same
+    log-spaced buckets per op as the main run's, so a run where
+    one op type slows down names the op), so a report can show
+    the spread. A run that cannot reach the backend raises, like
     :func:`run_workload` does — the repeat stops there instead of
     reporting a median over partial runs.
     """
@@ -821,6 +827,11 @@ def run_repeated_workload(client_factory, workload, name, repeat):
                 }
                 for op, entry in run.per_op_summary.items()
             },
+            # Per-operation latency histograms of this run: the
+            # same log-spaced buckets per op as the main run's
+            # ``histograms_by_op``, so a run where one op type
+            # slows down names the op.
+            "histograms_by_op": run.per_op_histograms,
         })
     # The representative run is the median by ops/sec; the reported
     # ops/sec is the median over the runs (identical to the
