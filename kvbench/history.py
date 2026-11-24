@@ -400,7 +400,7 @@ def _sweep_trend_lines(runs, window):
     one pipeline depth, one read:write ratio —
     gets its own table: ops/sec, the change versus the previous run
     that recorded the same step, and p99, plus a sparkline and the
-    first-to-last change. The table is the same shape as the
+    first-to-last change in ops/sec and in p99. The table is the same shape as the
     overall and per-op trend tables, built from the same
     ``_ops_sec_delta`` and ``_sparkline`` helpers, so the views
     cannot disagree. Runs recorded before 0.37.0 carry no
@@ -482,6 +482,28 @@ def _sweep_trend_lines(runs, window):
                     f"{label} — {step_label} first → last: "
                     f"{first:,.0f} → {last:,.0f} "
                     f"ops/sec ({change:+.1f}%)")
+            # The p99 first-to-last change, alongside the ops/sec
+            # one: a step whose tail crept up reads at a glance
+            # even when its throughput moved the other way. A
+            # step with no recorded p99 is skipped, like a step
+            # with no recorded ops/sec.
+            p99_values = []
+            for entry in window:
+                step = _sweep_step_entry(entry, kind, step_key,
+                                         step_value)
+                if step is None:
+                    continue
+                p99 = step.get("p99_ms")
+                if isinstance(p99, (int, float)):
+                    p99_values.append(p99)
+            if len(p99_values) >= 2:
+                first_p99, last_p99 = p99_values[0], p99_values[-1]
+                p99_change = ((last_p99 - first_p99) / first_p99 * 100
+                              if first_p99 else 0.0)
+                lines.append(
+                    f"{label} — {step_label} p99 first → last: "
+                    f"{first_p99:.3f} → {last_p99:.3f} ms "
+                    f"({p99_change:+.1f}%)")
             lines.append("")
     return lines
 
@@ -757,6 +779,8 @@ def format_trend(entries, limit=20):
     the same chart per sweep step (keyspace size, client count,
     value size, pipeline depth, read:write ratio) for the steps
     that ran, so a step's throughput trend reads on its own too,
+    with a p99 first-to-last change per step beside the ops/sec
+    one, so a step whose tail crept up reads at a glance,
     and the latest run's per-operation latency histograms, so a
     p99 move in the trend names the op whose latency shape moved,
     plus a per-op histogram comparison between the first and

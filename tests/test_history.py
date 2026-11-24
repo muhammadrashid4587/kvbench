@@ -683,35 +683,36 @@ class TestFormatTrend(unittest.TestCase):
 
 class TestSweepTrend(unittest.TestCase):
     def _sweep_result(self, ops_per_sec, keys=100, clients=None,
-                      value_size=None, pipeline=None, mix=None):
+                      value_size=None, pipeline=None, mix=None,
+                      p99_ms=0.020):
         result = _make_result(ops_per_sec=ops_per_sec)
         if keys is not None:
             result.sweep = [{"keys": keys, "ops": 1000,
                              "ops_per_sec": ops_per_sec,
-                             "mean_ms": 0.020, "p99_ms": 0.020,
+                             "mean_ms": 0.020, "p99_ms": p99_ms,
                              "histograms_by_op": {}}]
         if clients is not None:
             result.client_sweep = [{"clients": clients, "ops": 1000,
                                     "ops_per_sec": ops_per_sec,
-                                    "mean_ms": 0.020, "p99_ms": 0.020,
+                                    "mean_ms": 0.020, "p99_ms": p99_ms,
                                     "histograms_by_op": {}}]
         if value_size is not None:
             result.value_sweep = [{"value_size": value_size,
                                    "ops": 1000,
                                    "ops_per_sec": ops_per_sec,
-                                   "mean_ms": 0.020, "p99_ms": 0.020,
+                                   "mean_ms": 0.020, "p99_ms": p99_ms,
                                    "histograms_by_op": {}}]
         if pipeline is not None:
             result.pipeline_sweep = [{"pipeline": pipeline,
                                       "ops": 1000,
                                       "ops_per_sec": ops_per_sec,
-                                      "mean_ms": 0.020, "p99_ms": 0.020,
+                                      "mean_ms": 0.020, "p99_ms": p99_ms,
                                       "histograms_by_op": {}}]
         if mix is not None:
             result.mix_sweep = [{"mix": mix,
                                  "ops": 1000,
                                  "ops_per_sec": ops_per_sec,
-                                 "mean_ms": 0.020, "p99_ms": 0.020,
+                                 "mean_ms": 0.020, "p99_ms": p99_ms,
                                  "histograms_by_op": {}}]
         return result
 
@@ -738,6 +739,36 @@ class TestSweepTrend(unittest.TestCase):
         self.assertIn(
             "Keyspace sweep — 100 keys first → last: 40,000 → "
             "50,000 ops/sec (+25.0%)", text)
+
+    def test_sweep_step_p99_first_to_last_change(self):
+        # A step whose tail moved shows a p99 first-to-last change
+        # beside the ops/sec one, so a step that got slower in
+        # the tail reads at a glance even when its throughput
+        # rose — here ops/sec is up 25% while p99 is up 50%.
+        workload = _make_workload()
+        entries = [
+            build_record(self._sweep_result(40000.0, p99_ms=0.020),
+                         workload, "kvbench"),
+            build_record(self._sweep_result(50000.0, p99_ms=0.030),
+                         workload, "kvbench"),
+        ]
+        text = format_trend(entries)
+        self.assertIn(
+            "Keyspace sweep — 100 keys p99 first → last: 0.020 → "
+            "0.030 ms (+50.0%)", text)
+
+    def test_sweep_step_single_run_has_no_p99_first_to_last(self):
+        # One run of a step has no first-to-last change to report,
+        # for p99 just as for ops/sec.
+        workload = _make_workload()
+        entries = [
+            build_record(self._sweep_result(40000.0), workload,
+                         "kvbench"),
+        ]
+        text = format_trend(entries)
+        self.assertIn(
+            "#### Keyspace sweep — 100 keys ops/sec trend", text)
+        self.assertNotIn("p99 first → last", text)
 
     def test_sweep_delta_skips_runs_without_that_step(self):
         workload = _make_workload()

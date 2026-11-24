@@ -618,10 +618,12 @@ A sweep run recorded with `--history` also records each sweep
 step — one ops/sec and p99 per keyspace size, client count, value
 size, pipeline depth and read:write ratio — and below the per-op sections each backend gets one
 trend section per step that ran, with the same table, delta,
-sparkline and first-to-last change as the overall chart: a
-keyspace step's ops/sec at 100 keys is only ever compared with
-the same step in other runs, so a step that slows down reads at
-a glance even when the overall ops/sec moved the other way.
+sparkline and first-to-last change as the overall chart, plus a
+p99 first-to-last change per step — a keyspace step's ops/sec at
+100 keys is only ever compared with the same step in other runs,
+so a step that slows down reads at a glance even when the
+overall ops/sec moved the other way, and a step whose tail crept
+up reads at a glance even when its ops/sec moved the other way.
 Runs recorded before 0.37.0 carry no sweep data and simply show
 no sweep sections; a step that never ran in the window gets no
 section at all.
@@ -1118,6 +1120,15 @@ make test
 
 ## Roadmap
 
+- P99 first-to-last change per sweep step in the `--trend`
+  output: each sweep-step trend section gains a p99
+  first-to-last line beside the ops/sec one — the step's p99
+  in the first and last runs in the window and the percentage
+  change between them — built from the same recorded per-step
+  p99 the table already shows, so a step whose tail crept up
+  reads at a glance even when its ops/sec moved the other way.
+  A step with a single run in the window, or a step whose
+  recorded p99 is missing, shows no p99 line. Done in 0.47.0.
 - Per-operation histogram comparison in the `--best-worst`
   output: each backend's comparison gains a per-op table
   comparing its best and worst runs — each op's p50 and p99 in
