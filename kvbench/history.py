@@ -31,7 +31,12 @@ runs' per-operation latency histograms — a per-op table of the
 p50/p99 shift and the bucket drift, plus the first run's
 histogram block drawn with the same shared helper next to the
 latest run's — so a p99 move in the trend shows how each op's
-latency shape moved between the first and last runs.
+latency shape moved between the first and last runs. Since
+0.46.0 the best/worst view compares the best and worst runs'
+per-operation latency histograms the same way — the same
+per-op table, built from the same shared rows, so the two
+views cannot disagree — so a p99 move between the runs shows
+how each op's latency shape moved.
 Since 0.37.0
 each record also carries its sweep steps — one ops/sec and p99
 per keyspace size, client count, value size and pipeline depth —
@@ -556,6 +561,140 @@ def _bucket_drift(first_buckets, last_buckets):
     return best
 
 
+def _histogram_comparison_notes(first, last, first_label, last_label,
+                                comparison_name):
+    """Why no per-op histogram comparison is shown, or [].
+
+    ``first``/``last`` are two history records; the labels name
+    them in the note ("first"/"last" for the trend,
+    "worst"/"best" for best-vs-worst) and ``comparison_name``
+    names the comparison ("first-to-last" or "best-vs-worst").
+    A run recorded before 0.43.0 carries no ``histograms_by_op``
+    key at all; a run recorded with no per-op latencies carries
+    an empty mapping; a hand-made history file may carry
+    something else entirely — each renders a note naming the
+    reason, so neither view crashes on a record shape it cannot
+    draw. The notes carry no bullet prefix; callers add one.
+    """
+    notes = []
+    for which, entry in ((first_label, first), (last_label, last)):
+        timestamp = entry.get("timestamp", "")[:19].replace("T", " ")
+        histograms = entry.get("histograms_by_op")
+        if histograms is None:
+            notes.append(
+                f"The {which} run ({timestamp}) was recorded "
+                "before 0.43.0, so this run carries no per-op "
+                f"histograms — no {comparison_name} histogram "
+                "comparison is shown.")
+        elif not histograms:
+            notes.append(
+                f"The {which} run ({timestamp}) recorded no "
+                "per-op latencies, so there are no histograms to "
+                f"show — no {comparison_name} histogram "
+                "comparison is shown.")
+        elif _histograms_or_none(histograms) is None:
+            notes.append(
+                f"The {which} run's ({timestamp}) recorded "
+                "per-op histograms are malformed, so no "
+                f"histograms are shown — no {comparison_name} "
+                "histogram comparison is shown.")
+    return notes
+
+
+def _histogram_comparison_rows(first, last):
+    """Per-op comparison rows between two runs' histograms.
+
+    One row per op that ran in either run: each op's p50 and p99
+    in the first and second runs, the p99 percentage change from
+    the first run to the second, and the bucket drift (the
+    largest single-bucket share move, in percentage points, with
+    the bucket it moved in — see :func:`_bucket_drift`). The
+    p50/p99 shift reads from each run's ``per_op`` entry
+    (records since 0.22.0); an op that never ran in one of the
+    runs shows None for that side, and the p99 change is None
+    when either side has no p99 or the first p99 is zero. The
+    rows name their sides "from" and "to" — the trend compares
+    from the first run to the last, best-vs-worst from the worst
+    run to the best — so one shape serves both views and they
+    cannot disagree. Returns None when either run carries no
+    usable histograms; callers check
+    :func:`_histogram_comparison_notes` first, which names the
+    reason.
+    """
+    first_clean = _histograms_or_none(first.get("histograms_by_op"))
+    last_clean = _histograms_or_none(last.get("histograms_by_op"))
+    if first_clean is None or last_clean is None:
+        return None
+    rows = []
+    for op in ("SET", "GET", "INCR", "DEL"):
+        if op not in first_clean and op not in last_clean:
+            continue
+        first_op = (first.get("per_op") or {}).get(op) or {}
+        last_op = (last.get("per_op") or {}).get(op) or {}
+        p50_first = first_op.get("p50_ms")
+        p50_last = last_op.get("p50_ms")
+        p99_first = first_op.get("p99_ms")
+        p99_last = last_op.get("p99_ms")
+        if (isinstance(p99_first, (int, float))
+                and isinstance(p99_last, (int, float))
+                and p99_first):
+            p99_change = (p99_last - p99_first) / p99_first * 100
+        else:
+            p99_change = None
+        drift_pp = None
+        drift_bucket = None
+        if op in first_clean and op in last_clean:
+            moved = _bucket_drift(first_clean[op], last_clean[op])
+            if moved is not None:
+                drift_pp, drift_bucket = moved
+        rows.append({
+            "op": op,
+            "p50_from_ms": p50_first,
+            "p50_to_ms": p50_last,
+            "p99_from_ms": p99_first,
+            "p99_to_ms": p99_last,
+            "p99_change_pct": p99_change,
+            "bucket_drift_pp": drift_pp,
+            "bucket_drift_bucket": drift_bucket,
+        })
+    return rows
+
+
+def _histogram_comparison_table_lines(heading, from_label, to_label,
+                                      rows):
+    """The per-op histogram comparison table under one heading.
+
+    ``rows`` are :func:`_histogram_comparison_rows` rows; the
+    labels name the two sides in the column headers
+    ("first"/"last" for the trend, "worst"/"best" for
+    best-vs-worst). A side with no p50/p99 shows ``-``, and the
+    p99 change and bucket drift show ``-`` when they cannot be
+    computed.
+    """
+    lines = [heading, ""]
+    lines.append(f"| Op | p50 {from_label} (ms) | p50 {to_label} (ms) | "
+                 f"p99 {from_label} (ms) | p99 {to_label} (ms) | "
+                 "p99 change | Bucket drift |")
+    lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
+
+    def _fmt(value):
+        return (f"{value:.3f}"
+                if isinstance(value, (int, float)) else "-")
+
+    for row in rows:
+        change = row["p99_change_pct"]
+        change_cell = f"{change:+.1f}%" if change is not None else "-"
+        drift_pp = row["bucket_drift_pp"]
+        drift = (f"{drift_pp:+.1f} pp ({row['bucket_drift_bucket']})"
+                 if drift_pp is not None else "-")
+        lines.append(
+            f"| {row['op']} | {_fmt(row['p50_from_ms'])} | "
+            f"{_fmt(row['p50_to_ms'])} | {_fmt(row['p99_from_ms'])} | "
+            f"{_fmt(row['p99_to_ms'])} | {change_cell} | {drift} |")
+    lines.append("")
+    return lines
+
+
 def _trend_histogram_comparison_lines(first, last):
     """Per-op histogram comparison between the trend's first and last runs.
 
@@ -575,83 +714,33 @@ def _trend_histogram_comparison_lines(first, last):
     entirely — each renders a note naming the reason instead of
     a comparison, the same notes the latest-run block uses, so
     the trend never crashes on a record shape it cannot draw.
+    The table itself is built by the shared
+    :func:`_histogram_comparison_rows` /
+    :func:`_histogram_comparison_table_lines` helpers, so the
+    best-vs-worst view renders the same table from the same
+    rows and the views cannot disagree.
     """
     first_ts = first.get("timestamp", "")[:19].replace("T", " ")
-    last_ts = last.get("timestamp", "")[:19].replace("T", " ")
     if first is last:
         return [
             "- Only one run in the trend window, so there is no "
             "first-to-last histogram comparison.",
             "",
         ]
-    notes = []
-    for which, entry, histograms in (
-            ("first", first, first.get("histograms_by_op")),
-            ("last", last, last.get("histograms_by_op"))):
-        timestamp = entry.get("timestamp", "")[:19].replace("T", " ")
-        if histograms is None:
-            notes.append(
-                f"- The {which} run ({timestamp}) was recorded "
-                "before 0.43.0, so this run carries no per-op "
-                "histograms — no first-to-last histogram "
-                "comparison is shown.")
-        elif not histograms:
-            notes.append(
-                f"- The {which} run ({timestamp}) recorded no "
-                "per-op latencies, so there are no histograms to "
-                "show — no first-to-last histogram comparison is "
-                "shown.")
-        elif _histograms_or_none(histograms) is None:
-            notes.append(
-                f"- The {which} run's ({timestamp}) recorded "
-                "per-op histograms are malformed, so no "
-                "histograms are shown — no first-to-last "
-                "histogram comparison is shown.")
+    notes = _histogram_comparison_notes(
+        first, last, "first", "last", "first-to-last")
     if notes:
-        return notes + [""]
-    first_clean = _histograms_or_none(first["histograms_by_op"])
-    last_clean = _histograms_or_none(last["histograms_by_op"])
-    lines = ["#### Per-op histogram comparison — first vs last run", ""]
-    lines.append("| Op | p50 first (ms) | p50 last (ms) | p99 first (ms) | "
-                 "p99 last (ms) | p99 change | Bucket drift |")
-    lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
-
-    def _fmt(value):
-        return (f"{value:.3f}"
-                if isinstance(value, (int, float)) else "-")
-
-    for op in ("SET", "GET", "INCR", "DEL"):
-        if op not in first_clean and op not in last_clean:
-            continue
-        first_op = (first.get("per_op") or {}).get(op) or {}
-        last_op = (last.get("per_op") or {}).get(op) or {}
-        p50_first = first_op.get("p50_ms")
-        p50_last = last_op.get("p50_ms")
-        p99_first = first_op.get("p99_ms")
-        p99_last = last_op.get("p99_ms")
-        if (isinstance(p99_first, (int, float))
-                and isinstance(p99_last, (int, float))
-                and p99_first):
-            change = (p99_last - p99_first) / p99_first * 100
-            p99_change = f"{change:+.1f}%"
-        else:
-            p99_change = "-"
-        drift = "-"
-        if op in first_clean and op in last_clean:
-            moved = _bucket_drift(first_clean[op], last_clean[op])
-            if moved is not None:
-                drift = f"{moved[0]:+.1f} pp ({moved[1]})"
-        lines.append(
-            f"| {op} | {_fmt(p50_first)} | {_fmt(p50_last)} | "
-            f"{_fmt(p99_first)} | {_fmt(p99_last)} | "
-            f"{p99_change} | {drift} |")
-    lines.append("")
+        return [f"- {note}" for note in notes] + [""]
+    rows = _histogram_comparison_rows(first, last)
+    lines = _histogram_comparison_table_lines(
+        "#### Per-op histogram comparison — first vs last run",
+        "first", "last", rows)
     # The first run's shapes, next to the latest run's block just
     # above — the same shared helper draws both, so the views
     # cannot disagree.
     lines.extend(_per_op_histogram_block(
         f"#### Per-op latency histogram — first run ({first_ts})",
-        first_clean))
+        _histograms_or_none(first["histograms_by_op"])))
     return lines
 
 
@@ -860,6 +949,50 @@ def _best_worst_pair(runs):
     )
 
 
+def _best_worst_histogram_comparison(usable, best, worst):
+    """The best-vs-worst per-op histogram comparison for one backend.
+
+    ``usable`` are (entry, numbers) pairs and ``best``/``worst``
+    the picked numbers dicts. Returns a JSON-serializable dict
+    with ``"from": "worst"`` and ``"to": "best"``: ``rows`` is
+    the shared :func:`_histogram_comparison_rows` table — each
+    op's p50/p99 in the worst and best runs, the p99 change, and
+    the bucket drift — with ``notes`` empty, or ``rows`` is None
+    and ``notes`` names why there is no comparison: the best and
+    worst runs are the same run (a single recorded run), or one
+    of them was recorded before 0.43.0, recorded no per-op
+    latencies, or carries malformed histograms.
+    """
+    best_entry = next(entry for entry, numbers in usable
+                      if numbers is best)
+    worst_entry = next(entry for entry, numbers in usable
+                       if numbers is worst)
+    if best_entry is worst_entry:
+        return {
+            "from": "worst",
+            "to": "best",
+            "rows": None,
+            "notes": ["The best and worst runs are the same run, "
+                      "so there is no best-vs-worst histogram "
+                      "comparison."],
+        }
+    notes = _histogram_comparison_notes(
+        worst_entry, best_entry, "worst", "best", "best-vs-worst")
+    if notes:
+        return {
+            "from": "worst",
+            "to": "best",
+            "rows": None,
+            "notes": notes,
+        }
+    return {
+        "from": "worst",
+        "to": "best",
+        "rows": _histogram_comparison_rows(worst_entry, best_entry),
+        "notes": [],
+    }
+
+
 def best_worst_comparison(entries, workload=None):
     """Best-run vs worst-run comparison per backend.
 
@@ -876,15 +1009,25 @@ def best_worst_comparison(entries, workload=None):
     ``histograms_by_op`` maps, and each per-op pick's own
     ``histogram`` bucket list — the same log-spaced buckets the
     single-run report uses, so a p99 move names the op whose
-    latency shape moved. When ``workload`` is given (a workload dict
-    in the shape of a history record's ``workload``), only runs
-    whose workload matches it are considered — the same
-    apples-to-apples rule ``--compare-same-workload`` uses, so a
-    quick smoke run never becomes the worst run next to a
-    full-size one. A backend with a single usable run has that
-    run as both best and worst, with 0.0% deltas; runs recorded
-    before 0.22.0 carry no ``per_op`` data and simply get no
-    per-op sections, and runs recorded before 0.43.0 carry no
+    latency shape moved. Each backend also carries a
+    ``histogram_comparison`` between its best and worst runs —
+    the same per-op table the trend's first-to-last comparison
+    renders (each op's p50/p99 in the worst and best runs, the
+    p99 change, and the bucket drift), built from the same
+    shared rows, so the two views cannot disagree — under
+    ``rows`` with ``"from": "worst"`` and ``"to": "best"``, or
+    under ``notes`` naming why there is none (a single run, a
+    run recorded before 0.43.0, a run with no per-op latencies,
+    or malformed histograms). When ``workload`` is given (a
+    workload dict in the shape of a history record's
+    ``workload``), only runs whose workload matches it are
+    considered — the same apples-to-apples rule
+    ``--compare-same-workload`` uses, so a quick smoke run
+    never becomes the worst run next to a full-size one. A
+    backend with a single usable run has that run as both best
+    and worst, with 0.0% deltas; runs recorded before 0.22.0
+    carry no ``per_op`` data and simply get no per-op sections,
+    and runs recorded before 0.43.0 carry no
     ``histograms_by_op`` data and simply carry no histograms.
 
     Returns a JSON-serializable dict with a ``backends`` list.
@@ -946,6 +1089,8 @@ def best_worst_comparison(entries, workload=None):
             "ops_sec_delta_pct": ops_delta,
             "p99_delta_pct": p99_delta,
             "per_op": per_op,
+            "histogram_comparison": _best_worst_histogram_comparison(
+                usable, best, worst),
         })
     return {
         "workload": workload,
@@ -1010,11 +1155,17 @@ def format_best_worst(entries, workload=None):
     One section per backend: a table with the best and worst
     runs' ops/sec and p99 and the percentage change between
     them, then the per-operation latency histograms of the best
-    and worst runs, then the same table per operation type that
-    ran, each followed by that op's histograms for its own best
-    and worst runs — the per-op picks are independent of the
+    and worst runs, then a per-op histogram comparison between
+    the two runs — each op's p50/p99 in the worst and best runs,
+    the p99 change, and the bucket drift, built from the same
+    shared rows as the trend's first-to-last comparison, so the
+    views cannot disagree — then the same table per operation
+    type that ran, each followed by that op's histograms for its
+    own best and worst runs — the per-op picks are independent of the
     overall picks, so a slow-write run that still won overall
-    shows its own shape. When ``workload`` is given, only runs
+    shows its own shape. A backend with a single run, or runs
+    without usable histograms, gets a note naming the reason
+    instead of a comparison table. When ``workload`` is given, only runs
     matching it were compared, and the header says which workload
     that was. An empty history — or a filter that matches nothing
     — prints the same "No runs recorded yet" message as
@@ -1059,6 +1210,22 @@ def format_best_worst(entries, workload=None):
             sections.append(
                 f"- {backend['backend']}: the history file carries "
                 "no per-op histograms, so no histograms are shown.")
+            sections.append("")
+        # Per-op histogram comparison between the best and worst
+        # runs — the same table the trend's first-to-last
+        # comparison renders, built from the same shared rows,
+        # so a p99 move between the runs shows how each op's
+        # latency shape moved. A backend with a single run, or
+        # runs without usable histograms, gets a note naming the
+        # reason instead of a table.
+        histogram_comparison = backend["histogram_comparison"]
+        if histogram_comparison["rows"] is not None:
+            sections.extend(_histogram_comparison_table_lines(
+                "#### Per-op histogram comparison — best vs worst run",
+                "worst", "best", histogram_comparison["rows"]))
+        else:
+            for note in histogram_comparison["notes"]:
+                sections.append(f"- {note}")
             sections.append("")
         for op in ("SET", "GET", "INCR", "DEL"):
             op_entry = backend["per_op"].get(op)

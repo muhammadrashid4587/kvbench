@@ -650,10 +650,22 @@ pick's own histogram under that op's table — the same
 log-spaced buckets as the regular run's `histograms_by_op`,
 drawn with the same shared helper as the single-run report
 and the `--compare` output, so a p99 move names the op whose
-latency shape moved. History records carry the histograms
+latency shape moved. Below the best and worst runs' histogram
+blocks each backend also gets a per-op histogram comparison
+between the two runs — a table with each op's p50 and p99 in
+the worst and best runs, the p99 change, and the bucket drift
+(the largest single-bucket share move, in percentage points,
+with the bucket it moved in) — the same table the `--trend`
+view renders for its first and last runs, built from the same
+shared rows, so a p99 move between the runs shows how each
+op's latency shape moved. History records carry the histograms
 since 0.43.0; runs recorded before that show a note instead of
 histogram blocks. A backend with a single recorded run has that run
-as both best and worst, with 0.0% deltas. With
+as both best and worst, with 0.0% deltas and no histogram
+comparison, and a best or worst run recorded before 0.43.0,
+one recorded with no per-op latencies, or one whose recorded
+histograms are malformed renders a note naming the reason
+instead of a comparison table. With
 `--compare-same-workload` only runs whose workload matches the
 latest recorded run's are considered — the same
 apples-to-apples rule `--compare-history` uses, so a quick smoke
@@ -664,7 +676,11 @@ file (the exact text printed to stdout), and
 `--best-worst-json PATH` writes it as JSON (best and worst run
 per backend and per op, with ops/sec, p99, the deltas, and the
 per-op histograms — `histograms_by_op` on the best and worst
-runs, `histogram` on each per-op pick), so a
+runs, `histogram` on each per-op pick — plus the per-op
+histogram comparison under `histogram_comparison`, with `rows`
+carrying each op's p50/p99 in the worst and best runs, the p99
+change and the bucket drift, or `notes` naming why there is
+none), so a
 script can read the spread without parsing the table. Both need
 `--best-worst` (exit 2 otherwise), like `--trend-out` needs
 `--trend`.
@@ -1102,6 +1118,23 @@ make test
 
 ## Roadmap
 
+- Per-operation histogram comparison in the `--best-worst`
+  output: each backend's comparison gains a per-op table
+  comparing its best and worst runs — each op's p50 and p99 in
+  the worst and best runs, the p99 change, and the bucket drift
+  (the largest single-bucket share move, in percentage points,
+  with the bucket it moved in) — built from the same shared
+  rows as the `--trend` view's first-to-last comparison, so the
+  two views cannot disagree, and the comparison lands under
+  `histogram_comparison` in the `--best-worst-json` output
+  (`rows` with the per-op numbers, or `notes` naming why there
+  is none), so a p99 move between the runs shows how each op's
+  latency shape moved. An op that never ran in one of the runs
+  shows `-` for that side; a backend with a single run has no
+  comparison, and a best or worst run recorded before 0.43.0,
+  one recorded with no per-op latencies, or one whose recorded
+  histograms are malformed renders a note naming the reason
+  instead of a table. Done in 0.46.0.
 - Per-operation histogram comparison across the `--trend`
   first and last runs: each backend's trend ends with a per-op
   table comparing its first and last runs in the window — each

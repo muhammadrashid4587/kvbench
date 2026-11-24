@@ -1182,6 +1182,141 @@ class TestBestWorstComparison(unittest.TestCase):
         self.assertNotIn("histograms_by_op", backend["best"])
         self.assertNotIn("histograms_by_op", backend["worst"])
 
+    def test_histogram_comparison_compares_best_and_worst_runs(self):
+        # The best run (50k ops/sec) has slower SET latencies
+        # (200_000 ns) than the worst run (40k ops/sec, 20_000
+        # ns): the comparison names SET as the op that moved,
+        # with its p50/p99 in both runs, the p99 change, and the
+        # bucket drift — the same rows the trend's first-to-last
+        # comparison builds.
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(
+                _make_result(
+                    ops=1000, ops_per_sec=50000.0,
+                    latencies_by_op={
+                        "SET": [200_000] * 500,
+                        "GET": [20_000] * 400,
+                        "INCR": [20_000] * 100,
+                    }),
+                workload, "kvbench"),
+        ]
+        comparison = best_worst_comparison(entries)["backends"][0][
+            "histogram_comparison"]
+        self.assertEqual(comparison["from"], "worst")
+        self.assertEqual(comparison["to"], "best")
+        self.assertEqual(comparison["notes"], [])
+        by_op = {row["op"]: row for row in comparison["rows"]}
+        set_row = by_op["SET"]
+        self.assertEqual(set_row["p50_from_ms"], 0.020)
+        self.assertEqual(set_row["p50_to_ms"], 0.200)
+        self.assertEqual(set_row["p99_from_ms"], 0.020)
+        self.assertEqual(set_row["p99_to_ms"], 0.200)
+        self.assertAlmostEqual(set_row["p99_change_pct"], 900.0)
+        self.assertAlmostEqual(set_row["bucket_drift_pp"], -100.0)
+        self.assertEqual(set_row["bucket_drift_bucket"], "<= 0.1 ms")
+        # GET did not move at all: +0.0% and no bucket drift.
+        get_row = by_op["GET"]
+        self.assertAlmostEqual(get_row["p99_change_pct"], 0.0)
+        self.assertAlmostEqual(get_row["bucket_drift_pp"], 0.0)
+        self.assertEqual(get_row["bucket_drift_bucket"], "<= 0.1 ms")
+
+    def test_histogram_comparison_single_run_has_note(self):
+        backend = best_worst_comparison(
+            self._entries(rates=(50000.0,)))["backends"][0]
+        comparison = backend["histogram_comparison"]
+        self.assertIsNone(comparison["rows"])
+        self.assertEqual(len(comparison["notes"]), 1)
+        self.assertIn("same run", comparison["notes"][0])
+        self.assertIn("no best-vs-worst histogram comparison",
+                      comparison["notes"][0])
+
+    def test_histogram_comparison_without_histograms_names_the_reason(
+            self):
+        # The worst run was recorded before 0.43.0 and carries no
+        # "histograms_by_op" key: the comparison is a note naming
+        # that instead of rows.
+        entries = self._entries(rates=(40000.0, 50000.0))
+        del entries[0]["histograms_by_op"]
+        comparison = best_worst_comparison(entries)["backends"][0][
+            "histogram_comparison"]
+        self.assertIsNone(comparison["rows"])
+        self.assertIn("recorded before 0.43.0",
+                      comparison["notes"][0])
+        self.assertIn(
+            "no best-vs-worst histogram comparison is shown",
+            comparison["notes"][0])
+
+    def test_histogram_comparison_with_no_per_op_latencies_names_the_reason(
+            self):
+        # The best run recorded no per-op latencies and carries an
+        # empty histograms mapping: a note, not rows.
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(_make_result(ops_per_sec=50000.0),
+                         workload, "kvbench"),
+        ]
+        self.assertEqual(entries[1]["histograms_by_op"], {})
+        comparison = best_worst_comparison(entries)["backends"][0][
+            "histogram_comparison"]
+        self.assertIsNone(comparison["rows"])
+        self.assertIn("recorded no per-op latencies",
+                      comparison["notes"][0])
+        self.assertIn(
+            "no best-vs-worst histogram comparison is shown",
+            comparison["notes"][0])
+
+    def test_histogram_comparison_with_malformed_histograms_names_the_reason(
+            self):
+        # The best run's recorded histograms are not op name to
+        # bucket list: a note naming that, instead of a crash.
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(_make_mixed_result(ops_per_sec=50000.0),
+                         workload, "kvbench"),
+        ]
+        entries[1]["histograms_by_op"] = {"SET": {"upper_ms": 0.1}}
+        comparison = best_worst_comparison(entries)["backends"][0][
+            "histogram_comparison"]
+        self.assertIsNone(comparison["rows"])
+        self.assertIn("histograms are malformed",
+                      comparison["notes"][0])
+        self.assertIn(
+            "no best-vs-worst histogram comparison is shown",
+            comparison["notes"][0])
+
+    def test_histogram_comparison_marks_ops_missing_from_one_run(self):
+        # The best run is read-only and never ran SET: the SET
+        # row shows the worst run's numbers and None for the
+        # best side, with no p99 change and no bucket drift.
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(
+                _make_result(
+                    ops=1000, ops_per_sec=50000.0,
+                    latencies_by_op={"GET": [20_000] * 1000}),
+                workload, "kvbench"),
+        ]
+        comparison = best_worst_comparison(entries)["backends"][0][
+            "histogram_comparison"]
+        by_op = {row["op"]: row for row in comparison["rows"]}
+        set_row = by_op["SET"]
+        self.assertEqual(set_row["p50_from_ms"], 0.020)
+        self.assertIsNone(set_row["p50_to_ms"])
+        self.assertEqual(set_row["p99_from_ms"], 0.020)
+        self.assertIsNone(set_row["p99_to_ms"])
+        self.assertIsNone(set_row["p99_change_pct"])
+        self.assertIsNone(set_row["bucket_drift_pp"])
+        self.assertIsNone(set_row["bucket_drift_bucket"])
+
 
 class TestFormatBestWorst(unittest.TestCase):
     def _entries(self, rates=(40000.0, 60000.0, 50000.0)):
@@ -1257,6 +1392,98 @@ class TestFormatBestWorst(unittest.TestCase):
         self.assertIn("#### SET — latency histogram (best run)", text)
         self.assertIn("#### SET — latency histogram (worst run)", text)
         self.assertIn("#### GET — latency histogram (best run)", text)
+
+    def test_histogram_comparison_table(self):
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(
+                _make_result(
+                    ops=1000, ops_per_sec=50000.0,
+                    latencies_by_op={
+                        "SET": [200_000] * 500,
+                        "GET": [20_000] * 400,
+                        "INCR": [20_000] * 100,
+                    }),
+                workload, "kvbench"),
+        ]
+        text = format_best_worst(entries)
+        self.assertIn(
+            "#### Per-op histogram comparison — best vs worst run",
+            text)
+        # Worst first, best second: SET p50/p99 0.020 -> 0.200
+        # (+900.0%); its whole share moved out of the <= 0.1 ms
+        # bucket.
+        self.assertIn(
+            "| SET | 0.020 | 0.200 | 0.020 | 0.200 | +900.0% | "
+            "-100.0 pp (<= 0.1 ms) |",
+            text)
+        # GET did not move at all: +0.0% and no bucket drift.
+        self.assertIn(
+            "| GET | 0.020 | 0.020 | 0.020 | 0.020 | +0.0% | "
+            "+0.0 pp (<= 0.1 ms) |",
+            text)
+
+    def test_histogram_comparison_single_run_names_no_comparison(self):
+        # One run is both best and worst: a note, not a table.
+        text = format_best_worst(self._entries(rates=(50000.0,)))
+        self.assertIn("no best-vs-worst histogram comparison", text)
+        self.assertNotIn(
+            "#### Per-op histogram comparison — best vs worst run",
+            text)
+
+    def test_histogram_comparison_without_histograms_names_the_reason(
+            self):
+        # The worst run was recorded before 0.43.0 and carries no
+        # "histograms_by_op" key: a note naming that, not a table.
+        entries = self._entries(rates=(40000.0, 50000.0))
+        del entries[0]["histograms_by_op"]
+        text = format_best_worst(entries)
+        self.assertIn("recorded before 0.43.0", text)
+        self.assertIn(
+            "no best-vs-worst histogram comparison is shown", text)
+        self.assertNotIn(
+            "#### Per-op histogram comparison — best vs worst run",
+            text)
+
+    def test_histogram_comparison_with_malformed_histograms_names_the_reason(
+            self):
+        # The best run's recorded histograms are malformed: a
+        # note naming that, not a table.
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(_make_mixed_result(ops_per_sec=50000.0),
+                         workload, "kvbench"),
+        ]
+        entries[1]["histograms_by_op"] = {"SET": {"upper_ms": 0.1}}
+        text = format_best_worst(entries)
+        self.assertIn("histograms are malformed", text)
+        self.assertIn(
+            "no best-vs-worst histogram comparison is shown", text)
+        self.assertNotIn(
+            "#### Per-op histogram comparison — best vs worst run",
+            text)
+
+    def test_histogram_comparison_marks_ops_missing_from_one_run(self):
+        # The best run is read-only and never ran SET: the SET
+        # row shows "-" for the best side.
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(
+                _make_result(
+                    ops=1000, ops_per_sec=50000.0,
+                    latencies_by_op={"GET": [20_000] * 1000}),
+                workload, "kvbench"),
+        ]
+        text = format_best_worst(entries)
+        self.assertIn(
+            "| SET | 0.020 | - | 0.020 | - | - | - |",
+            text)
 
     def test_no_histograms_renders_note_not_blocks(self):
         entries = self._entries()
@@ -1341,6 +1568,38 @@ class TestWriteBestWorst(unittest.TestCase):
             self.assertEqual(
                 backend["per_op"]["SET"]["best"]["histogram"],
                 [{"upper_ms": 0.1, "count": 500}])
+
+    def test_json_file_carries_histogram_comparison(self):
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(
+                _make_result(
+                    ops=1000, ops_per_sec=50000.0,
+                    latencies_by_op={
+                        "SET": [200_000] * 500,
+                        "GET": [20_000] * 400,
+                        "INCR": [20_000] * 100,
+                    }),
+                workload, "kvbench"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "best-worst.json")
+            comparison = write_best_worst_json(path, entries)
+            with open(path, encoding="utf-8") as f:
+                parsed = json.load(f)
+            self.assertEqual(parsed, comparison)
+            histogram_comparison = parsed["backends"][0][
+                "histogram_comparison"]
+            self.assertEqual(histogram_comparison["from"], "worst")
+            self.assertEqual(histogram_comparison["to"], "best")
+            by_op = {row["op"]: row
+                     for row in histogram_comparison["rows"]}
+            self.assertAlmostEqual(
+                by_op["SET"]["p99_change_pct"], 900.0)
+            self.assertAlmostEqual(
+                by_op["SET"]["bucket_drift_pp"], -100.0)
 
     def test_creates_parent_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
