@@ -112,9 +112,19 @@ def _baseline_histograms():
             "GET": histogram([400_000] * 50)}
 
 
+def _baseline_per_op():
+    """Baseline per-op stats: SET at 4,000 ops/sec and p99 0.2 ms,
+    GET at 5,000 ops/sec and p99 0.1 ms — both differ from the
+    current run's, so a test can tell the deltas apart."""
+    return {
+        "SET": {"count": 50, "ops_per_sec": 4_000, "p99_ms": 0.2},
+        "GET": {"count": 50, "ops_per_sec": 5_000, "p99_ms": 0.1},
+    }
+
+
 def _baseline_doc(name="cinder (127.0.0.1:6379)", ops_per_sec=10_000,
                   p99_ms=0.1, workload=None, generated="2026-11-23T00:00:00+00:00",
-                  histograms_by_op=None):
+                  histograms_by_op=None, per_op=None):
     result = {
         "name": name,
         "ops": 100,
@@ -134,6 +144,8 @@ def _baseline_doc(name="cinder (127.0.0.1:6379)", ops_per_sec=10_000,
     }
     if histograms_by_op is not None:
         result["histograms_by_op"] = histograms_by_op
+    if per_op is not None:
+        result["per_op"] = per_op
     return {
         "tool": "kvbench",
         "version": "0.13.0",
@@ -199,8 +211,8 @@ class TestLoadHistoryBaseline(unittest.TestCase):
         return path
 
     def _record(self, backend, ops_per_sec, p99_ms, timestamp,
-                errors=0, workload=None):
-        return {
+                errors=0, workload=None, per_op=None):
+        record = {
             "tool": "kvbench",
             "version": "0.18.0",
             "timestamp": timestamp,
@@ -217,6 +229,9 @@ class TestLoadHistoryBaseline(unittest.TestCase):
             "workload": workload if workload is not None
             else _workload_dict(_workload()),
         }
+        if per_op is not None:
+            record["per_op"] = per_op
+        return record
 
     def _other_workload(self):
         # Same shape as the default workload, but 4 clients
@@ -382,6 +397,52 @@ class TestLoadHistoryBaseline(unittest.TestCase):
             self.assertEqual(comparison["source"], "history")
             self.assertTrue(comparison["workload_matches"])
 
+    def test_history_baseline_carries_per_op_deltas(self):
+        # A record since 0.22.0 carries per-op ops/sec and p99,
+        # so the history baseline compares per op the same way a
+        # report baseline does.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_history(tmp, [
+                self._record("cinder (127.0.0.1:6379)", 8_000, 0.12,
+                             "2026-11-23T10:00:00+00:00",
+                             per_op={
+                                 "SET": {"ops": 50, "ops_per_sec": 4_000,
+                                         "p99_ms": 0.2},
+                                 "GET": {"ops": 50, "ops_per_sec": 5_000,
+                                         "p99_ms": 0.1},
+                             }),
+            ])
+            doc = load_history_baseline(path, "latest")
+            comparison = compare_results(
+                [_result_with_ops()], doc,
+                _workload_dict(_workload()),
+                "history.jsonl (history run -1)", source="history")
+            per_op = comparison["entries"][0]["per_op"]
+            self.assertAlmostEqual(
+                per_op[0]["ops_sec_delta_pct"], 25.0)
+            self.assertAlmostEqual(per_op[0]["p99_delta_pct"], -50.0)
+            self.assertAlmostEqual(
+                per_op[1]["ops_sec_delta_pct"], 0.0)
+            self.assertAlmostEqual(per_op[1]["p99_delta_pct"], 100.0)
+
+    def test_history_record_without_per_op_has_no_deltas(self):
+        # A record before 0.22.0 carries no per_op: the rows
+        # still list this run's numbers, with n/a deltas.
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = load_history_baseline(
+                self._history_path(tmp), "0")
+            comparison = compare_results(
+                [_result_with_ops()], doc,
+                _workload_dict(_workload()),
+                "history.jsonl (history run 0)", source="history")
+            per_op = comparison["entries"][0]["per_op"]
+            self.assertEqual([row["op"] for row in per_op],
+                             ["SET", "GET"])
+            for row in per_op:
+                self.assertIsNone(row["baseline_ops_per_sec"])
+                self.assertIsNone(row["ops_sec_delta_pct"])
+                self.assertIsNone(row["p99_delta_pct"])
+
     def test_same_workload_latest_skips_newer_mismatched_runs(self):
         # The two newest runs used a different workload (4
         # clients); the latest run with the default workload is
@@ -524,6 +585,84 @@ class TestCompareResults(unittest.TestCase):
                 _workload_dict(_workload()), "prev.json")
             self.assertIsNone(
                 comparison["entries"][0]["baseline_histograms_by_op"])
+
+    def test_entries_carry_per_op_deltas(self):
+        # Current run: SET 50 ops at 0.1 ms over 0.01 s — 5,000
+        # ops/sec, p99 0.1 ms; GET 50 ops at 0.2 ms — 5,000
+        # ops/sec, p99 0.2 ms. Baseline: SET 4,000 ops/sec at
+        # p99 0.2 ms, GET 5,000 ops/sec at p99 0.1 ms.
+        comparison = compare_results(
+            [_result_with_ops()],
+            _baseline_doc(ops_per_sec=8_000, p99_ms=0.12,
+                          per_op=_baseline_per_op()),
+            _workload_dict(_workload()), "prev.json")
+        per_op = comparison["entries"][0]["per_op"]
+        self.assertEqual([row["op"] for row in per_op],
+                         ["SET", "GET"])
+        set_row, get_row = per_op
+        self.assertEqual(set_row["ops"], 50)
+        self.assertAlmostEqual(set_row["ops_per_sec"], 5_000)
+        self.assertEqual(set_row["baseline_ops_per_sec"], 4_000)
+        self.assertAlmostEqual(set_row["ops_sec_delta_pct"], 25.0)
+        self.assertAlmostEqual(set_row["p99_ms"], 0.1)
+        self.assertEqual(set_row["baseline_p99_ms"], 0.2)
+        self.assertAlmostEqual(set_row["p99_delta_pct"], -50.0)
+        self.assertAlmostEqual(get_row["ops_sec_delta_pct"], 0.0)
+        self.assertEqual(get_row["baseline_ops_per_sec"], 5_000)
+        self.assertAlmostEqual(get_row["p99_delta_pct"], 100.0)
+
+    def test_op_missing_from_baseline_has_no_delta(self):
+        # The baseline ran SET only: GET keeps its current
+        # numbers with the baseline fields and deltas None.
+        baseline_per_op = {"SET": {"count": 50, "ops_per_sec": 4_000,
+                                   "p99_ms": 0.2}}
+        comparison = compare_results(
+            [_result_with_ops()],
+            _baseline_doc(per_op=baseline_per_op),
+            _workload_dict(_workload()), "prev.json")
+        per_op = comparison["entries"][0]["per_op"]
+        self.assertAlmostEqual(
+            per_op[0]["ops_sec_delta_pct"], 25.0)
+        self.assertIsNone(per_op[1]["baseline_ops_per_sec"])
+        self.assertIsNone(per_op[1]["baseline_p99_ms"])
+        self.assertIsNone(per_op[1]["ops_sec_delta_pct"])
+        self.assertIsNone(per_op[1]["p99_delta_pct"])
+        self.assertAlmostEqual(per_op[1]["ops_per_sec"], 5_000)
+        self.assertAlmostEqual(per_op[1]["p99_ms"], 0.2)
+
+    def test_baseline_without_per_op_keeps_current_numbers(self):
+        # A report written before per-op stats existed carries
+        # no per_op: the rows still list this run's numbers, with
+        # the baseline fields and deltas None, not invented.
+        comparison = compare_results(
+            [_result_with_ops()], _baseline_doc(),
+            _workload_dict(_workload()), "prev.json")
+        per_op = comparison["entries"][0]["per_op"]
+        self.assertEqual([row["op"] for row in per_op],
+                         ["SET", "GET"])
+        for row in per_op:
+            self.assertIsNone(row["baseline_ops_per_sec"])
+            self.assertIsNone(row["baseline_p99_ms"])
+            self.assertIsNone(row["ops_sec_delta_pct"])
+            self.assertIsNone(row["p99_delta_pct"])
+
+    def test_malformed_baseline_per_op_is_ignored(self):
+        # A hand-made baseline file may carry anything: a shape
+        # the comparison cannot read reads as no baseline per-op
+        # stats instead of crashing the report.
+        for bad in ({"SET": {"ops_per_sec": "fast"}},
+                    {"SET": {"p99_ms": 0.2}},
+                    {"SET": "not a dict"},
+                    ["SET"], "per-op"):
+            doc = _baseline_doc(per_op=bad)
+            comparison = compare_results(
+                [_result_with_ops()], doc,
+                _workload_dict(_workload()), "prev.json")
+            per_op = comparison["entries"][0]["per_op"]
+            self.assertTrue(all(
+                row["baseline_ops_per_sec"] is None
+                and row["ops_sec_delta_pct"] is None
+                for row in per_op))
 
     def test_faster_run(self):
         # 100 ops at 100us each over 0.01 s: 10,000 ops/sec, p99 0.1 ms.
@@ -719,6 +858,73 @@ class TestComparisonInReports(unittest.TestCase):
         self.assertNotIn("per-op latency histogram (prev)", text)
         self.assertIn("the history file carries no per-op "
                       "histograms", text)
+
+    def test_markdown_per_op_delta_table(self):
+        comparison = compare_results(
+            [_result_with_ops()],
+            _baseline_doc(ops_per_sec=8_000, p99_ms=0.12,
+                          per_op=_baseline_per_op()),
+            _workload_dict(_workload()), "prev.json")
+        text = render_markdown([_result_with_ops()], _workload(),
+                               "kvbench", comparison)
+        self.assertIn(
+            "#### cinder (127.0.0.1:6379) — per-op p99 / ops-sec "
+            "deltas", text)
+        self.assertIn(
+            "| Op | Ops/sec now | Ops/sec prev | Ops/sec Δ | "
+            "p99 now (ms) | p99 prev (ms) | p99 Δ |", text)
+        # SET: 5,000 now vs 4,000 prev (+25.0%), p99 0.100 vs
+        # 0.200 (-50.0%); GET: 5,000 vs 5,000 (+0.0%), p99 0.200
+        # vs 0.100 (+100.0%).
+        self.assertIn(
+            "| SET | 5,000 | 4,000 | +25.0% | 0.100 | 0.200 | "
+            "-50.0% |", text)
+        self.assertIn(
+            "| GET | 5,000 | 5,000 | +0.0% | 0.200 | 0.100 | "
+            "+100.0% |", text)
+        self.assertIn("per-operation p99 / ops-sec delta table", text)
+
+    def test_markdown_baseline_without_per_op_notes_it(self):
+        comparison = compare_results(
+            [_result_with_ops()], _baseline_doc(),
+            _workload_dict(_workload()), "prev.json")
+        text = render_markdown([_result_with_ops()], _workload(),
+                               "kvbench", comparison)
+        # The table still lists this run's per-op numbers, with
+        # n/a where the baseline has none, and a note says why.
+        self.assertIn(
+            "#### cinder (127.0.0.1:6379) — per-op p99 / ops-sec "
+            "deltas", text)
+        self.assertIn("| SET | 5,000 | n/a | n/a | 0.100 | n/a | n/a |",
+                      text)
+        self.assertIn("the baseline report carries no per-operation "
+                      "stats", text)
+
+    def test_markdown_history_baseline_without_per_op_notes_it(self):
+        comparison = compare_results(
+            [_result_with_ops()], _baseline_doc(),
+            _workload_dict(_workload()),
+            "history.jsonl (history run -1)", source="history")
+        text = render_markdown([_result_with_ops()], _workload(),
+                               "kvbench", comparison)
+        self.assertIn("the history file carries no per-operation "
+                      "stats", text)
+
+    def test_json_carries_per_op_deltas(self):
+        parsed = json.loads(render_json(
+            [_result_with_ops()], _workload(), "kvbench",
+            compare_results(
+                [_result_with_ops()],
+                _baseline_doc(ops_per_sec=8_000, p99_ms=0.12,
+                              per_op=_baseline_per_op()),
+                _workload_dict(_workload()), "prev.json")))
+        per_op = parsed["comparison"]["entries"][0]["per_op"]
+        self.assertEqual([row["op"] for row in per_op],
+                         ["SET", "GET"])
+        self.assertAlmostEqual(per_op[0]["ops_sec_delta_pct"], 25.0)
+        self.assertAlmostEqual(per_op[0]["p99_delta_pct"], -50.0)
+        self.assertAlmostEqual(per_op[1]["ops_sec_delta_pct"], 0.0)
+        self.assertAlmostEqual(per_op[1]["p99_delta_pct"], 100.0)
 
     def test_json_carries_per_op_histograms(self):
         parsed = json.loads(render_json(

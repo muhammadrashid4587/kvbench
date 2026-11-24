@@ -687,6 +687,15 @@ gain a Comparison with previous run section with ops/sec and p99
 side by side, the percentage change of each, and a verdict per
 backend — `faster`, `slower`, `about the same` (within 1%), or
 `regression` when a threshold was given and passed. Each compared
+backend also carries a per-operation p99 / ops-sec delta table —
+one row per op that ran, with the current and baseline ops/sec and
+p99 and the percentage change of each — under
+`comparison.entries[].per_op` in JSON, so a p99 move names the op
+that moved, not just that the p99 moved. A history baseline
+compares per op the same way when its record carries per-op stats
+(records since 0.22.0 do); a baseline that carries none still
+shows this run's per-op numbers with n/a deltas, and a note
+saying why the baseline's are missing. Each compared
 backend also carries its per-operation latency histograms — the
 current run's, and the baseline run's when the baseline report
 carries them (JSON reports since 0.32.0 do) — under
@@ -1058,6 +1067,22 @@ make test
 
 ## Roadmap
 
+- Per-operation p99 / ops-sec deltas in the `--compare` output
+  (`--compare-file` / `--compare-history`): each compared
+  backend carries a per-op breakdown — one row per op that ran,
+  with the current and baseline ops/sec and p99 and the
+  percentage change of each — under
+  `comparison.entries[].per_op` in JSON and as a per-backend
+  table under the comparison table in Markdown, reusing the
+  per-op stats and the delta machinery the aggregate comparison
+  already uses, so a p99 move names the op that moved, not just
+  that the p99 moved. A history baseline compares per op the
+  same way when its record carries per-op stats (records since
+  0.22.0 do); a baseline that carries none — a history record
+  before 0.22.0, or a report written before per-op stats
+  existed — still shows this run's per-op numbers with n/a
+  deltas, and a note saying why the baseline's are missing. Done
+  in 0.42.0.
 - Per-operation latency histograms in the `--compare` output
   (`--compare-file` / `--compare-history`): each compared
   backend carries the same log-spaced buckets per operation

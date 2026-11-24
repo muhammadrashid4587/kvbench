@@ -859,7 +859,9 @@ def _comparison_lines(comparison):
     One row per backend matched by name, with the current and
     baseline ops/sec and p99 and the percentage change of each,
     plus a verdict line per backend. The table is followed by a
-    per-operation latency histogram per compared backend — the
+    per-operation p99 / ops-sec delta table per compared backend
+    — one row per op that ran — and then by a per-operation
+    latency histogram per compared backend — the
     current run's and the baseline run's, drawn by the same
     shared helper as the single-run per-op histograms, so the
     comparison cannot disagree with them — and a note where the
@@ -910,6 +912,59 @@ def _comparison_lines(comparison):
                 f"{p99_delta_text} | {entry['verdict']} |"
             )
         lines.append("")
+        # Per-operation p99 / ops-sec deltas per compared backend:
+        # one row per op that ran, with the current and baseline
+        # ops/sec and p99 and the percentage change of each, so a
+        # p99 move names the op that moved. A baseline that
+        # carries no per-op stats — a history baseline from a
+        # record before 0.22.0, or a report written before per-op
+        # stats existed — still shows this run's numbers with
+        # n/a deltas, and a note saying why the baseline's are
+        # missing.
+        for entry in comparison["entries"]:
+            per_op = entry.get("per_op")
+            if not per_op:
+                continue
+            lines += [
+                f"#### {entry['name']} — per-op p99 / ops-sec deltas",
+                "",
+                "| Op | Ops/sec now | Ops/sec prev | Ops/sec Δ | "
+                "p99 now (ms) | p99 prev (ms) | p99 Δ |",
+                "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+            ]
+            for row in per_op:
+                ops_delta = row["ops_sec_delta_pct"]
+                p99_delta = row["p99_delta_pct"]
+                ops_delta_text = (f"{ops_delta:+.1f}%"
+                                  if ops_delta is not None else "n/a")
+                p99_delta_text = (f"{p99_delta:+.1f}%"
+                                  if p99_delta is not None else "n/a")
+                baseline_ops = (f"{row['baseline_ops_per_sec']:,.0f}"
+                                if row["baseline_ops_per_sec"] is not None
+                                else "n/a")
+                baseline_p99 = (f"{row['baseline_p99_ms']:.3f}"
+                                if row["baseline_p99_ms"] is not None
+                                else "n/a")
+                lines.append(
+                    f"| {row['op']} | {row['ops_per_sec']:,.0f} | "
+                    f"{baseline_ops} | {ops_delta_text} | "
+                    f"{row['p99_ms']:.3f} | {baseline_p99} | "
+                    f"{p99_delta_text} |"
+                )
+            lines.append("")
+            if all(row["baseline_ops_per_sec"] is None
+                   for row in per_op):
+                if comparison.get("source") == "history":
+                    reason = ("the history file carries no "
+                              "per-operation stats")
+                else:
+                    reason = ("the baseline report carries no "
+                              "per-operation stats")
+                lines.append(
+                    f"- {entry['name']}: {reason}, so the per-op "
+                    "deltas are n/a."
+                )
+                lines.append("")
         # Per-operation latency histograms per compared backend:
         # the current run's, and the baseline run's when it carries
         # them — a history baseline or a report written before
@@ -1469,7 +1524,13 @@ def render_markdown(results, workload, command_line, comparison=None,
             "side per backend, with the percentage change and a "
             "verdict. Backends are matched by name; a backend in "
             "only one of the two runs has no comparison. Each "
-            "compared backend also carries its per-operation "
+            "compared backend also carries a per-operation p99 / "
+            "ops-sec delta table — one row per op that ran, with "
+            "the current and baseline ops/sec and p99 and the "
+            "percentage change of each — under "
+            "`comparison.entries[].per_op` in JSON, so a p99 move "
+            "names the op that moved. Each compared backend also "
+            "carries its per-operation "
             "latency histograms — the current run's, and the "
             "baseline run's when the baseline report carries them "
             "(JSON reports since 0.32.0 do; a history baseline "

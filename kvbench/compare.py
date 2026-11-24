@@ -4,8 +4,9 @@
 kvbench run (the ``--json`` output) and compares this run's results
 against it, backend by backend, matched by name: ops/sec and p99
 side by side, with the percentage change and a verdict per backend,
-plus the per-operation latency histograms of both runs, so a p99
-move names the op whose latency shape moved.
+plus a per-operation breakdown — each op's p99 and ops/sec delta
+versus the baseline — and the per-operation latency histograms of
+both runs, so a p99 move names the op whose latency shape moved.
 ``--regression-threshold PCT`` turns the comparison into a gate:
 the run exits non-zero when any backend's ops/sec fell by more than
 PCT, or its p99 rose by more than PCT, versus the baseline file.
@@ -94,7 +95,10 @@ def load_history_baseline(path, selector, workload=None):
     JSON report (``generated``, ``command``, ``workload``,
     ``results`` with ``ops_per_sec``, ``errors`` and a ``summary``
     holding ``p99_ms``), so :func:`compare_results` works on it
-    unchanged.
+    unchanged. Records since 0.22.0 also carry per-op ops/sec
+    and p99 under ``per_op``, which is passed through so the
+    per-op comparison works the same way as for a report
+    baseline; older records carry none.
 
     Raises ValueError when the file does not exist, holds no runs,
     the selector is invalid, an index is out of range for a
@@ -168,6 +172,11 @@ def load_history_baseline(path, selector, workload=None):
         "ops_per_sec": record.get("ops_per_sec") or 0.0,
         "errors": record.get("errors"),
         "summary": {"p99_ms": record.get("p99_ms") or 0.0},
+        # Per-op throughput and latency, when the record carries
+        # them (records since 0.22.0 do): the same per-op
+        # comparison as a report baseline, so a history baseline
+        # still names the op that moved.
+        "per_op": record.get("per_op"),
     } for record in chosen]
     generated = max(
         (record.get("timestamp") or "" for record in chosen),
@@ -235,6 +244,75 @@ def _histograms_or_none(value):
     return value
 
 
+def _per_op_or_none(value):
+    """A baseline per-op stats mapping, or None when it is not one.
+
+    A baseline JSON report carries ``per_op`` per result (op name
+    to the :func:`kvbench.stats.summarize` dict plus
+    ``ops_per_sec``), and a history record carries the same op
+    names to ``ops_per_sec`` and ``p99_ms`` since 0.22.0; a
+    history baseline or an older report carries none, and a
+    hand-made file may carry something else entirely. Only a
+    non-empty dict of op name to dicts with numeric
+    ``ops_per_sec`` and ``p99_ms`` passes through — anything else
+    reads as no baseline per-op stats, instead of crashing the
+    report on a shape it cannot compare.
+    """
+    if not isinstance(value, dict) or not value:
+        return None
+    for entry in value.values():
+        if not isinstance(entry, dict):
+            return None
+        if (not isinstance(entry.get("ops_per_sec"), (int, float))
+                or not isinstance(entry.get("p99_ms"), (int, float))):
+            return None
+    return value
+
+
+def _per_op_deltas(current_per_op, baseline_per_op):
+    """Per-op p99 and ops/sec deltas versus the baseline run.
+
+    ``current_per_op`` is the current run's ``per_op_summary``
+    (op name to summary dict, in SET/GET/INCR/DEL order);
+    ``baseline_per_op`` is the validated baseline mapping from
+    :func:`_per_op_or_none`, or None when the baseline carries
+    no per-op stats. One entry per op that ran in the current
+    run, with the current and baseline ops/sec and p99 and the
+    percentage change of each; an op the baseline never ran —
+    or a baseline with no per-op stats at all — keeps its
+    current numbers with the baseline fields and deltas None,
+    so the table still shows what this run measured.
+    """
+    deltas = []
+    for op, entry in current_per_op.items():
+        baseline = (baseline_per_op or {}).get(op)
+        if baseline is None:
+            deltas.append({
+                "op": op,
+                "ops": entry.get("count"),
+                "ops_per_sec": entry["ops_per_sec"],
+                "baseline_ops_per_sec": None,
+                "ops_sec_delta_pct": None,
+                "p99_ms": entry["p99_ms"],
+                "baseline_p99_ms": None,
+                "p99_delta_pct": None,
+            })
+            continue
+        deltas.append({
+            "op": op,
+            "ops": entry.get("count"),
+            "ops_per_sec": entry["ops_per_sec"],
+            "baseline_ops_per_sec": baseline["ops_per_sec"],
+            "ops_sec_delta_pct": _delta_pct(
+                entry["ops_per_sec"], baseline["ops_per_sec"]),
+            "p99_ms": entry["p99_ms"],
+            "baseline_p99_ms": baseline["p99_ms"],
+            "p99_delta_pct": _delta_pct(
+                entry["p99_ms"], baseline["p99_ms"]),
+        })
+    return deltas
+
+
 def _delta_pct(current, baseline):
     """Percentage change of ``current`` versus ``baseline``.
 
@@ -295,7 +373,12 @@ def compare_results(results, baseline_doc, current_workload,
     ``regression`` flag: True when a threshold was given and the
     ops/sec fell by more than the threshold, or the p99 rose by
     more than it. Each entry also carries the per-operation
-    latency histograms of both runs — the current run's under
+    p99 and ops/sec deltas under ``per_op`` — one row per op
+    that ran, with the current and baseline ops/sec and p99 and
+    the percentage change of each, so a p99 move names the op
+    that moved, not just that the p99 moved — and the
+    per-operation latency histograms of both runs — the current
+    run's under
     ``histograms_by_op`` (the same log-spaced buckets as the
     single-run report's, from the same helper, so the comparison
     cannot disagree with it) and the baseline run's under
@@ -354,6 +437,9 @@ def compare_results(results, baseline_doc, current_workload,
             "baseline_errors": baseline.get("errors"),
             "verdict": _verdict(ops_delta, p99_delta, regression),
             "regression": regression,
+            "per_op": _per_op_deltas(
+                result.per_op_summary,
+                _per_op_or_none(baseline.get("per_op"))),
             "histograms_by_op": result.per_op_histograms,
             "baseline_histograms_by_op": _histograms_or_none(
                 baseline.get("histograms_by_op")),
