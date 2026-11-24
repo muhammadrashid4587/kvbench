@@ -275,25 +275,36 @@ class BenchmarkResult:
     # that run, plus the per-operation latency histograms of that
     # run (``histograms_by_op`` — the same log-spaced buckets per
     # op as the main run's, so a slow op type's shape shows per
-    # size). Empty when no sweep ran (``--sweep-keyspace`` not
-    # given). The full latency samples of the sweep runs are not
-    # kept — only these summaries.
+    # size). With ``--repeat`` above 1 each size runs that many
+    # times: the ops/sec and p99 are the medians over the runs and
+    # the entry carries the per-run values and the run-to-run
+    # spread under ``repeat`` (``runs`` and ``spread``, the same
+    # shapes as the main run's ``repeat_runs`` and
+    # ``repeat_spread``). Empty when no sweep ran
+    # (``--sweep-keyspace`` not given). The full latency samples
+    # of the sweep runs are not kept — only these summaries.
     sweep: list = field(default_factory=list)
     # Client-count sweep results for this backend: one entry per
     # swept count, in ascending count order, each with the count
     # (``clients``), the ops completed, and the ops/sec, mean and
     # p99 latency of that run, plus the per-operation latency
-    # histograms of that run (``histograms_by_op``). Empty when no
-    # sweep ran (``--sweep-clients`` not given). Same shape as
-    # ``sweep``.
+    # histograms of that run (``histograms_by_op``). With
+    # ``--repeat`` above 1 each count runs that many times: the
+    # ops/sec and p99 are the medians over the runs and the entry
+    # carries the per-run values and the run-to-run spread under
+    # ``repeat``. Empty when no sweep ran (``--sweep-clients`` not
+    # given). Same shape as ``sweep``.
     client_sweep: list = field(default_factory=list)
     # Value-size sweep results for this backend: one entry per
     # swept size, in ascending size order, each with the size
     # (``value_size`` in bytes), the ops completed, and the ops/sec,
     # mean and p99 latency of that run, plus the per-operation
-    # latency histograms of that run (``histograms_by_op``). Empty
-    # when no sweep ran (``--sweep-value-size`` not given). Same
-    # shape as ``sweep``.
+    # latency histograms of that run (``histograms_by_op``). With
+    # ``--repeat`` above 1 each size runs that many times: the
+    # ops/sec and p99 are the medians over the runs and the entry
+    # carries the per-run values and the run-to-run spread under
+    # ``repeat``. Empty when no sweep ran (``--sweep-value-size``
+    # not given). Same shape as ``sweep``.
     value_sweep: list = field(default_factory=list)
     # Repeated-run detail (see run_repeated_workload): one summary
     # dict per run, in run order, each with the run index (``run``),
@@ -796,8 +807,10 @@ def run_repeated_workload(client_factory, workload, name, repeat):
     median (the lower middle for an even count) as the
     representative result: its latencies back the mean, p50, p95,
     histogram, per-op splits, tail attribution and time series, and
-    its sweep fields stay empty (sweeps run once, on the result —
-    see the CLI). The result's reported ops/sec and p99 are the
+    its sweep fields stay empty (sweeps run on the result — see
+    the CLI — and repeat per step there when ``repeat`` is above 1,
+    through this same function, so a sweep step's medians agree
+    with the main run's). The result's reported ops/sec and p99 are the
     medians over all ``repeat`` runs, per operation as well as
     overall, and ``repeat_runs`` carries one summary dict per run
     (run index, ops, elapsed, ops/sec, errors, mean/p50/p95/p99,
@@ -895,7 +908,46 @@ def run_repeated_workload(client_factory, workload, name, repeat):
     return representative
 
 
-def run_keyspace_sweep(client_factory, workload, sizes):
+def _sweep_step(client_factory, swept, name, step, repeat):
+    """Run one sweep step, once or ``repeat`` times, and summarize it.
+
+    With ``repeat`` of 1 this is a single :func:`run_workload` call
+    and the entry is the old shape (no ``repeat`` key). Above 1 the
+    step runs through :func:`run_repeated_workload` — the same
+    machinery the main run's ``--repeat`` uses, so a sweep step's
+    reported ops/sec and p99 are the medians over its runs, exactly
+    like the main run's — and the entry carries the per-run values
+    and the run-to-run spread under ``repeat`` (``runs`` and
+    ``spread``, the same shapes as a repeated result's
+    ``repeat_runs`` and ``repeat_spread``). ``step`` holds the
+    step-identifying keys (``{"keys": size}`` etc.); it is merged
+    into the returned entry.
+    """
+    if not isinstance(repeat, int) or repeat < 1:
+        raise ValueError("repeat must be a positive integer")
+    if repeat > 1:
+        result = run_repeated_workload(client_factory, swept, name,
+                                       repeat)
+    else:
+        result = run_workload(client_factory, swept, name)
+    summary = result.summary
+    entry = dict(step)
+    entry.update({
+        "ops": result.ops,
+        "ops_per_sec": result.ops_per_sec,
+        "mean_ms": summary["mean_ms"],
+        "p99_ms": summary["p99_ms"],
+        "histograms_by_op": result.per_op_histograms,
+    })
+    if repeat > 1:
+        entry["repeat"] = {
+            "runs": result.repeat_runs,
+            "spread": result.repeat_spread,
+        }
+    return entry
+
+
+def run_keyspace_sweep(client_factory, workload, sizes, repeat=1):
     """Run the same workload once per keyspace size in ``sizes``.
 
     Each run is a fresh copy of ``workload`` with ``keys`` replaced
@@ -906,7 +958,11 @@ def run_keyspace_sweep(client_factory, workload, sizes):
     "histograms_by_op"}`` dicts, in the order ``sizes`` was given —
     the per-op histograms are the same log-spaced buckets per
     operation as the main run's ``histograms_by_op``, so a slow op
-    type's latency shape shows per size. If a run cannot reach
+    type's latency shape shows per size. With ``repeat`` above 1
+    each size runs that many times (see :func:`_sweep_step`): the
+    reported ops/sec and p99 are the medians over the runs, and
+    each entry carries the per-run values and the run-to-run
+    spread under ``repeat``. If a run cannot reach
     the backend the sweep stops there and the sizes completed so far
     are returned — the caller reports the shortfall.
     """
@@ -914,23 +970,16 @@ def run_keyspace_sweep(client_factory, workload, sizes):
     for size in sizes:
         swept = replace(workload, keys=size)
         try:
-            result = run_workload(client_factory, swept,
-                                  f"sweep ({size} keys)")
+            entry = _sweep_step(client_factory, swept,
+                                f"sweep ({size} keys)", {"keys": size},
+                                repeat)
         except (ConnectionError, OSError):
             break
-        summary = result.summary
-        out.append({
-            "keys": size,
-            "ops": result.ops,
-            "ops_per_sec": result.ops_per_sec,
-            "mean_ms": summary["mean_ms"],
-            "p99_ms": summary["p99_ms"],
-            "histograms_by_op": result.per_op_histograms,
-        })
+        out.append(entry)
     return out
 
 
-def run_client_sweep(client_factory, workload, counts):
+def run_client_sweep(client_factory, workload, counts, repeat=1):
     """Run the same workload once per client count in ``counts``.
 
     Each run is a fresh copy of ``workload`` with ``clients``
@@ -943,7 +992,11 @@ def run_client_sweep(client_factory, workload, counts):
     ``counts`` was given — the per-op histograms are the same
     log-spaced buckets per operation as the main run's
     ``histograms_by_op``, so a slow op type's latency shape shows
-    per count. If a run cannot reach the backend the sweep stops
+    per count. With ``repeat`` above 1 each count runs that many
+    times (see :func:`_sweep_step`): the reported ops/sec and p99
+    are the medians over the runs, and each entry carries the
+    per-run values and the run-to-run spread under ``repeat``. If
+    a run cannot reach the backend the sweep stops
     there and the counts completed so far are returned — the caller
     reports the shortfall.
     """
@@ -951,23 +1004,16 @@ def run_client_sweep(client_factory, workload, counts):
     for count in counts:
         swept = replace(workload, clients=count)
         try:
-            result = run_workload(client_factory, swept,
-                                  f"sweep ({count} clients)")
+            entry = _sweep_step(client_factory, swept,
+                                f"sweep ({count} clients)",
+                                {"clients": count}, repeat)
         except (ConnectionError, OSError):
             break
-        summary = result.summary
-        out.append({
-            "clients": count,
-            "ops": result.ops,
-            "ops_per_sec": result.ops_per_sec,
-            "mean_ms": summary["mean_ms"],
-            "p99_ms": summary["p99_ms"],
-            "histograms_by_op": result.per_op_histograms,
-        })
+        out.append(entry)
     return out
 
 
-def run_value_size_sweep(client_factory, workload, sizes):
+def run_value_size_sweep(client_factory, workload, sizes, repeat=1):
     """Run the same workload once per value size in ``sizes``.
 
     Each run is a fresh copy of ``workload`` with ``value_size``
@@ -980,7 +1026,11 @@ def run_value_size_sweep(client_factory, workload, sizes):
     ``sizes`` was given — the per-op histograms are the same
     log-spaced buckets per operation as the main run's
     ``histograms_by_op``, so a slow op type's latency shape shows
-    per size. If a run cannot reach the backend the sweep stops
+    per size. With ``repeat`` above 1 each size runs that many
+    times (see :func:`_sweep_step`): the reported ops/sec and p99
+    are the medians over the runs, and each entry carries the
+    per-run values and the run-to-run spread under ``repeat``. If
+    a run cannot reach the backend the sweep stops
     there and the sizes completed so far are returned — the caller
     reports the shortfall.
     """
@@ -988,17 +1038,10 @@ def run_value_size_sweep(client_factory, workload, sizes):
     for size in sizes:
         swept = replace(workload, value_size=size)
         try:
-            result = run_workload(client_factory, swept,
-                                  f"sweep ({size} byte values)")
+            entry = _sweep_step(client_factory, swept,
+                                f"sweep ({size} byte values)",
+                                {"value_size": size}, repeat)
         except (ConnectionError, OSError):
             break
-        summary = result.summary
-        out.append({
-            "value_size": size,
-            "ops": result.ops,
-            "ops_per_sec": result.ops_per_sec,
-            "mean_ms": summary["mean_ms"],
-            "p99_ms": summary["p99_ms"],
-            "histograms_by_op": result.per_op_histograms,
-        })
+        out.append(entry)
     return out

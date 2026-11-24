@@ -939,6 +939,9 @@ def main(argv=None):
         """Re-run the workload once per swept keyspace size and
         attach the per-size summaries to ``result``.
 
+        With ``--repeat`` above 1 each size runs that many times
+        and the per-size ops/sec and p99 are the medians over the
+        runs (see :func:`kvbench.bench.run_keyspace_sweep`).
         Prints one line per size. A sweep that stops early (the
         backend went away mid-sweep) keeps the sizes that completed
         and says so on stderr instead of failing the whole run —
@@ -946,11 +949,14 @@ def main(argv=None):
         """
         if not sweep_sizes:
             return
-        result.sweep = run_keyspace_sweep(factory, workload, sweep_sizes)
+        result.sweep = run_keyspace_sweep(factory, workload, sweep_sizes,
+                                          args.repeat)
         for entry in result.sweep:
             print(f"  sweep {entry['keys']:,} keys: "
                   f"{entry['ops_per_sec']:,.0f} ops/sec, "
-                  f"p99 {entry['p99_ms']:.3f} ms")
+                  f"p99 {entry['p99_ms']:.3f} ms"
+                  + (f" (median of {args.repeat} runs)"
+                     if args.repeat > 1 else ""))
         if len(result.sweep) < len(sweep_sizes):
             print(f"kvbench: keyspace sweep on {result.name} stopped "
                   f"after {len(result.sweep)} of {len(sweep_sizes)} "
@@ -960,6 +966,9 @@ def main(argv=None):
         """Re-run the workload once per swept client count and
         attach the per-count summaries to ``result``.
 
+        With ``--repeat`` above 1 each count runs that many times
+        and the per-count ops/sec and p99 are the medians over the
+        runs (see :func:`kvbench.bench.run_client_sweep`).
         Prints one line per count. A sweep that stops early (the
         backend went away mid-sweep) keeps the counts that
         completed and says so on stderr instead of failing the
@@ -968,11 +977,13 @@ def main(argv=None):
         if not client_counts:
             return
         result.client_sweep = run_client_sweep(
-            factory, workload, client_counts)
+            factory, workload, client_counts, args.repeat)
         for entry in result.client_sweep:
             print(f"  client sweep {entry['clients']} clients: "
                   f"{entry['ops_per_sec']:,.0f} ops/sec, "
-                  f"p99 {entry['p99_ms']:.3f} ms")
+                  f"p99 {entry['p99_ms']:.3f} ms"
+                  + (f" (median of {args.repeat} runs)"
+                     if args.repeat > 1 else ""))
         if len(result.client_sweep) < len(client_counts):
             print(f"kvbench: client sweep on {result.name} stopped "
                   f"after {len(result.client_sweep)} of "
@@ -983,6 +994,9 @@ def main(argv=None):
         """Re-run the workload once per swept value size and attach
         the per-size summaries to ``result``.
 
+        With ``--repeat`` above 1 each size runs that many times
+        and the per-size ops/sec and p99 are the medians over the
+        runs (see :func:`kvbench.bench.run_value_size_sweep`).
         Prints one line per size. A sweep that stops early (the
         backend went away mid-sweep) keeps the sizes that completed
         and says so on stderr instead of failing the whole run —
@@ -991,11 +1005,13 @@ def main(argv=None):
         if not value_sizes:
             return
         result.value_sweep = run_value_size_sweep(
-            factory, workload, value_sizes)
+            factory, workload, value_sizes, args.repeat)
         for entry in result.value_sweep:
             print(f"  value-size sweep {entry['value_size']:,} bytes: "
                   f"{entry['ops_per_sec']:,.0f} ops/sec, "
-                  f"p99 {entry['p99_ms']:.3f} ms")
+                  f"p99 {entry['p99_ms']:.3f} ms"
+                  + (f" (median of {args.repeat} runs)"
+                     if args.repeat > 1 else ""))
         if len(result.value_sweep) < len(value_sizes):
             print(f"kvbench: value-size sweep on {result.name} stopped "
                   f"after {len(result.value_sweep)} of "

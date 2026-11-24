@@ -280,6 +280,15 @@ python -m kvbench.cli --ops 20000 --clients 4 \
 # results[].repeat.spread in JSON and in a table in Markdown
 python -m kvbench.cli --ops 20000 --clients 4 --repeat 3
 
+# repeat composes with the sweeps: each sweep step runs 3 times
+# and reports the median ops/sec and p99 per step, so one noisy
+# step does not set the numbers — the per-run values and the
+# spread land under each step's repeat key in JSON, and the
+# Markdown report shows a per-step repeat block under each sweep
+# table
+python -m kvbench.cli --ops 20000 --clients 4 --repeat 3 \
+    --sweep-keyspace 100,1000,10000
+
 # prefix all keys, so a run against a shared store does not collide
 # with another run's keys (or another tool's)
 python -m kvbench.cli --ops 20000 --clients 4 --key-prefix nightly
@@ -306,7 +315,10 @@ username password, the Redis 6 ACL form; needs `--password`),
 `--repeat` (default 1, how many times to run the benchmark: above
 1 the reported ops/sec and p99 are the medians over the runs,
 per operation as well as overall, and the per-run values are
-recorded in the JSON report; a non-positive value is rejected),
+recorded in the JSON report; each sweep step runs that many times
+too and reports the median ops/sec and p99 per step, with its
+per-run values and spread under the step's `repeat` key; a
+non-positive value is rejected),
 `--ops` (default 10000), `--duration` (e.g. `10s` or `2m`; a fixed
 wall-clock run instead of a fixed op count — mutually exclusive
 with `--ops`), `--clients` (default 4), `--keys` (default
@@ -789,6 +801,15 @@ same rows per result under `value_size_sweep`, with the
 per-op buckets per step under `histograms_by_op`, and the
 workload section carries the swept sizes under `sweep_value_size`.
 
+With `--repeat N` and any sweep, each sweep step runs N times and
+its table row shows the median ops/sec and p99 over the runs, with
+a per-step repeat block below the table listing each run's ops/sec
+and p99 and the spread of each as a percentage of its median; the
+JSON report carries the same per-run values and spread under each
+step's `repeat` key (`runs` and `spread`, the same shapes as the
+main run's `repeat`). A sweep with `--repeat 1` keeps the old
+shape exactly — no `repeat` key on any step.
+
 With `--repeat N` the report has a Repeat runs section: one table
 per backend with a row per run — ops, ops/sec, mean and p99 — so
 the spread behind the reported medians reads at a glance. Below
@@ -878,6 +899,16 @@ make test
 
 ## Roadmap
 
+- Compose `--repeat` with the sweeps: with `--repeat N` each
+  sweep step (keyspace, client count, value size) runs N times
+  and reports the median ops/sec and p99 per step, reusing the
+  existing repeat machinery (`run_repeated_workload`) so a sweep
+  step's medians agree with the main run's — each step carries
+  its per-run values and run-to-run spread under `repeat` in
+  JSON (`keyspace_sweep[]` / `client_sweep[]` /
+  `value_size_sweep[].repeat`) and a per-step repeat block in
+  Markdown, and a sweep with `--repeat 1` keeps the old shape
+  exactly. Done in 0.36.0.
 - Run-to-run spread summary for `--repeat` runs: for each op and
   overall, min / max / spread (max - min) and spread as a
   percentage of the median, under `results[].repeat.spread` in

@@ -114,18 +114,29 @@ def _result_dict(result, top_n=5):
         # Keyspace sweep: one per-size summary per swept size
         # (keys, ops, ops/sec, mean and p99, plus the per-op latency
         # histograms of that run under ``histograms_by_op`` — the
-        # same log-spaced buckets per op as the main run's);
-        # [] when no sweep ran.
+        # same log-spaced buckets per op as the main run's); with
+        # ``--repeat`` above 1 each size runs that many times, the
+        # ops/sec and p99 are the medians over the runs, and the
+        # entry carries the per-run values and the run-to-run
+        # spread under ``repeat`` (``runs`` and ``spread``, the
+        # same shapes as the main run's ``repeat``); [] when no
+        # sweep ran.
         "keyspace_sweep": result.sweep,
         # Client-count sweep: one per-count summary per swept count
         # (clients, ops, ops/sec, mean and p99, plus the per-op
         # latency histograms of that run under
-        # ``histograms_by_op``); [] when no sweep ran.
+        # ``histograms_by_op``); with ``--repeat`` above 1 each
+        # count runs that many times and the entry carries the
+        # per-run values and spread under ``repeat``; [] when no
+        # sweep ran.
         "client_sweep": result.client_sweep,
         # Value-size sweep: one per-size summary per swept size
         # (value_size in bytes, ops, ops/sec, mean and p99, plus
         # the per-op latency histograms of that run under
-        # ``histograms_by_op``); [] when no sweep ran.
+        # ``histograms_by_op``); with ``--repeat`` above 1 each
+        # size runs that many times and the entry carries the
+        # per-run values and spread under ``repeat``; [] when no
+        # sweep ran.
         "value_size_sweep": result.value_sweep,
     }
     if result.repeat_runs:
@@ -459,12 +470,68 @@ def _tail_lines(result):
     return lines
 
 
+def _sweep_repeat_lines(label, entries):
+    """Per-run values for repeated sweep steps, or [].
+
+    ``label`` formats one step (e.g. ``lambda e: f"{e['keys']} keys"``);
+    each entry that ran ``--repeat`` more than once carries its
+    per-run values and run-to-run spread under ``repeat`` (the same
+    shapes as a repeated result's ``repeat_runs`` and
+    ``repeat_spread``) — the step's table row already shows the
+    medians, so this block shows the runs behind them: one row per
+    run with ops/sec and p99, plus the spread of each as a
+    percentage of its median. The full per-run detail (mean, p50,
+    per-op values, per-op histograms) lives in the JSON report
+    under the step's ``repeat.runs``. Entries without ``repeat``
+    (a single run, or a sweep recorded before 0.36.0) are skipped,
+    so the table still renders.
+    """
+    lines = []
+    for entry in entries:
+        repeated = entry.get("repeat")
+        if not repeated:
+            continue
+        runs = repeated.get("runs") or []
+        if not runs:
+            continue
+        lines += [
+            f"#### {label(entry)} — repeat runs",
+            "",
+            f"Median of {len(runs)} runs "
+            f"({entry['ops_per_sec']:,.0f} ops/sec, "
+            f"p99 {entry['p99_ms']:.3f} ms).",
+            "",
+            "| Run | Ops/sec | p99 (ms) |",
+            "| ---: | ---: | ---: |",
+        ]
+        for run in runs:
+            lines.append(
+                f"| {run['run']} | {run['ops_per_sec']:,.0f} | "
+                f"{run['p99_ms']:.3f} |"
+            )
+        spread = repeated.get("spread")
+        if spread:
+            ops = spread["overall"]["ops_per_sec"]
+            p99 = spread["overall"]["p99_ms"]
+            lines.append(
+                f"Spread: ops/sec {ops['spread']:,.0f} "
+                f"({_spread_pct_text(ops)} of the median), p99 "
+                f"{p99['spread']:.3f} ms "
+                f"({_spread_pct_text(p99)} of the median)."
+            )
+        lines.append("")
+    return lines
+
+
 def _sweep_lines(result):
     """Keyspace sweep table for one result, or [] when no sweep ran.
 
     The table is followed by a per-operation latency histogram
     per swept size, so a size where one op type slows down shows
-    which op it is, not just that the p99 moved.
+    which op it is, not just that the p99 moved. When a step ran
+    ``--repeat`` more than once its table row shows the medians
+    over the runs, and a per-step repeat block shows the runs
+    behind them.
     """
     if not result.sweep:
         return []
@@ -481,6 +548,8 @@ def _sweep_lines(result):
             f"{entry['p99_ms']:.3f} |"
         )
     lines.append("")
+    lines += _sweep_repeat_lines(
+        lambda entry: f"{entry['keys']:,} keys", result.sweep)
     lines += _sweep_per_op_histogram_lines(
         lambda entry: f"{entry['keys']:,} keys", result.sweep)
     return lines
@@ -597,7 +666,10 @@ def _client_sweep_lines(result):
 
     The table is followed by a per-operation latency histogram
     per swept count, so a count where one op type slows down shows
-    which op it is, not just that the p99 moved.
+    which op it is, not just that the p99 moved. When a step ran
+    ``--repeat`` more than once its table row shows the medians
+    over the runs, and a per-step repeat block shows the runs
+    behind them.
     """
     if not result.client_sweep:
         return []
@@ -614,6 +686,9 @@ def _client_sweep_lines(result):
             f"{entry['p99_ms']:.3f} |"
         )
     lines.append("")
+    lines += _sweep_repeat_lines(
+        lambda entry: f"{entry['clients']} clients",
+        result.client_sweep)
     lines += _sweep_per_op_histogram_lines(
         lambda entry: f"{entry['clients']} clients",
         result.client_sweep)
@@ -625,7 +700,10 @@ def _value_size_sweep_lines(result):
 
     The table is followed by a per-operation latency histogram
     per swept size, so a size where one op type slows down shows
-    which op it is, not just that the p99 moved.
+    which op it is, not just that the p99 moved. When a step ran
+    ``--repeat`` more than once its table row shows the medians
+    over the runs, and a per-step repeat block shows the runs
+    behind them.
     """
     if not result.value_sweep:
         return []
@@ -642,6 +720,9 @@ def _value_size_sweep_lines(result):
             f"{entry['p99_ms']:.3f} |"
         )
     lines.append("")
+    lines += _sweep_repeat_lines(
+        lambda entry: f"{entry['value_size']:,} byte values",
+        result.value_sweep)
     lines += _sweep_per_op_histogram_lines(
         lambda entry: f"{entry['value_size']:,} byte values",
         result.value_sweep)
@@ -879,9 +960,13 @@ def render_markdown(results, workload, command_line, comparison=None,
         sweep_line = (
             "- Keyspace sweep: "
             + ", ".join(f"{s:,}" for s in workload.sweep_keyspace)
-            + " keys (the same workload re-run once per size; "
-            "per-size ops/sec and p99 are in the Keyspace sweep "
-            "section below)"
+            + " keys (the same workload re-run "
+            + (f"{workload.repeat} times"
+               if workload.repeat > 1 else "once")
+            + " per size; per-size ops/sec and p99 are "
+            + ("the medians over the runs and are "
+               if workload.repeat > 1 else "")
+            + "in the Keyspace sweep section below)"
         )
     else:
         sweep_line = None
@@ -889,9 +974,13 @@ def render_markdown(results, workload, command_line, comparison=None,
         client_sweep_line = (
             "- Client sweep: "
             + ", ".join(str(c) for c in workload.sweep_clients)
-            + " clients (the same workload re-run once per client "
-            "count; per-count ops/sec and p99 are in the Client "
-            "sweep section below)"
+            + " clients (the same workload re-run "
+            + (f"{workload.repeat} times"
+               if workload.repeat > 1 else "once")
+            + " per client count; per-count ops/sec and p99 are "
+            + ("the medians over the runs and are "
+               if workload.repeat > 1 else "")
+            + "in the Client sweep section below)"
         )
     else:
         client_sweep_line = None
@@ -899,9 +988,13 @@ def render_markdown(results, workload, command_line, comparison=None,
         value_sweep_line = (
             "- Value size sweep: "
             + ", ".join(f"{s:,}" for s in workload.sweep_value_size)
-            + " bytes (the same workload re-run once per value "
-            "size; per-size ops/sec and p99 are in the Value size "
-            "sweep section below)"
+            + " bytes (the same workload re-run "
+            + (f"{workload.repeat} times"
+               if workload.repeat > 1 else "once")
+            + " per value size; per-size ops/sec and p99 are "
+            + ("the medians over the runs and are "
+               if workload.repeat > 1 else "")
+            + "in the Value size sweep section below)"
         )
     else:
         value_sweep_line = None
