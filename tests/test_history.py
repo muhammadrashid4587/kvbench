@@ -87,6 +87,55 @@ class TestBuildRecord(unittest.TestCase):
                               "kvbench --ops 1000")
         self.assertEqual(record["per_op"], {})
 
+    def test_record_carries_sweep_steps(self):
+        # Only the numbers the trend needs are kept — ops, ops/sec,
+        # mean and p99 per step — not the per-op histograms or the
+        # repeat detail, which already live in the JSON report.
+        result = _make_result()
+        result.sweep = [
+            {"keys": 100, "ops": 1000, "ops_per_sec": 40000.0,
+             "mean_ms": 0.020, "p99_ms": 0.020,
+             "histograms_by_op": {"SET": {}}},
+            {"keys": 1000, "ops": 1000, "ops_per_sec": 60000.0,
+             "mean_ms": 0.020, "p99_ms": 0.020,
+             "histograms_by_op": {"SET": {}},
+             "repeat": {"runs": [], "spread": {}}},
+        ]
+        result.client_sweep = [
+            {"clients": 4, "ops": 1000, "ops_per_sec": 50000.0,
+             "mean_ms": 0.020, "p99_ms": 0.020,
+             "histograms_by_op": {}},
+        ]
+        result.value_sweep = [
+            {"value_size": 128, "ops": 1000, "ops_per_sec": 45000.0,
+             "mean_ms": 0.020, "p99_ms": 0.020,
+             "histograms_by_op": {}},
+        ]
+        record = build_record(result, _make_workload(), "kvbench")
+        self.assertEqual(record["sweeps"], {
+            "keyspace": [
+                {"keys": 100, "ops": 1000, "ops_per_sec": 40000.0,
+                 "mean_ms": 0.020, "p99_ms": 0.020},
+                {"keys": 1000, "ops": 1000, "ops_per_sec": 60000.0,
+                 "mean_ms": 0.020, "p99_ms": 0.020},
+            ],
+            "clients": [
+                {"clients": 4, "ops": 1000, "ops_per_sec": 50000.0,
+                 "mean_ms": 0.020, "p99_ms": 0.020},
+            ],
+            "value_size": [
+                {"value_size": 128, "ops": 1000,
+                 "ops_per_sec": 45000.0, "mean_ms": 0.020,
+                 "p99_ms": 0.020},
+            ],
+        })
+
+    def test_record_with_no_sweeps_has_no_sweeps_key(self):
+        # A run with no sweep keeps the old record shape exactly.
+        record = build_record(_make_result(), _make_workload(),
+                              "kvbench --ops 1000")
+        self.assertNotIn("sweeps", record)
+
 
 class TestRecordAndLoad(unittest.TestCase):
     def setUp(self):
@@ -355,6 +404,115 @@ class TestFormatTrend(unittest.TestCase):
             self.assertIn("40,000", text)
             self.assertIn("50,000", text)
             self.assertIn("+25.0%", text)
+
+
+class TestSweepTrend(unittest.TestCase):
+    def _sweep_result(self, ops_per_sec, keys=100, clients=None,
+                      value_size=None):
+        result = _make_result(ops_per_sec=ops_per_sec)
+        if keys is not None:
+            result.sweep = [{"keys": keys, "ops": 1000,
+                             "ops_per_sec": ops_per_sec,
+                             "mean_ms": 0.020, "p99_ms": 0.020,
+                             "histograms_by_op": {}}]
+        if clients is not None:
+            result.client_sweep = [{"clients": clients, "ops": 1000,
+                                    "ops_per_sec": ops_per_sec,
+                                    "mean_ms": 0.020, "p99_ms": 0.020,
+                                    "histograms_by_op": {}}]
+        if value_size is not None:
+            result.value_sweep = [{"value_size": value_size,
+                                   "ops": 1000,
+                                   "ops_per_sec": ops_per_sec,
+                                   "mean_ms": 0.020, "p99_ms": 0.020,
+                                   "histograms_by_op": {}}]
+        return result
+
+    def test_sweep_recorded_then_trended_across_two_runs(self):
+        # The core of the feature: a sweep step recorded in one
+        # run and again in the next shows up in the trend with a
+        # delta and a first-to-last change, in the same shape as
+        # the overall trend table.
+        workload = _make_workload()
+        entries = [
+            build_record(self._sweep_result(40000.0), workload,
+                         "kvbench"),
+            build_record(self._sweep_result(50000.0), workload,
+                         "kvbench"),
+        ]
+        text = format_trend(entries)
+        self.assertIn(
+            "#### Keyspace sweep — 100 keys ops/sec trend", text)
+        self.assertIn("| 40,000 | - | 0.020 |", text)
+        self.assertIn("| 50,000 | +25.0% | 0.020 |", text)
+        self.assertIn(
+            "Keyspace sweep — 100 keys trend (oldest → newest): ▁█",
+            text)
+        self.assertIn(
+            "Keyspace sweep — 100 keys first → last: 40,000 → "
+            "50,000 ops/sec (+25.0%)", text)
+
+    def test_sweep_delta_skips_runs_without_that_step(self):
+        workload = _make_workload()
+        entries = [
+            build_record(self._sweep_result(40000.0), workload,
+                         "kvbench"),
+            # A run with no sweep in between: the step's delta
+            # still compares against the first run.
+            build_record(_make_result(ops_per_sec=60000.0), workload,
+                         "kvbench"),
+            build_record(self._sweep_result(60000.0), workload,
+                         "kvbench"),
+        ]
+        text = format_trend(entries)
+        self.assertIn(
+            "Keyspace sweep — 100 keys first → last: 40,000 → "
+            "60,000 ops/sec (+50.0%)", text)
+        self.assertEqual(
+            text.count("#### Keyspace sweep — 100 keys ops/sec trend"),
+            1)
+
+    def test_all_three_sweep_kinds_render(self):
+        workload = _make_workload()
+        entries = [
+            build_record(
+                self._sweep_result(40000.0, keys=100, clients=4,
+                                   value_size=128),
+                workload, "kvbench"),
+            build_record(
+                self._sweep_result(50000.0, keys=100, clients=4,
+                                   value_size=128),
+                workload, "kvbench"),
+        ]
+        text = format_trend(entries)
+        self.assertIn(
+            "#### Keyspace sweep — 100 keys ops/sec trend", text)
+        self.assertIn(
+            "#### Client sweep — 4 clients ops/sec trend", text)
+        self.assertIn(
+            "#### Value size sweep — 128 byte values ops/sec trend",
+            text)
+        self.assertIn(
+            "Client sweep — 4 clients first → last: 40,000 → "
+            "50,000 ops/sec (+25.0%)", text)
+
+    def test_records_without_sweeps_render_no_sweep_sections(self):
+        # History written before 0.37.0 has no "sweeps" key: the
+        # overall trend still renders and nothing crashes.
+        workload = _make_workload()
+        entries = [
+            build_record(_make_result(ops_per_sec=rate), workload,
+                         "kvbench")
+            for rate in (40000.0, 50000.0)
+        ]
+        for entry in entries:
+            self.assertNotIn("sweeps", entry)
+        text = format_trend(entries)
+        self.assertIn("40,000", text)
+        self.assertIn("+25.0%", text)
+        self.assertNotIn("Keyspace sweep —", text)
+        self.assertNotIn("Client sweep —", text)
+        self.assertNotIn("Value size sweep —", text)
 
 
 class TestWriteTrend(unittest.TestCase):

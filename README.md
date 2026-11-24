@@ -197,6 +197,12 @@ python -m kvbench.cli --show-history
 # same history file
 python -m kvbench.cli --trend
 
+# a sweep run recorded the same way also records each sweep step,
+# so --trend shows one trend section per step that ran
+python -m kvbench.cli --ops 20000 --clients 4 \
+    --sweep-keyspace 100,1000 --history
+python -m kvbench.cli --trend
+
 # prune old runs from the history file, per backend — keep the
 # 20 most recent runs of each backend, or drop runs older than
 # a date; --dry-run shows what would be removed first
@@ -475,6 +481,18 @@ at a glance even when GETs dominate the mix. Runs recorded
 before 0.22.0 carry no per-op data and simply show no per-op
 sections; a run that never ran an op (a read-only mix has no
 SET) leaves that op out of its own table.
+
+A sweep run recorded with `--history` also records each sweep
+step — one ops/sec and p99 per keyspace size, client count and
+value size — and below the per-op sections each backend gets one
+trend section per step that ran, with the same table, delta,
+sparkline and first-to-last change as the overall chart: a
+keyspace step's ops/sec at 100 keys is only ever compared with
+the same step in other runs, so a step that slows down reads at
+a glance even when the overall ops/sec moved the other way.
+Runs recorded before 0.37.0 carry no sweep data and simply show
+no sweep sections; a step that never ran in the window gets no
+section at all.
 
 With `--trend-out PATH` the same chart is also written to a
 Markdown file — the exact text printed to stdout — so the trend
@@ -899,6 +917,19 @@ make test
 
 ## Roadmap
 
+- Sweep steps in the run history and trend views: a sweep run
+  recorded with `--history` also records each sweep step — one
+  ops/sec and p99 per keyspace size, client count and value size —
+  under `sweeps` in the history record (only the numbers the trend
+  needs, not the per-op histograms or repeat detail, which stay in
+  the JSON report), and `--trend` renders one section per step
+  that ran, with the same table, delta, sparkline and first-to-last
+  change as the overall and per-op trend tables, reusing the same
+  helpers so the views cannot disagree — so a sweep step's ops/sec
+  at 100 keys is only ever compared with the same step in other
+  runs. A run with no sweep keeps the old record shape exactly,
+  and runs recorded before 0.37.0 carry no `sweeps` and render no
+  sweep sections. Done in 0.37.0.
 - Compose `--repeat` with the sweeps: with `--repeat N` each
   sweep step (keyspace, client count, value size) runs N times
   and reports the median ops/sec and p99 per step, reusing the

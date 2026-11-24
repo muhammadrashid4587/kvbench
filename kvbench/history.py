@@ -17,7 +17,12 @@ SET, GET, INCR and DEL separately — a slow write no longer hides
 inside the overall ops/sec. ``--best-worst`` picks the best and
 worst runs per backend (and per operation) out of the same
 history, with the spread between them, so a backend whose
-throughput swings run to run reads at a glance.
+throughput swings run to run reads at a glance. Since 0.37.0
+each record also carries its sweep steps — one ops/sec and p99
+per keyspace size, client count and value size — so the trend
+view tracks every sweep step on its own, and a step's
+throughput is only ever compared with the same step in other
+runs.
 """
 
 import json
@@ -88,10 +93,40 @@ def _workload_record(workload):
     }
 
 
+def _sweeps_record(result):
+    """A run's sweep steps in trend shape, or {} when no sweep ran.
+
+    One trimmed entry per step — the step value (``keys``,
+    ``clients`` or ``value_size``), ops, ops/sec, mean and p99 —
+    per sweep kind that ran, keyed ``keyspace`` / ``clients`` /
+    ``value_size``. The per-op histograms and repeat detail stay
+    in the JSON report; the trend only needs ops/sec and p99 per
+    step, the same numbers the overall trend tracks per run, so a
+    sweep step's ops/sec at 100 keys is only ever compared with
+    the same step in other runs.
+    """
+    sweeps = {}
+    for kind, steps, step_key in (
+            ("keyspace", result.sweep, "keys"),
+            ("clients", result.client_sweep, "clients"),
+            ("value_size", result.value_sweep, "value_size")):
+        entries = [
+            {step_key: step[step_key],
+             "ops": step["ops"],
+             "ops_per_sec": step["ops_per_sec"],
+             "mean_ms": step["mean_ms"],
+             "p99_ms": step["p99_ms"]}
+            for step in steps
+        ]
+        if entries:
+            sweeps[kind] = entries
+    return sweeps
+
+
 def build_record(result, workload, command_line):
     """Build one history record for a single backend result."""
     summary = result.summary
-    return {
+    record = {
         "tool": "kvbench",
         "version": __version__,
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -125,6 +160,20 @@ def build_record(result, workload, command_line):
         },
         "workload": _workload_record(workload),
     }
+    # Sweep steps, so the trend view can track each step over
+    # time: a keyspace step's ops/sec at 100 keys is only
+    # comparable with the same step in other runs. Only the
+    # numbers the trend needs are kept — ops, ops/sec, mean and
+    # p99 — not the per-op histograms or repeat detail, which
+    # already live in the JSON report. Only kinds that ran are
+    # recorded, so a run with no sweep keeps the old record shape
+    # exactly; records written before 0.37.0 carry no "sweeps"
+    # key at all, and the trend view skips those runs for the
+    # sweep sections instead of failing.
+    sweeps = _sweeps_record(result)
+    if sweeps:
+        record["sweeps"] = sweeps
+    return record
 
 
 def record_run(path, results, workload, command_line):
@@ -268,6 +317,116 @@ def _per_op_trend_lines(runs, window):
     return lines
 
 
+# (history key, step key, section label, step unit) for the three
+# sweep kinds, in the order the report renders their sections.
+_SWEEP_KINDS = (
+    ("keyspace", "keys", "Keyspace sweep", "keys"),
+    ("clients", "clients", "Client sweep", "clients"),
+    ("value_size", "value_size", "Value size sweep", "byte values"),
+)
+
+
+def _sweep_step_entry(entry, kind, step_key, step_value):
+    """The recorded step of one sweep kind/value in ``entry``, or None.
+
+    A run that ran no sweep of that kind — or ran it at other step
+    values — has no entry for this step, so it is skipped for this
+    section instead of inventing one.
+    """
+    for step in (entry.get("sweeps") or {}).get(kind, []):
+        if isinstance(step, dict) and step.get(step_key) == step_value:
+            return step
+    return None
+
+
+def _sweep_trend_lines(runs, window):
+    """Per-sweep-step trend sections for one backend.
+
+    ``runs`` are all recorded runs of the backend (oldest first),
+    ``window`` the most recent ones being rendered. Each sweep step
+    that ran — one keyspace size, one client count, one value size —
+    gets its own table: ops/sec, the change versus the previous run
+    that recorded the same step, and p99, plus a sparkline and the
+    first-to-last change. The table is the same shape as the
+    overall and per-op trend tables, built from the same
+    ``_ops_sec_delta`` and ``_sparkline`` helpers, so the views
+    cannot disagree. Runs recorded before 0.37.0 carry no
+    ``sweeps`` data and are skipped for these sections; a step
+    that never ran in the window gets no section at all.
+    """
+    lines = []
+    for kind, step_key, label, unit in _SWEEP_KINDS:
+        steps = sorted({
+            step.get(step_key)
+            for entry in window
+            for step in (entry.get("sweeps") or {}).get(kind, [])
+            if isinstance(step, dict)
+            and isinstance(step.get(step_key), (int, float))
+        })
+        for step_value in steps:
+            # The delta is against the previous run that recorded
+            # this same sweep step, scanning all runs so a run
+            # outside the window still counts — the same rule the
+            # overall and per-op tables use.
+            previous_by_id = {}
+            previous = None
+            for entry in runs:
+                step = _sweep_step_entry(entry, kind, step_key,
+                                         step_value)
+                if step is None:
+                    previous_by_id[id(entry)] = None
+                    continue
+                previous_by_id[id(entry)] = _ops_sec_delta(step, previous)
+                previous = step
+            values = [
+                _sweep_step_entry(entry, kind, step_key, step_value)
+                for entry in window
+            ]
+            values = [step.get("ops_per_sec") for step in values
+                      if step is not None
+                      and isinstance(step.get("ops_per_sec"),
+                                     (int, float))]
+            if not values:
+                continue
+            step_label = f"{step_value:,} {unit}"
+            lines.append(
+                f"#### {label} — {step_label} ops/sec trend")
+            lines.append("")
+            lines.append("| Time (UTC) | Ops/sec | Ops/sec vs prev | "
+                         "p99 (ms) |")
+            lines.append("| --- | ---: | ---: | ---: |")
+            for entry in reversed(window):
+                step = _sweep_step_entry(entry, kind, step_key,
+                                         step_value)
+                if step is None:
+                    continue
+                timestamp = entry.get("timestamp", "")[:19].replace(
+                    "T", " ")
+                ops_sec = step.get("ops_per_sec")
+                ops_cell = (f"{ops_sec:,.0f}"
+                            if isinstance(ops_sec, (int, float)) else "-")
+                p99 = step.get("p99_ms")
+                p99_cell = (f"{p99:.3f}"
+                            if isinstance(p99, (int, float)) else "-")
+                lines.append(
+                    f"| {timestamp} | {ops_cell} | "
+                    f"{previous_by_id[id(entry)]} | {p99_cell} |"
+                )
+            lines.append("")
+            lines.append(
+                f"{label} — {step_label} trend (oldest → newest): "
+                f"{_sparkline(values)}")
+            if len(values) >= 2:
+                first, last = values[0], values[-1]
+                change = (last - first) / first * 100 if first else 0.0
+                lines.append(
+                    f"{label} — {step_label} first → last: "
+                    f"{first:,.0f} → {last:,.0f} "
+                    f"ops/sec ({change:+.1f}%)")
+            lines.append("")
+    return lines
+
+
 def format_trend(entries, limit=20):
     """Render an ops/sec-over-time trend chart per backend.
 
@@ -277,10 +436,12 @@ def format_trend(entries, limit=20):
     and p99 alongside, plus a sparkline of ops/sec over those runs
     (oldest to newest) and the first-to-last change, followed by
     the same chart per operation type (SET, GET, INCR, DEL) for the ops
-    that ran, so each op's throughput trend reads on its own. A
-    corrupt line never reaches here — ``load_history`` already
-    skips it — and a backend with a single recorded run shows no
-    delta, just its one value.
+    that ran, so each op's throughput trend reads on its own, and
+    the same chart per sweep step (keyspace size, client count,
+    value size) for the steps that ran, so a step's throughput
+    trend reads on its own too. A corrupt line never reaches here
+    — ``load_history`` already skips it — and a backend with a
+    single recorded run shows no delta, just its one value.
     """
     if not entries:
         return "No runs recorded yet. Re-run a benchmark with --history."
@@ -328,6 +489,9 @@ def format_trend(entries, limit=20):
         # Per-op trend, same shape as the overall chart, one section
         # per operation type that ran in this window.
         sections.extend(_per_op_trend_lines(runs, window))
+        # Per-sweep-step trend, same shape again, one section per
+        # sweep step that ran in this window.
+        sections.extend(_sweep_trend_lines(runs, window))
     return "\n".join(sections)
 
 
