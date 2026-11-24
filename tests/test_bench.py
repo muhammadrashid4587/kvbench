@@ -9,13 +9,20 @@ from kvbench.bench import DictClient, DictStore, Workload, \
 
 
 class TestDictBaseline(unittest.TestCase):
-    def test_set_get_incr(self):
+    def test_set_get_incr_del(self):
         store = DictStore()
         self.assertEqual(store.command("SET", "k", "v"), "OK")
         self.assertEqual(store.command("GET", "k"), "v")
         self.assertIsNone(store.command("GET", "missing"))
         self.assertEqual(store.command("INCR", "n"), 1)
         self.assertEqual(store.command("INCR", "n"), 2)
+        # DEL removes the key and reports 1; deleting a missing key
+        # reports 0, not an error — the same replies a real server
+        # gives, so the runner measures DELs like any other op.
+        self.assertEqual(store.command("DEL", "k"), 1)
+        self.assertIsNone(store.command("GET", "k"))
+        self.assertEqual(store.command("DEL", "k"), 0)
+        self.assertEqual(store.command("DEL", "missing"), 0)
         self.assertEqual(store.command("PING"), "PONG")
 
     def test_baseline_run_completes(self):
@@ -41,7 +48,8 @@ class TestDictBaseline(unittest.TestCase):
         # 80% GET, with no INCRs at all. Tolerance is wide (±5pp)
         # against the ~0.6pp sampling error at this size.
         workload = Workload(ops=5000, clients=4, keys=50, value_size=8,
-                            set_weight=20, get_weight=80, incr_weight=0)
+                            set_weight=20, get_weight=80, incr_weight=0,
+                            del_weight=0)
         result = run_workload(DictClient, workload, "baseline (dict)")
         per_op = result.per_op_summary
         self.assertEqual(set(per_op), {"SET", "GET"})
@@ -54,7 +62,8 @@ class TestDictBaseline(unittest.TestCase):
 
     def test_per_op_stats_split_latencies(self):
         workload = Workload(ops=2000, clients=4, keys=20, value_size=8,
-                            set_weight=50, get_weight=40, incr_weight=10)
+                            set_weight=50, get_weight=40, incr_weight=10,
+                            del_weight=0)
         result = run_workload(DictClient, workload, "baseline (dict)")
         per_op = result.per_op_summary
         self.assertEqual(set(per_op), {"SET", "GET", "INCR"})
@@ -75,7 +84,8 @@ class TestDictBaseline(unittest.TestCase):
     def test_per_op_empty_for_unrun_ops(self):
         # A SET-only mix reports SET alone; no empty op rows.
         workload = Workload(ops=200, clients=2, keys=20, value_size=8,
-                            set_weight=100, get_weight=0, incr_weight=0)
+                            set_weight=100, get_weight=0, incr_weight=0,
+                            del_weight=0)
         result = run_workload(DictClient, workload, "baseline (dict)")
         self.assertEqual(set(result.per_op_summary), {"SET"})
         self.assertEqual(result.per_op_summary["SET"]["count"], 200)
@@ -163,7 +173,7 @@ class TestDictBaseline(unittest.TestCase):
 
         workload = Workload(ops=40, clients=2, keys=20, value_size=8,
                             set_weight=50, get_weight=40, incr_weight=10,
-                            pipeline=4)
+                            del_weight=0, pipeline=4)
         result = run_workload(DeadClient, workload, "dead")
         self.assertEqual(result.errors, 40)
         self.assertEqual(sum(result.errors_by_op.values()), 40)
@@ -196,9 +206,66 @@ class TestDictBaseline(unittest.TestCase):
             Workload(ops=0, clients=1, keys=10)
         with self.assertRaises(ValueError):
             Workload(ops=10, clients=1, keys=10,
-                     set_weight=0, get_weight=0, incr_weight=0)
+                     set_weight=0, get_weight=0, incr_weight=0,
+                     del_weight=0)
         with self.assertRaises(ValueError):
             Workload(ops=10, clients=1, keys=10, pipeline=0)
+
+
+class TestDelOp(unittest.TestCase):
+    def test_del_in_mix_ratio(self):
+        # A 40:40:10:10 mix over 2000 ops should land near 10% DEL,
+        # with DEL in the per-op stats like the other ops.
+        workload = Workload(ops=2000, clients=4, keys=20, value_size=8,
+                            set_weight=40, get_weight=40, incr_weight=10,
+                            del_weight=10)
+        result = run_workload(DictClient, workload, "baseline (dict)")
+        per_op = result.per_op_summary
+        self.assertEqual(set(per_op), {"SET", "GET", "INCR", "DEL"})
+        del_share = per_op["DEL"]["count"] / result.ops
+        self.assertAlmostEqual(del_share, 0.10, delta=0.05)
+        self.assertEqual(result.errors, 0)
+        total = sum(s["count"] for s in per_op.values())
+        self.assertEqual(total, result.ops)
+
+    def test_del_only_mix(self):
+        # DELs on keys that were never SET still succeed (the server
+        # replies 0), so a DEL-only run has no errors.
+        workload = Workload(ops=200, clients=2, keys=20, value_size=8,
+                            set_weight=0, get_weight=0, incr_weight=0,
+                            del_weight=100)
+        result = run_workload(DictClient, workload, "baseline (dict)")
+        self.assertEqual(set(result.per_op_summary), {"DEL"})
+        self.assertEqual(result.per_op_summary["DEL"]["count"], 200)
+        self.assertEqual(result.errors, 0)
+
+    def test_default_mix_includes_del(self):
+        # The default mix carries a small DEL share (5 of 100).
+        workload = Workload(ops=2000, clients=4, keys=20, value_size=8)
+        self.assertEqual(workload.del_weight, 5)
+        result = run_workload(DictClient, workload, "baseline (dict)")
+        self.assertIn("DEL", result.per_op_summary)
+        self.assertGreater(result.per_op_summary["DEL"]["count"], 0)
+        self.assertEqual(result.errors, 0)
+
+    def test_del_uses_set_get_keyspace(self):
+        # DEL deletes the same "<prefix>:<rank>" keys SET and GET
+        # use — not the INCR counter keyspace — so a deleted key is
+        # gone for a later GET. Pre-populate the store, run a
+        # DEL-only workload, and check every key is gone.
+        store = DictStore()
+        for rank in range(20):
+            store.command("SET", f"kvbench:{rank}", "x" * 8)
+        workload = Workload(ops=200, clients=2, keys=20, value_size=8,
+                            set_weight=0, get_weight=0, incr_weight=0,
+                            del_weight=100)
+        result = run_workload(lambda: DictClient(store), workload,
+                              "baseline (dict)")
+        self.assertEqual(result.errors, 0)
+        self.assertEqual(
+            sum(1 for rank in range(20)
+                if store.command("GET", f"kvbench:{rank}") is not None),
+            0)
 
 
 class TestZipfianDistribution(unittest.TestCase):
@@ -372,7 +439,11 @@ class TestKeyspaceSweep(unittest.TestCase):
             self.assertEqual(entry["ops"], 200)
             self.assertGreater(entry["ops_per_sec"], 0)
             self.assertGreaterEqual(entry["mean_ms"], 0)
-            self.assertGreaterEqual(entry["p99_ms"], entry["mean_ms"])
+            self.assertGreaterEqual(entry["p99_ms"], 0)
+            # No p99 >= mean check: with 200 samples the p99 is the
+            # second-slowest op, and a single scheduling stall can
+            # push the mean above it — the mean is not bounded by
+            # the p99 in general.
         # The base workload is untouched: the sweep copies it per size.
         self.assertEqual(workload.keys, 10)
 
@@ -407,7 +478,7 @@ class TestClientSweep(unittest.TestCase):
             self.assertEqual(entry["ops"], 200)
             self.assertGreater(entry["ops_per_sec"], 0)
             self.assertGreaterEqual(entry["mean_ms"], 0)
-            self.assertGreaterEqual(entry["p99_ms"], entry["mean_ms"])
+            self.assertGreaterEqual(entry["p99_ms"], 0)
         # The base workload is untouched: the sweep copies it per count.
         self.assertEqual(workload.clients, 2)
 
@@ -443,7 +514,10 @@ class TestValueSizeSweep(unittest.TestCase):
             self.assertEqual(entry["ops"], 200)
             self.assertGreater(entry["ops_per_sec"], 0)
             self.assertGreaterEqual(entry["mean_ms"], 0)
-            self.assertGreaterEqual(entry["p99_ms"], entry["mean_ms"])
+            self.assertGreaterEqual(entry["p99_ms"], 0)
+            # No p99 >= mean check: with 200 samples a single
+            # scheduling stall can push the mean above the p99 —
+            # see TestKeyspaceSweep.
         # The base workload is untouched: the sweep copies it per size.
         self.assertEqual(workload.value_size, 8)
 

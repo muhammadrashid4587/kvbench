@@ -15,7 +15,7 @@ from kvbench.report import _workload_dict, render_json, render_markdown
 
 
 class _FakeRespHandler(socketserver.StreamRequestHandler):
-    """Minimal RESP: SET/GET/INCR against the server's own dict."""
+    """Minimal RESP: SET/GET/INCR/DEL against the server's own dict."""
 
     def handle(self):
         store = self.server.store
@@ -47,6 +47,10 @@ class _FakeRespHandler(socketserver.StreamRequestHandler):
                 value = int(store.get(args[1], "0")) + 1
                 store[args[1]] = str(value)
                 self.wfile.write(f":{value}\r\n".encode())
+            elif op == "DEL":
+                removed = 1 if args[1] in store else 0
+                store.pop(args[1], None)
+                self.wfile.write(f":{removed}\r\n".encode())
             else:
                 self.wfile.write(b"-ERR unknown command\r\n")
             self.wfile.flush()
@@ -903,6 +907,7 @@ class TestCompareHistoryCli(unittest.TestCase):
             ])
             out = os.path.join(tmp, "run.md")
             code = main(self._argv(["--ops", "100", "--clients", "1",
+                                    "--mix", "50:40:10:5",
                                     "--output", out,
                                     "--compare-history", "-1",
                                     "--compare-same-workload",

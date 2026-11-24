@@ -19,7 +19,7 @@ from kvbench.cli import MIX_PRESETS, _parse_client_sweep, _parse_duration, \
 
 
 class _FakeRespHandler(socketserver.StreamRequestHandler):
-    """Minimal RESP: SET/GET/INCR against the server's own dict.
+    """Minimal RESP: SET/GET/INCR/DEL against the server's own dict.
 
     When the server's ``password`` is set, commands before a
     successful AUTH get a NOAUTH error; AUTH takes the password,
@@ -69,6 +69,10 @@ class _FakeRespHandler(socketserver.StreamRequestHandler):
                 value = int(store.get(args[1], "0")) + 1
                 store[args[1]] = str(value)
                 self.wfile.write(f":{value}\r\n".encode())
+            elif op == "DEL":
+                removed = 1 if args[1] in store else 0
+                store.pop(args[1], None)
+                self.wfile.write(f":{removed}\r\n".encode())
             else:
                 self.wfile.write(b"-ERR unknown command\r\n")
             self.wfile.flush()
@@ -94,27 +98,34 @@ def _start_server(password=None):
 
 
 class TestParseMix(unittest.TestCase):
+    def test_four_part_weights(self):
+        self.assertEqual(_parse_mix("45:40:10:5"), (45, 40, 10, 5, ""))
+        self.assertEqual(_parse_mix("80:15:5:0"), (80, 15, 5, 0, ""))
+
     def test_three_part_weights(self):
-        self.assertEqual(_parse_mix("50:40:10"), (50, 40, 10, ""))
-        self.assertEqual(_parse_mix("80:15:5"), (80, 15, 5, ""))
+        # The old form: no DELs.
+        self.assertEqual(_parse_mix("50:40:10"), (50, 40, 10, 0, ""))
+        self.assertEqual(_parse_mix("80:15:5"), (80, 15, 5, 0, ""))
 
     def test_two_part_read_write_ratio(self):
-        # READ:WRITE — reads are GETs, writes are SETs, no INCRs.
-        self.assertEqual(_parse_mix("80:20"), (20, 80, 0, ""))
-        self.assertEqual(_parse_mix("0:100"), (100, 0, 0, ""))
+        # READ:WRITE — reads are GETs, writes are SETs, no INCRs
+        # or DELs.
+        self.assertEqual(_parse_mix("80:20"), (20, 80, 0, 0, ""))
+        self.assertEqual(_parse_mix("0:100"), (100, 0, 0, 0, ""))
 
     def test_presets(self):
         for name, weights in MIX_PRESETS.items():
             self.assertEqual(_parse_mix(name), (*weights, name))
-        self.assertEqual(_parse_mix("read-heavy"), (15, 80, 5,
+        self.assertEqual(_parse_mix("read-heavy"), (15, 75, 5, 5,
                                                     "read-heavy"))
-        self.assertEqual(_parse_mix("balanced"), (45, 45, 10, "balanced"))
-        self.assertEqual(_parse_mix("write-heavy"), (80, 15, 5,
+        self.assertEqual(_parse_mix("balanced"), (40, 45, 10, 5,
+                                                  "balanced"))
+        self.assertEqual(_parse_mix("write-heavy"), (75, 15, 5, 5,
                                                      "write-heavy"))
 
     def test_invalid(self):
-        for bad in ("", "80", "50:40:10:0", "a:b:c", "50:-1:10",
-                    "0:0:0", "readheavy", "READ-HEAVY"):
+        for bad in ("", "80", "50:40:10:5:1", "a:b:c", "50:-1:10",
+                    "0:0:0", "0:0:0:0", "readheavy", "READ-HEAVY"):
             with self.assertRaises(ValueError, msg=bad):
                 _parse_mix(bad)
 

@@ -49,6 +49,8 @@ class SlowFakeClient:
             value = int(self._data.get(key, "0")) + 1
             self._data[key] = str(value)
             return value
+        if op == "DEL":
+            return 1 if self._data.pop(key, None) is not None else 0
         raise ValueError(f"unsupported op: {op}")
 
     def close(self):
@@ -215,7 +217,8 @@ class TestTailAttributionLive(unittest.TestCase):
         # could fire is hot vs cold keys — and with ~1% hot ops
         # the hot share of the tail stays at its baseline.
         workload = Workload(ops=2000, clients=1, keys=100, value_size=8,
-                            set_weight=100, get_weight=0, incr_weight=0)
+                            set_weight=100, get_weight=0, incr_weight=0,
+                            del_weight=0)
         result = run_workload(
             lambda: SlowFakeClient(lambda op, rank, n: False),
             workload, "fake")

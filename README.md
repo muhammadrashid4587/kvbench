@@ -20,7 +20,7 @@ C. Pure Python 3 standard library, no dependencies.
   history: the recorded command line shows `***` in its place,
   while both reports record that the run authenticated.
 - A workload runner (`kvbench/bench.py`) that runs a configurable
-  SET/GET/INCR mix across N threads, measuring per-op latency.
+  SET/GET/INCR/DEL mix across N threads, measuring per-op latency.
   With `--pipeline N` it sends N commands per round trip instead of
   one, so throughput under pipelining is measured the same way.
   With `--duration 10s` (or `2m`) it runs for a fixed wall-clock
@@ -28,11 +28,15 @@ C. Pure Python 3 standard library, no dependencies.
   completed and ops/sec over the actual elapsed time — useful for
   soaking a server at steady load rather than racing a fixed
   number of ops.
-  The mix is set with `--mix`: explicit weights (`50:40:10`), a
+  The mix is set with `--mix`: explicit weights (`45:40:10:5`), a
   read:write ratio (`80:20`), or a named preset (`read-heavy`,
-  `balanced`, `write-heavy`). The report splits ops/sec and latency
-  percentiles per operation (SET vs GET vs INCR), so a read-heavy
-  mix shows whether reads or writes dominate the tail.
+  `balanced`, `write-heavy`). DEL deletes a key the workload SET
+  earlier (deleting a missing key replies 0, not an error, so it
+  measures like any other op); the default mix carries a small
+  5% DEL share, like a real cache workload where deletes are rare
+  next to reads and writes. The report splits ops/sec and latency
+  percentiles per operation (SET vs GET vs INCR vs DEL), so a
+  read-heavy mix shows whether reads or writes dominate the tail.
   Keys are picked uniformly by default, or with `--distribution
   zipfian` from a Zipfian distribution (`--zipf-skew`, default 1.0):
   a small hot set of keys takes most of the traffic, like a real
@@ -133,7 +137,7 @@ Start cinder (or any Redis-compatible server) first:
 Then, from this repo:
 
 ```sh
-# 20k ops, 4 clients, default 50:40:10 SET:GET:INCR mix
+# 20k ops, 4 clients, default 45:40:10:5 SET:GET:INCR:DEL mix
 python -m kvbench.cli --host 127.0.0.1 --port 6379 --ops 20000 --clients 4
 
 # same run plus the in-process dict baseline, for comparison
@@ -301,10 +305,11 @@ with `--ops`), `--clients` (default 4), `--keys` (default
 `<prefix>:<rank>` for SET/GET and `<prefix>:counter:<rank>` for
 INCR; a different prefix keeps runs against a shared store from
 colliding, and the prefix is recorded in both reports; an empty
-prefix is rejected), `--value-size` (default 32), `--mix` (default 50:40:10 — a
-`SET:GET:INCR` weight triple, a `READ:WRITE` ratio such as `80:20`,
-or a preset: `read-heavy` 15:80:5, `balanced` 45:45:10,
-`write-heavy` 80:15:5), `--pipeline` (default 1, sequential),
+prefix is rejected), `--value-size` (default 32), `--mix` (default 45:40:10:5 — a
+`SET:GET:INCR:DEL` weight quadruple (a `SET:GET:INCR` triple is
+accepted too, with DEL weight 0), a `READ:WRITE` ratio such as
+`80:20`, or a preset: `read-heavy` 15:75:5:5, `balanced`
+40:45:10:5, `write-heavy` 75:15:5:5), `--pipeline` (default 1, sequential),
 `--distribution` (`uniform` or `zipfian`, default `uniform`),
 `--zipf-skew` (default 1.0, the Zipf exponent for zipfian key
 picking; 0 is uniform), `--hot-keys` (default 5, how many of the
@@ -442,7 +447,7 @@ recorded run shows its one value with no delta and a single
 block; an empty history prints the same "No runs recorded yet"
 message as `--show-history`. Below the overall chart each backend
 also gets a per-operation trend section — one table per op (SET,
-GET, INCR) that ran, with that op's ops/sec, its change versus
+GET, INCR, DEL) that ran, with that op's ops/sec, its change versus
 the previous run that ran the same op, and its p99, plus its own
 sparkline and first-to-last change — so a SET regression reads
 at a glance even when GETs dominate the mix. Runs recorded
@@ -465,7 +470,7 @@ percentage change between them, so a backend whose throughput
 swings run to run reads at a glance — a wide spread says the
 runs vary a lot, a narrow one says the backend is steady. Each
 backend also gets the same table per operation type (SET, GET,
-INCR) that ran, picked independently by that op's ops/sec, so a
+INCR, DEL) that ran, picked independently by that op's ops/sec, so a
 slow-write run that still won overall still shows up as the
 worst SET run. A backend with a single recorded run has that run
 as both best and worst, with 0.0% deltas. With
@@ -758,8 +763,8 @@ same rows per result under `value_size_sweep`, and the workload
 section carries the swept sizes under `sweep_value_size`.
 
 Below the table, each backend gets a per-operation stats table:
-ops, ops/sec, mean, p50, p95 and p99 latency split by SET, GET and
-INCR. Ops that never ran (e.g. INCR in an `80:20` read:write mix)
+ops, ops/sec, mean, p50, p95 and p99 latency split by SET, GET,
+INCR and DEL. Ops that never ran (e.g. INCR in an `80:20` read:write mix)
 are left out. The JSON report carries the same split per result
 under `per_op`.
 
@@ -830,6 +835,14 @@ make test
 
 ## Roadmap
 
+- DEL op in the mix (`--mix 45:40:10:5` by default): DEL
+  deletes a key the workload SET earlier, sharing the SET/GET
+  keyspace (`<prefix>:<rank>`, not the INCR counter keyspace),
+  with per-op ops/sec and latency in both reports, in the history
+  and trend views, in tail attribution, and as a per-op SLO target
+  (`--slo-op DEL:5,0.1`); the old three-part `--mix` form
+  (`50:40:10`) still works, with DEL weight 0, and the presets
+  carry a 5% DEL share. Done in 0.31.0.
 - ~~Authentication (`--password` / `--username`): AUTH on connect
   for password-protected servers — `AUTH password`, or `AUTH
   username password` with `--username` (the Redis 6 ACL form) —

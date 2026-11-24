@@ -30,6 +30,7 @@ def _workload_dict(workload):
             "set": workload.set_weight,
             "get": workload.get_weight,
             "incr": workload.incr_weight,
+            "del": workload.del_weight,
         },
         "mix_label": workload.mix_label or None,
         "seed": workload.seed,
@@ -751,7 +752,7 @@ def render_markdown(results, workload, command_line, comparison=None,
         distribution_line,
         f"- Value size: {workload.value_size} bytes",
         f"- Mix: SET {workload.set_weight} / GET {workload.get_weight} / "
-        f"INCR {workload.incr_weight}"
+        f"INCR {workload.incr_weight} / DEL {workload.del_weight}"
         + (f" ({workload.mix_label})" if workload.mix_label else ""),
         f"- Pipeline depth: {workload.pipeline} command(s) per round trip",
         f"- Socket timeout: {workload.timeout_s:g} s",
@@ -844,7 +845,7 @@ def render_markdown(results, workload, command_line, comparison=None,
         "- The Latency over time section buckets ops by the second they "
         "completed; a second with 0 ops marks a stall.",
         "- The Per-operation stats section splits ops/sec and latency "
-        "percentiles by operation (SET, GET, INCR), so a read-heavy "
+        "percentiles by operation (SET, GET, INCR, DEL), so a read-heavy "
         "mix shows whether reads or writes dominate the tail.",
         "- The Tail-latency attribution section names the factor the "
         "slowest ops come from: one operation type, one client, hot "

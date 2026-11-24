@@ -126,7 +126,7 @@ class TestReport(unittest.TestCase):
         self.assertEqual(parsed["workload"]["keys"], 10)
         self.assertEqual(parsed["workload"]["value_size"], 8)
         self.assertEqual(parsed["workload"]["mix"],
-                         {"set": 50, "get": 40, "incr": 10})
+                         {"set": 50, "get": 40, "incr": 10, "del": 5})
         self.assertEqual(parsed["workload"]["seed"], 1234)
         self.assertEqual(parsed["workload"]["pipeline"], 1)
         row = parsed["results"][0]
@@ -381,7 +381,8 @@ class TestReport(unittest.TestCase):
                             set_weight=15, get_weight=80, incr_weight=5,
                             mix_label="read-heavy")
         text = render_markdown([_result()], workload, "kvbench")
-        self.assertIn("Mix: SET 15 / GET 80 / INCR 5 (read-heavy)", text)
+        self.assertIn("Mix: SET 15 / GET 80 / INCR 5 / DEL 5 (read-heavy)",
+                      text)
         parsed = json.loads(render_json([_result()], workload, "kvbench"))
         self.assertEqual(parsed["workload"]["mix_label"], "read-heavy")
         # No label for an explicit weight string.

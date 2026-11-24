@@ -1,6 +1,6 @@
 """Workload runner.
 
-Runs a configurable SET/GET/INCR mix against any backend that exposes a
+Runs a configurable SET/GET/INCR/DEL mix against any backend that exposes a
 ``command(*args)`` method — a :class:`kvbench.resp.RespClient` talking to
 a server, or the in-process :class:`DictClient` baseline. Each thread
 gets its own client, so the runner works the same way for both.
@@ -50,6 +50,15 @@ class Workload:
     set_weight: int = 50
     get_weight: int = 40
     incr_weight: int = 10
+    # Weight of DEL in the mix: deleting a key it previously SET
+    # (or one another thread SET — keys are shared, so a DEL may
+    # land on a key that was never SET, or one already deleted;
+    # either way the server replies without error and the op is
+    # measured like any other). The default 5 keeps deletes a
+    # small share of the workload, like a real cache workload
+    # where evictions and explicit deletes are rare next to
+    # reads and writes.
+    del_weight: int = 5
     seed: int = 1234
     # Fixed wall-clock run length in seconds, or None for a fixed op
     # count. In duration mode ``ops`` is ignored (normalized to 0):
@@ -122,7 +131,7 @@ class Workload:
     # the reports can record what the run was gated on.
     slo_p99_ms: float = None
     slo_error_rate_pct: float = None
-    # Per-operation SLO thresholds: op name ("SET"/"GET"/"INCR") to a
+    # Per-operation SLO thresholds: op name ("SET"/"GET"/"INCR"/"DEL") to a
     # (p99_ms, error_rate_pct) pair, either of which may be None.
     # Empty means no per-op gate; the global thresholds above still
     # apply. Validated the same way as the global thresholds.
@@ -185,9 +194,9 @@ class Workload:
             raise ValueError(
                 "SLO error-rate threshold must be between 0 and 100")
         for op, thresholds in self.slo_per_op.items():
-            if op not in ("SET", "GET", "INCR"):
+            if op not in ("SET", "GET", "INCR", "DEL"):
                 raise ValueError(
-                    "per-op SLO op must be SET, GET or INCR")
+                    "per-op SLO op must be SET, GET, INCR or DEL")
             p99_ms, error_rate_pct = thresholds
             if p99_ms is not None and p99_ms < 0:
                 raise ValueError(
@@ -200,7 +209,8 @@ class Workload:
             if p99_ms is None and error_rate_pct is None:
                 raise ValueError(
                     "per-op SLO must set at least one threshold")
-        total = self.set_weight + self.get_weight + self.incr_weight
+        total = (self.set_weight + self.get_weight + self.incr_weight
+                 + self.del_weight)
         if total <= 0:
             raise ValueError("at least one op weight must be positive")
         self._total = total
@@ -218,12 +228,14 @@ class BenchmarkResult:
     # run started. Parallel to latencies_ns: one entry per successful
     # op, in the same order.
     times_s: list = field(default_factory=list)
-    # Per-op latencies (ns), keyed by op name ("SET", "GET", "INCR").
+    # Per-op latencies (ns), keyed by op name ("SET", "GET", "INCR",
+    # "DEL").
     # Each list holds the same amortized per-op latencies as
     # latencies_ns, split by operation, so the report can show
     # per-type ops/sec and latency percentiles.
     latencies_by_op: dict = field(default_factory=dict)
-    # Per-op error counts, keyed by op name ("SET", "GET", "INCR").
+    # Per-op error counts, keyed by op name ("SET", "GET", "INCR",
+    # "DEL").
     # Together with latencies_by_op this gives each op's attempted
     # count (successes plus errors), so the SLO gate can cap the
     # error rate per operation type, not just overall.
@@ -320,7 +332,7 @@ class BenchmarkResult:
 
     @property
     def per_op_summary(self):
-        """Per-op latency summaries, in stable SET/GET/INCR order.
+        """Per-op latency summaries, in stable SET/GET/INCR/DEL order.
 
         Each entry is the :func:`summarize` dict for that op plus its
         own ``ops_per_sec`` (count / elapsed). Ops with no samples are
@@ -329,7 +341,7 @@ class BenchmarkResult:
         over the repeats, like the overall figures.
         """
         out = {}
-        for op in ("SET", "GET", "INCR"):
+        for op in ("SET", "GET", "INCR", "DEL"):
             samples = self.latencies_by_op.get(op)
             if not samples:
                 continue
@@ -422,6 +434,10 @@ class DictStore:
                 value = int(self._data.get(args[1], "0")) + 1
                 self._data[args[1]] = str(value)
                 return value
+        if op == "DEL":
+            with self._lock:
+                return 1 if self._data.pop(args[1], None) is not None \
+                    else 0
         if op == "PING":
             return "PONG"
         raise ValueError(f"unsupported op for baseline: {op}")
@@ -460,7 +476,10 @@ def _pick_op(rng, workload):
         return "SET"
     if roll < workload.set_weight + workload.get_weight:
         return "GET"
-    return "INCR"
+    if roll < workload.set_weight + workload.get_weight \
+            + workload.incr_weight:
+        return "INCR"
+    return "DEL"
 
 
 def run_workload(client_factory, workload, name):
@@ -575,6 +594,13 @@ def run_workload(client_factory, workload, name):
                         key = f"{workload.key_prefix}:{rank}"
                         if op == "SET":
                             batch.append(("SET", key, value))
+                        elif op == "DEL":
+                            # DEL shares the SET/GET keyspace: it
+                            # deletes a key the workload SET earlier
+                            # (or one another thread already deleted
+                            # — deleting a missing key is a success
+                            # that replies 0, not an error).
+                            batch.append(("DEL", key))
                         else:
                             batch.append(("GET", key))
                 start = time.perf_counter_ns()
@@ -777,7 +803,7 @@ def run_repeated_workload(client_factory, workload, name, repeat):
     by_ops = sorted(runs, key=lambda r: r.ops_per_sec)
     representative = by_ops[(len(by_ops) - 1) // 2]
     median_per_op = {}
-    for op in ("SET", "GET", "INCR"):
+    for op in ("SET", "GET", "INCR", "DEL"):
         ops_values = [entry["per_op"][op]["ops_per_sec"]
                       for entry in per_run if op in entry["per_op"]]
         p99_values = [entry["per_op"][op]["p99_ms"]

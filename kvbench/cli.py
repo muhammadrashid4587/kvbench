@@ -158,37 +158,41 @@ def json_path_for(output_path, json_arg):
     return stem + ".json" if ext else output_path + ".json"
 
 
-# Named read/write mix presets, as SET:GET:INCR weights. Reads are
+# Named read/write mix presets, as SET:GET:INCR:DEL weights. Reads are
 # GETs, writes are SETs plus a small INCR share so counters still get
-# exercised; the default 50:40:10 sits between balanced and
-# write-heavy. ``--mix read-heavy`` is the same shape as
-# ``--mix 80:20`` (read:write), just with INCR kept in the mix.
+# exercised, and DELs are a small share of the writes — a cache
+# workload deletes far less often than it reads or writes. The
+# default 45:40:10:5 sits between balanced and write-heavy.
+# ``--mix read-heavy`` is the same shape as ``--mix 80:20``
+# (read:write), just with INCR and DEL kept in the mix.
 MIX_PRESETS = {
-    "read-heavy": (15, 80, 5),
-    "balanced": (45, 45, 10),
-    "write-heavy": (80, 15, 5),
+    "read-heavy": (15, 75, 5, 5),
+    "balanced": (40, 45, 10, 5),
+    "write-heavy": (75, 15, 5, 5),
 }
 
 
 def _parse_mix(text):
-    """Parse a ``--mix`` value into (set, get, incr, label).
+    """Parse a ``--mix`` value into (set, get, incr, del, label).
 
-    Accepts three forms:
+    Accepts four forms:
 
-    - ``SET:GET:INCR`` weights, e.g. ``50:40:10`` (label is "").
+    - ``SET:GET:INCR:DEL`` weights, e.g. ``45:40:10:5`` (label is "").
+    - ``SET:GET:INCR`` weights, e.g. ``50:40:10`` — the old form,
+      DEL weight 0 (label is "").
     - ``READ:WRITE`` ratio, e.g. ``80:20`` — reads are GETs, writes
-      are SETs, INCR weight 0 (label is "").
+      are SETs, INCR and DEL weight 0 (label is "").
     - a preset name: ``read-heavy``, ``balanced``, ``write-heavy``
       (label is the preset name, so the report can name the mix).
     """
     if text in MIX_PRESETS:
-        set_w, get_w, incr_w = MIX_PRESETS[text]
-        return set_w, get_w, incr_w, text
+        set_w, get_w, incr_w, del_w = MIX_PRESETS[text]
+        return set_w, get_w, incr_w, del_w, text
     parts = text.split(":")
-    if len(parts) not in (2, 3):
+    if len(parts) not in (2, 3, 4):
         raise ValueError(
-            "mix must be SET:GET:INCR, READ:WRITE, or a preset "
-            "(read-heavy, balanced, write-heavy)")
+            "mix must be SET:GET:INCR:DEL, SET:GET:INCR, READ:WRITE, "
+            "or a preset (read-heavy, balanced, write-heavy)")
     try:
         values = [int(p) for p in parts]
     except ValueError as exc:
@@ -196,10 +200,14 @@ def _parse_mix(text):
     if any(v < 0 for v in values) or sum(values) <= 0:
         raise ValueError("mix weights must be non-negative and sum > 0")
     if len(values) == 2:
-        # READ:WRITE — reads are GETs, writes are SETs, no INCRs.
+        # READ:WRITE — reads are GETs, writes are SETs, no INCRs
+        # or DELs.
         read_w, write_w = values
-        return write_w, read_w, 0, ""
-    return values[0], values[1], values[2], ""
+        return write_w, read_w, 0, 0, ""
+    if len(values) == 3:
+        # SET:GET:INCR — the old form, no DELs.
+        return values[0], values[1], values[2], 0, ""
+    return values[0], values[1], values[2], values[3], ""
 
 
 def _parse_duration(text):
@@ -319,8 +327,8 @@ def _parse_slo_op(text):
     when their p99 is above 5 ms or their error rate is above 0.1%.
     Either threshold may be left empty (``SET:5,`` gates p99 only,
     ``SET:,0.1`` gates the error rate only), but at least one must
-    be set. The op name is case-insensitive and must be SET, GET or
-    INCR; the p99 threshold must be non-negative and the error-rate
+    be set. The op name is case-insensitive and must be SET, GET, INCR
+    or DEL; the p99 threshold must be non-negative and the error-rate
     threshold between 0 and 100.
     """
     if not text or ":" not in text:
@@ -328,9 +336,9 @@ def _parse_slo_op(text):
             "slo-op must be OP:P99,ERR, e.g. SET:5,0.1")
     op, _, rest = text.partition(":")
     op = op.strip().upper()
-    if op not in ("SET", "GET", "INCR"):
+    if op not in ("SET", "GET", "INCR", "DEL"):
         raise ValueError(
-            "slo-op op must be SET, GET or INCR")
+            "slo-op op must be SET, GET, INCR or DEL")
     parts = rest.split(",")
     if len(parts) != 2:
         raise ValueError(
@@ -444,9 +452,10 @@ def build_parser():
                         "against a shared store from colliding, and "
                         "the prefix is recorded in both reports")
     parser.add_argument("--value-size", type=int, default=32)
-    parser.add_argument("--mix", default="50:40:10",
-                        help="SET:GET:INCR weights (e.g. 50:40:10), a "
-                        "READ:WRITE ratio (e.g. 80:20), or a preset: "
+    parser.add_argument("--mix", default="45:40:10:5",
+                        help="SET:GET:INCR:DEL weights (e.g. 45:40:10:5), "
+                        "a SET:GET:INCR triple (e.g. 50:40:10, no DELs), "
+                        "a READ:WRITE ratio (e.g. 80:20), or a preset: "
                         "read-heavy, balanced, write-heavy")
     parser.add_argument("--pipeline", type=int, default=1,
                         help="commands sent per round trip "
@@ -779,7 +788,7 @@ def main(argv=None):
             raise ValueError(
                 "--password must not be empty: pass a real password, "
                 "or leave it out for a server with no auth")
-        set_w, get_w, incr_w, mix_label = _parse_mix(args.mix)
+        set_w, get_w, incr_w, del_w, mix_label = _parse_mix(args.mix)
         compare_targets = [_parse_host_port(t) for t in args.compare]
         duration_s = (_parse_duration(args.duration)
                       if args.duration else None)
@@ -864,6 +873,7 @@ def main(argv=None):
             set_weight=set_w,
             get_weight=get_w,
             incr_weight=incr_w,
+            del_weight=del_w,
             seed=args.seed,
             pipeline=args.pipeline,
             timeout_s=args.timeout,

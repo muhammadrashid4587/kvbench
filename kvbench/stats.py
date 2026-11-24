@@ -155,7 +155,7 @@ def attribute_tail(latencies_ns, times_s, by_op, by_client, hot_ns,
 
     by_op_map = by_op or {}
     op_entries = []
-    for op in ("SET", "GET", "INCR"):
+    for op in ("SET", "GET", "INCR", "DEL"):
         rest = [v for other, s in by_op_map.items()
                 if other != op for v in s]
         entry = factor(op, by_op_map.get(op), rest)

@@ -82,10 +82,10 @@ def load_slo_preset(path):
                 "mapping op names to thresholds")
         for op, thresholds in raw_per_op.items():
             op = op.upper() if isinstance(op, str) else op
-            if op not in ("SET", "GET", "INCR"):
+            if op not in ("SET", "GET", "INCR", "DEL"):
                 raise ValueError(
-                    f"slo preset {path}: per_op op must be SET, GET "
-                    "or INCR")
+                    f"slo preset {path}: per_op op must be SET, GET, "
+                    f"INCR or DEL")
             if not isinstance(thresholds, dict):
                 raise ValueError(
                     f"slo preset {path}: per_op {op} must be an "
@@ -166,15 +166,15 @@ def per_op_error_rate_pct(result, op):
 def _evaluate_per_op(result, per_op):
     """Per-operation SLO verdicts for one result.
 
-    ``per_op`` maps an op name (``SET``/``GET``/``INCR``) to a
+    ``per_op`` maps an op name (``SET``/``GET``/``INCR``/``DEL``) to a
     ``(p99_ms, error_rate_pct)`` pair, either of which may be None
     (that side of the gate is not set for that op). Ops that never
     ran — no successful latencies and no errors — are skipped: there
     is nothing to gate. Returns a list of per-op entry dicts in
-    stable SET/GET/INCR order.
+    stable SET/GET/INCR/DEL order.
     """
     entries = []
-    for op in ("SET", "GET", "INCR"):
+    for op in ("SET", "GET", "INCR", "DEL"):
         if op not in per_op:
             continue
         p99_threshold, rate_threshold = per_op[op]
@@ -214,7 +214,7 @@ def evaluate_slo(results, p99_ms=None, error_rate_threshold_pct=None,
     which ones breached, and a ``pass``/``breach`` verdict), and the
     count of breaching backends.
 
-    ``per_op`` maps an op name (``SET``/``GET``/``INCR``) to a
+    ``per_op`` maps an op name (``SET``/``GET``/``INCR``/``DEL``) to a
     ``(p99_ms, error_rate_pct)`` pair, either of which may be None:
     each operation type is gated on its own thresholds as well as
     the global ones, so a slow SET breaches even when the overall

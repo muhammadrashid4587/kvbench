@@ -151,9 +151,12 @@ class TestParseSloOp(unittest.TestCase):
     def test_error_rate_only(self):
         self.assertEqual(_parse_slo_op("INCR:,0.5"), ("INCR", None, 0.5))
 
+    def test_del_op_accepted(self):
+        self.assertEqual(_parse_slo_op("DEL:5,0.1"), ("DEL", 5.0, 0.1))
+
     def test_unknown_op_rejected(self):
         with self.assertRaises(ValueError):
-            _parse_slo_op("DEL:5,0.1")
+            _parse_slo_op("APPEND:5,0.1")
 
     def test_missing_colon_rejected(self):
         with self.assertRaises(ValueError):
@@ -265,7 +268,7 @@ class TestLoadSloPreset(unittest.TestCase):
 
     def test_unknown_op_rejected(self):
         path = self._write_preset(json.dumps({
-            "per_op": {"DEL": {"p99_ms": 1}}}))
+            "per_op": {"APPEND": {"p99_ms": 1}}}))
         with self.assertRaises(ValueError):
             load_slo_preset(path)
 
@@ -415,7 +418,11 @@ class TestWorkloadValidation(unittest.TestCase):
 
     def test_per_op_unknown_op_rejected(self):
         with self.assertRaises(ValueError):
-            Workload(slo_per_op={"DEL": (1.0, None)})
+            Workload(slo_per_op={"APPEND": (1.0, None)})
+
+    def test_per_op_del_accepted(self):
+        workload = Workload(slo_per_op={"DEL": (5.0, 0.1)})
+        self.assertEqual(workload.slo_per_op, {"DEL": (5.0, 0.1)})
 
     def test_per_op_negative_p99_rejected(self):
         with self.assertRaises(ValueError):
@@ -539,7 +546,7 @@ class TestSloReport(unittest.TestCase):
 
 
 class _FakeRespHandler(socketserver.StreamRequestHandler):
-    """Minimal RESP: SET/GET/INCR against the server's own dict."""
+    """Minimal RESP: SET/GET/INCR/DEL against the server's own dict."""
 
     def handle(self):
         store = self.server.store
@@ -571,6 +578,10 @@ class _FakeRespHandler(socketserver.StreamRequestHandler):
                 value = int(store.get(args[1], "0")) + 1
                 store[args[1]] = str(value)
                 self.wfile.write(f":{value}\r\n".encode())
+            elif op == "DEL":
+                removed = 1 if args[1] in store else 0
+                store.pop(args[1], None)
+                self.wfile.write(f":{removed}\r\n".encode())
             else:
                 self.wfile.write(b"-ERR unknown command\r\n")
             self.wfile.flush()
@@ -676,7 +687,7 @@ class TestSloCli(unittest.TestCase):
             ["SET"])
 
     def test_invalid_per_op_rejected(self):
-        self.assertEqual(self._run("--slo-op", "DEL:1,1"), 2)
+        self.assertEqual(self._run("--slo-op", "APPEND:1,1"), 2)
         self.assertEqual(self._run("--slo-op", "SET:1"), 2)
         self.assertEqual(self._run("--slo-op", "SET:,"), 2)
 

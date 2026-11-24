@@ -13,7 +13,7 @@ blocks the trend view. ``--trend`` renders the same history as an
 ops/sec-over-time chart per backend, with a sparkline and the
 change versus the previous run, and since 0.22.0 each record also
 carries per-op throughput and latency, so the trend view tracks
-SET, GET and INCR separately — a slow write no longer hides
+SET, GET, INCR and DEL separately — a slow write no longer hides
 inside the overall ops/sec. ``--best-worst`` picks the best and
 worst runs per backend (and per operation) out of the same
 history, with the spread between them, so a backend whose
@@ -214,7 +214,7 @@ def _per_op_trend_lines(runs, window):
     section at all.
     """
     lines = []
-    for op in ("SET", "GET", "INCR"):
+    for op in ("SET", "GET", "INCR", "DEL"):
         # The delta is against the previous run that actually ran
         # this op, scanning all runs so a run outside the window
         # still counts as the previous one — the same rule the
@@ -276,7 +276,7 @@ def format_trend(entries, limit=20):
     ops/sec, the change versus the previous run of that backend,
     and p99 alongside, plus a sparkline of ops/sec over those runs
     (oldest to newest) and the first-to-last change, followed by
-    the same chart per operation type (SET, GET, INCR) for the ops
+    the same chart per operation type (SET, GET, INCR, DEL) for the ops
     that ran, so each op's throughput trend reads on its own. A
     corrupt line never reaches here — ``load_history`` already
     skips it — and a backend with a single recorded run shows no
@@ -407,7 +407,7 @@ def best_worst_comparison(entries, workload=None):
     change between them — best vs worst, so a wide spread says
     the backend's performance varies a lot run to run, while a
     narrow one says it is steady. The same pick is made per
-    operation type (SET, GET, INCR) from the per-op data, so a
+    operation type (SET, GET, INCR, DEL) from the per-op data, so a
     slow-write run that still won overall still shows up as the
     worst SET run. When ``workload`` is given (a workload dict
     in the shape of a history record's ``workload``), only runs
@@ -436,7 +436,7 @@ def best_worst_comparison(entries, workload=None):
             continue
         best, worst, ops_delta, p99_delta = pair
         per_op = {}
-        for op in ("SET", "GET", "INCR"):
+        for op in ("SET", "GET", "INCR", "DEL"):
             op_runs = []
             for entry in runs:
                 op_entry = (entry.get("per_op") or {}).get(op)
@@ -558,7 +558,7 @@ def format_best_worst(entries, workload=None):
         sections.extend(_best_worst_lines(
             "Overall", backend["best"], backend["worst"],
             backend["ops_sec_delta_pct"], backend["p99_delta_pct"]))
-        for op in ("SET", "GET", "INCR"):
+        for op in ("SET", "GET", "INCR", "DEL"):
             op_entry = backend["per_op"].get(op)
             if op_entry is None:
                 continue
