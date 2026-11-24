@@ -444,6 +444,18 @@ class TestKeyspaceSweep(unittest.TestCase):
             # second-slowest op, and a single scheduling stall can
             # push the mean above it — the mean is not bounded by
             # the p99 in general.
+            # Each step carries per-op latency histograms in the
+            # same shape as the main run's histograms_by_op: one
+            # log-spaced bucket list per op that ran, and the
+            # buckets across ops partition the step's ops.
+            per_op = entry["histograms_by_op"]
+            self.assertTrue(per_op)
+            self.assertTrue(set(per_op) <= {"SET", "GET", "INCR",
+                                            "DEL"})
+            self.assertEqual(
+                sum(sum(b["count"] for b in buckets)
+                    for buckets in per_op.values()),
+                entry["ops"])
         # The base workload is untouched: the sweep copies it per size.
         self.assertEqual(workload.keys, 10)
 
@@ -479,6 +491,18 @@ class TestClientSweep(unittest.TestCase):
             self.assertGreater(entry["ops_per_sec"], 0)
             self.assertGreaterEqual(entry["mean_ms"], 0)
             self.assertGreaterEqual(entry["p99_ms"], 0)
+            # Each step carries per-op latency histograms in the
+            # same shape as the main run's histograms_by_op: one
+            # log-spaced bucket list per op that ran, and the
+            # buckets across ops partition the step's ops.
+            per_op = entry["histograms_by_op"]
+            self.assertTrue(per_op)
+            self.assertTrue(set(per_op) <= {"SET", "GET", "INCR",
+                                            "DEL"})
+            self.assertEqual(
+                sum(sum(b["count"] for b in buckets)
+                    for buckets in per_op.values()),
+                entry["ops"])
         # The base workload is untouched: the sweep copies it per count.
         self.assertEqual(workload.clients, 2)
 
@@ -518,6 +542,18 @@ class TestValueSizeSweep(unittest.TestCase):
             # No p99 >= mean check: with 200 samples a single
             # scheduling stall can push the mean above the p99 —
             # see TestKeyspaceSweep.
+            # Each step carries per-op latency histograms in the
+            # same shape as the main run's histograms_by_op: one
+            # log-spaced bucket list per op that ran, and the
+            # buckets across ops partition the step's ops.
+            per_op = entry["histograms_by_op"]
+            self.assertTrue(per_op)
+            self.assertTrue(set(per_op) <= {"SET", "GET", "INCR",
+                                            "DEL"})
+            self.assertEqual(
+                sum(sum(b["count"] for b in buckets)
+                    for buckets in per_op.values()),
+                entry["ops"])
         # The base workload is untouched: the sweep copies it per size.
         self.assertEqual(workload.value_size, 8)
 

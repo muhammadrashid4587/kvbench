@@ -466,9 +466,19 @@ class TestReport(unittest.TestCase):
             latencies_ns=[100_000] * 100,
             sweep=[
                 {"keys": 10, "ops": 100, "ops_per_sec": 10_000,
-                 "mean_ms": 0.1, "p99_ms": 0.12},
+                 "mean_ms": 0.1, "p99_ms": 0.12,
+                 "histograms_by_op": {
+                     "SET": [{"upper_ms": 0.1, "count": 60}],
+                     "GET": [{"upper_ms": 0.1, "count": 0},
+                             {"upper_ms": 0.25, "count": 40}],
+                 }},
                 {"keys": 100, "ops": 100, "ops_per_sec": 9_000,
-                 "mean_ms": 0.11, "p99_ms": 0.15},
+                 "mean_ms": 0.11, "p99_ms": 0.15,
+                 "histograms_by_op": {
+                     "SET": [{"upper_ms": 0.1, "count": 50}],
+                     "GET": [{"upper_ms": 0.1, "count": 0},
+                             {"upper_ms": 0.25, "count": 50}],
+                 }},
             ],
         )
         text = render_markdown([result], workload, "kvbench")
@@ -480,6 +490,17 @@ class TestReport(unittest.TestCase):
         self.assertIn("| 10 | 100 | 10,000 | 0.100 | 0.120 |", text)
         self.assertIn("| 100 | 100 | 9,000 | 0.110 | 0.150 |", text)
         self.assertIn("how keyspace size affects throughput", text)
+        # Each swept size gets its own per-op histograms, in the
+        # same format as the main run's, so a size where one op
+        # type slows down names the op.
+        self.assertIn("#### 10 keys — per-op latency histogram", text)
+        self.assertIn("#### 100 keys — per-op latency histogram", text)
+        self.assertIn("SET (60 ops)", text)
+        self.assertIn("GET (40 ops)", text)
+        self.assertIn("<= 0.25 ms: 40 (100.0%)", text)
+        self.assertIn("SET (50 ops)", text)
+        self.assertIn("GET (50 ops)", text)
+        self.assertIn("keyspace_sweep[].histograms_by_op", text)
         parsed = json.loads(render_json([result], workload, "kvbench"))
         self.assertEqual(parsed["workload"]["sweep_keyspace"], [10, 100])
         sweep = parsed["results"][0]["keyspace_sweep"]
@@ -487,7 +508,38 @@ class TestReport(unittest.TestCase):
         self.assertEqual(sweep[0]["keys"], 10)
         self.assertAlmostEqual(sweep[0]["ops_per_sec"], 10_000)
         self.assertAlmostEqual(sweep[0]["p99_ms"], 0.12)
+        self.assertEqual(sweep[0]["histograms_by_op"]["SET"],
+                         [{"upper_ms": 0.1, "count": 60}])
+        self.assertEqual(sweep[0]["histograms_by_op"]["GET"],
+                         [{"upper_ms": 0.1, "count": 0},
+                          {"upper_ms": 0.25, "count": 40}])
         self.assertEqual(sweep[1]["keys"], 100)
+        self.assertEqual(sweep[1]["histograms_by_op"]["SET"],
+                         [{"upper_ms": 0.1, "count": 50}])
+
+    def test_sweep_without_histograms_renders_table_only(self):
+        # Entries from before 0.33.0 carry no histograms_by_op:
+        # the table still renders and no per-step histogram block
+        # is invented.
+        workload = Workload(ops=100, clients=2, keys=10, value_size=8,
+                            sweep_keyspace=[10, 100])
+        result = BenchmarkResult(
+            name="cinder", ops=100, elapsed_s=0.01, errors=0,
+            latencies_ns=[100_000] * 100,
+            sweep=[
+                {"keys": 10, "ops": 100, "ops_per_sec": 10_000,
+                 "mean_ms": 0.1, "p99_ms": 0.12},
+                {"keys": 100, "ops": 100, "ops_per_sec": 9_000,
+                 "mean_ms": 0.11, "p99_ms": 0.15},
+            ],
+        )
+        text = render_markdown([result], workload, "kvbench")
+        self.assertIn("| 10 | 100 | 10,000 | 0.100 | 0.120 |", text)
+        self.assertNotIn("— per-op latency histogram", text)
+        parsed = json.loads(render_json([result], workload, "kvbench"))
+        sweep = parsed["results"][0]["keyspace_sweep"]
+        self.assertNotIn("histograms_by_op", sweep[0])
+        self.assertNotIn("histograms_by_op", sweep[1])
 
     def test_no_sweep_omits_section(self):
         workload = _workload()
@@ -507,9 +559,19 @@ class TestReport(unittest.TestCase):
             latencies_ns=[100_000] * 100,
             client_sweep=[
                 {"clients": 1, "ops": 100, "ops_per_sec": 8_000,
-                 "mean_ms": 0.12, "p99_ms": 0.15},
+                 "mean_ms": 0.12, "p99_ms": 0.15,
+                 "histograms_by_op": {
+                     "SET": [{"upper_ms": 0.1, "count": 60}],
+                     "GET": [{"upper_ms": 0.1, "count": 0},
+                             {"upper_ms": 0.25, "count": 40}],
+                 }},
                 {"clients": 4, "ops": 100, "ops_per_sec": 10_000,
-                 "mean_ms": 0.1, "p99_ms": 0.12},
+                 "mean_ms": 0.1, "p99_ms": 0.12,
+                 "histograms_by_op": {
+                     "SET": [{"upper_ms": 0.1, "count": 50}],
+                     "GET": [{"upper_ms": 0.1, "count": 0},
+                             {"upper_ms": 0.25, "count": 50}],
+                 }},
             ],
         )
         text = render_markdown([result], workload, "kvbench")
@@ -521,6 +583,10 @@ class TestReport(unittest.TestCase):
         self.assertIn("| 1 | 100 | 8,000 | 0.120 | 0.150 |", text)
         self.assertIn("| 4 | 100 | 10,000 | 0.100 | 0.120 |", text)
         self.assertIn("how concurrency affects throughput", text)
+        self.assertIn("#### 1 clients — per-op latency histogram", text)
+        self.assertIn("#### 4 clients — per-op latency histogram", text)
+        self.assertIn("SET (60 ops)", text)
+        self.assertIn("client_sweep[].histograms_by_op", text)
         parsed = json.loads(render_json([result], workload, "kvbench"))
         self.assertEqual(parsed["workload"]["sweep_clients"], [1, 4])
         sweep = parsed["results"][0]["client_sweep"]
@@ -528,6 +594,8 @@ class TestReport(unittest.TestCase):
         self.assertEqual(sweep[0]["clients"], 1)
         self.assertAlmostEqual(sweep[0]["ops_per_sec"], 8_000)
         self.assertAlmostEqual(sweep[0]["p99_ms"], 0.15)
+        self.assertEqual(sweep[0]["histograms_by_op"]["SET"],
+                         [{"upper_ms": 0.1, "count": 60}])
         self.assertEqual(sweep[1]["clients"], 4)
 
     def test_no_client_sweep_omits_section(self):
@@ -548,9 +616,19 @@ class TestReport(unittest.TestCase):
             latencies_ns=[100_000] * 100,
             value_sweep=[
                 {"value_size": 8, "ops": 100, "ops_per_sec": 10_000,
-                 "mean_ms": 0.1, "p99_ms": 0.12},
+                 "mean_ms": 0.1, "p99_ms": 0.12,
+                 "histograms_by_op": {
+                     "SET": [{"upper_ms": 0.1, "count": 60}],
+                     "GET": [{"upper_ms": 0.1, "count": 0},
+                             {"upper_ms": 0.25, "count": 40}],
+                 }},
                 {"value_size": 64, "ops": 100, "ops_per_sec": 9_000,
-                 "mean_ms": 0.11, "p99_ms": 0.15},
+                 "mean_ms": 0.11, "p99_ms": 0.15,
+                 "histograms_by_op": {
+                     "SET": [{"upper_ms": 0.1, "count": 50}],
+                     "GET": [{"upper_ms": 0.1, "count": 0},
+                             {"upper_ms": 0.25, "count": 50}],
+                 }},
             ],
         )
         text = render_markdown([result], workload, "kvbench")
@@ -562,6 +640,12 @@ class TestReport(unittest.TestCase):
         self.assertIn("| 8 | 100 | 10,000 | 0.100 | 0.120 |", text)
         self.assertIn("| 64 | 100 | 9,000 | 0.110 | 0.150 |", text)
         self.assertIn("how value size affects throughput", text)
+        self.assertIn("#### 8 byte values — per-op latency histogram",
+                      text)
+        self.assertIn("#### 64 byte values — per-op latency histogram",
+                      text)
+        self.assertIn("SET (60 ops)", text)
+        self.assertIn("value_size_sweep[].histograms_by_op", text)
         parsed = json.loads(render_json([result], workload, "kvbench"))
         self.assertEqual(parsed["workload"]["sweep_value_size"], [8, 64])
         sweep = parsed["results"][0]["value_size_sweep"]
@@ -569,6 +653,8 @@ class TestReport(unittest.TestCase):
         self.assertEqual(sweep[0]["value_size"], 8)
         self.assertAlmostEqual(sweep[0]["ops_per_sec"], 10_000)
         self.assertAlmostEqual(sweep[0]["p99_ms"], 0.12)
+        self.assertEqual(sweep[0]["histograms_by_op"]["SET"],
+                         [{"upper_ms": 0.1, "count": 60}])
         self.assertEqual(sweep[1]["value_size"], 64)
 
     def test_no_value_size_sweep_omits_section(self):

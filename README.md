@@ -65,18 +65,21 @@ C. Pure Python 3 standard library, no dependencies.
   shows which keys the run touched.
   With `--sweep-keyspace 100,1000,10000,100000` the same workload
   is re-run once per keyspace size, and the reports show ops/sec
-  and p99 per size, so a run shows how keyspace size affects
-  throughput — a hash-table resize or a cache that stops fitting
-  shows up as a step down in the sweep table.
+  and p99 per size, plus a per-operation latency histogram per
+  size, so a run shows how keyspace size affects throughput — a
+  hash-table resize or a cache that stops fitting shows up as a
+  step down in the sweep table.
   With `--sweep-clients 1,2,4,8` the same workload is re-run once
   per client count, and the reports show ops/sec and p99 per
-  count, so a run shows how concurrency affects throughput — where
-  adding clients stops helping and the server saturates.
+  count, plus a per-operation latency histogram per count, so a run
+  shows how concurrency affects throughput — where adding clients
+  stops helping and the server saturates.
   With `--sweep-value-size 32,128,1024` the same workload is
   re-run once per value size in bytes, and the reports show ops/sec
-  and p99 per size, so a run shows how value size affects
-  throughput — a store that copies values on every SET slows as
-  values grow, while one that only moves pointers does not.
+  and p99 per size, plus a per-operation latency histogram per
+  size, so a run shows how value size affects throughput — a store
+  that copies values on every SET slows as values grow, while one
+  that only moves pointers does not.
   When the tail is high the reports attribute it: slow ops (at or
   above the overall p99) are broken down by operation type, by
   client, by hot vs cold keys, and by second, and the finding
@@ -749,16 +752,24 @@ JSON report carries the same buckets per result under
 With `--sweep-keyspace` the report has a Keyspace sweep section
 right below the results table: one table per backend with a row per
 swept size — keys, ops, ops/sec, mean and p99 — so the effect of
-keyspace size on throughput reads at a glance. The JSON report
-carries the same rows per result under `keyspace_sweep`, and the
+keyspace size on throughput reads at a glance. Each swept size also
+gets its own per-operation latency histogram block under the table,
+with the same log-spaced buckets per op as the regular run's
+per-op histograms, so a size where one op type slows down names
+the op. The JSON report
+carries the same rows per result under `keyspace_sweep`, with the
+per-op buckets per step under `histograms_by_op`, and the
 workload section carries the swept sizes under `sweep_keyspace`.
 
 With `--sweep-clients` the report has a Client sweep section right
 below the Keyspace sweep (or the results table, when there is no
 keyspace sweep): one table per backend with a row per swept count
 — clients, ops, ops/sec, mean and p99 — so the effect of
-concurrency on throughput reads at a glance. The JSON report
-carries the same rows per result under `client_sweep`, and the
+concurrency on throughput reads at a glance. Each swept count also
+gets its own per-operation latency histogram block under the table.
+The JSON report
+carries the same rows per result under `client_sweep`, with the
+per-op buckets per step under `histograms_by_op`, and the
 workload section carries the swept counts under `sweep_clients`.
 
 With `--sweep-value-size` the report has a Value size sweep section
@@ -767,9 +778,11 @@ table, when there is no client sweep): one table per backend with a
 row per swept size — value size in bytes, ops, ops/sec, mean and
 p99 — so the effect of value size on throughput reads at a glance:
 a store that copies values on every SET slows as values grow, while
-one that only moves pointers does not. The JSON report carries the
-same rows per result under `value_size_sweep`, and the workload
-section carries the swept sizes under `sweep_value_size`.
+one that only moves pointers does not. Each swept size also gets
+its own per-operation latency histogram block under the table. The JSON report carries the
+same rows per result under `value_size_sweep`, with the
+per-op buckets per step under `histograms_by_op`, and the
+workload section carries the swept sizes under `sweep_value_size`.
 
 Below the table, each backend gets a per-operation stats table:
 ops, ops/sec, mean, p50, p95 and p99 latency split by SET, GET,
@@ -844,6 +857,16 @@ make test
 
 ## Roadmap
 
+- Per-operation latency histograms for sweep runs: each sweep step
+  (keyspace, client count, value size) carries the same log-spaced
+  buckets per operation that ran as the regular run's
+  `histograms_by_op` — under `keyspace_sweep[]`,
+  `client_sweep[]` and `value_size_sweep[]` in JSON, and as a
+  per-step per-op histogram block under each sweep table in
+  Markdown — so a sweep step where one op type slows down names
+  the op instead of just moving the p99. Sweep entries written
+  before 0.33.0 carry no `histograms_by_op` and render the table
+  only. Done in 0.33.0.
 - Per-operation latency histograms: the same log-spaced buckets
   as the overall histogram, drawn separately for each operation
   that ran (SET, GET, INCR, DEL) in a Per-operation latency

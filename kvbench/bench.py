@@ -272,21 +272,28 @@ class BenchmarkResult:
     # Keyspace sweep results for this backend: one entry per swept
     # size, in ascending size order, each with the size (``keys``),
     # the ops completed, and the ops/sec, mean and p99 latency of
-    # that run. Empty when no sweep ran (``--sweep-keyspace`` not
+    # that run, plus the per-operation latency histograms of that
+    # run (``histograms_by_op`` — the same log-spaced buckets per
+    # op as the main run's, so a slow op type's shape shows per
+    # size). Empty when no sweep ran (``--sweep-keyspace`` not
     # given). The full latency samples of the sweep runs are not
     # kept — only these summaries.
     sweep: list = field(default_factory=list)
     # Client-count sweep results for this backend: one entry per
     # swept count, in ascending count order, each with the count
     # (``clients``), the ops completed, and the ops/sec, mean and
-    # p99 latency of that run. Empty when no sweep ran
-    # (``--sweep-clients`` not given). Same shape as ``sweep``.
+    # p99 latency of that run, plus the per-operation latency
+    # histograms of that run (``histograms_by_op``). Empty when no
+    # sweep ran (``--sweep-clients`` not given). Same shape as
+    # ``sweep``.
     client_sweep: list = field(default_factory=list)
     # Value-size sweep results for this backend: one entry per
     # swept size, in ascending size order, each with the size
     # (``value_size`` in bytes), the ops completed, and the ops/sec,
-    # mean and p99 latency of that run. Empty when no sweep ran
-    # (``--sweep-value-size`` not given). Same shape as ``sweep``.
+    # mean and p99 latency of that run, plus the per-operation
+    # latency histograms of that run (``histograms_by_op``). Empty
+    # when no sweep ran (``--sweep-value-size`` not given). Same
+    # shape as ``sweep``.
     value_sweep: list = field(default_factory=list)
     # Repeated-run detail (see run_repeated_workload): one summary
     # dict per run, in run order, each with the run index (``run``),
@@ -847,8 +854,11 @@ def run_keyspace_sweep(client_factory, workload, sizes):
     by that size; everything else (ops, clients, mix, distribution,
     pipeline, warmup, seed) is identical, so the per-size numbers
     isolate the effect of keyspace size on throughput. Returns a
-    list of ``{"keys", "ops", "ops_per_sec", "mean_ms", "p99_ms"}``
-    dicts, in the order ``sizes`` was given. If a run cannot reach
+    list of ``{"keys", "ops", "ops_per_sec", "mean_ms", "p99_ms",
+    "histograms_by_op"}`` dicts, in the order ``sizes`` was given —
+    the per-op histograms are the same log-spaced buckets per
+    operation as the main run's ``histograms_by_op``, so a slow op
+    type's latency shape shows per size. If a run cannot reach
     the backend the sweep stops there and the sizes completed so far
     are returned — the caller reports the shortfall.
     """
@@ -867,6 +877,7 @@ def run_keyspace_sweep(client_factory, workload, sizes):
             "ops_per_sec": result.ops_per_sec,
             "mean_ms": summary["mean_ms"],
             "p99_ms": summary["p99_ms"],
+            "histograms_by_op": result.per_op_histograms,
         })
     return out
 
@@ -880,9 +891,12 @@ def run_client_sweep(client_factory, workload, counts):
     per-count numbers isolate the effect of concurrency on
     throughput — where adding clients stops helping and the server
     saturates. Returns a list of ``{"clients", "ops", "ops_per_sec",
-    "mean_ms", "p99_ms"}`` dicts, in the order ``counts`` was
-    given. If a run cannot reach the backend the sweep stops there
-    and the counts completed so far are returned — the caller
+    "mean_ms", "p99_ms", "histograms_by_op"}`` dicts, in the order
+    ``counts`` was given — the per-op histograms are the same
+    log-spaced buckets per operation as the main run's
+    ``histograms_by_op``, so a slow op type's latency shape shows
+    per count. If a run cannot reach the backend the sweep stops
+    there and the counts completed so far are returned — the caller
     reports the shortfall.
     """
     out = []
@@ -900,6 +914,7 @@ def run_client_sweep(client_factory, workload, counts):
             "ops_per_sec": result.ops_per_sec,
             "mean_ms": summary["mean_ms"],
             "p99_ms": summary["p99_ms"],
+            "histograms_by_op": result.per_op_histograms,
         })
     return out
 
@@ -913,9 +928,12 @@ def run_value_size_sweep(client_factory, workload, sizes):
     so the per-size numbers isolate the effect of value size on
     throughput — whether the store's cost grows with the bytes it
     moves. Returns a list of ``{"value_size", "ops", "ops_per_sec",
-    "mean_ms", "p99_ms"}`` dicts, in the order ``sizes`` was
-    given. If a run cannot reach the backend the sweep stops there
-    and the sizes completed so far are returned — the caller
+    "mean_ms", "p99_ms", "histograms_by_op"}`` dicts, in the order
+    ``sizes`` was given — the per-op histograms are the same
+    log-spaced buckets per operation as the main run's
+    ``histograms_by_op``, so a slow op type's latency shape shows
+    per size. If a run cannot reach the backend the sweep stops
+    there and the sizes completed so far are returned — the caller
     reports the shortfall.
     """
     out = []
@@ -933,5 +951,6 @@ def run_value_size_sweep(client_factory, workload, sizes):
             "ops_per_sec": result.ops_per_sec,
             "mean_ms": summary["mean_ms"],
             "p99_ms": summary["p99_ms"],
+            "histograms_by_op": result.per_op_histograms,
         })
     return out

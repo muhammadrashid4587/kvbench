@@ -112,14 +112,20 @@ def _result_dict(result, top_n=5):
         # not part of ``ops`` and contribute no latencies.
         "warmup_ops": result.warmup_ops,
         # Keyspace sweep: one per-size summary per swept size
-        # (keys, ops, ops/sec, mean and p99); [] when no sweep ran.
+        # (keys, ops, ops/sec, mean and p99, plus the per-op latency
+        # histograms of that run under ``histograms_by_op`` — the
+        # same log-spaced buckets per op as the main run's);
+        # [] when no sweep ran.
         "keyspace_sweep": result.sweep,
         # Client-count sweep: one per-count summary per swept count
-        # (clients, ops, ops/sec, mean and p99); [] when no sweep ran.
+        # (clients, ops, ops/sec, mean and p99, plus the per-op
+        # latency histograms of that run under
+        # ``histograms_by_op``); [] when no sweep ran.
         "client_sweep": result.client_sweep,
         # Value-size sweep: one per-size summary per swept size
-        # (value_size in bytes, ops, ops/sec, mean and p99);
-        # [] when no sweep ran.
+        # (value_size in bytes, ops, ops/sec, mean and p99, plus
+        # the per-op latency histograms of that run under
+        # ``histograms_by_op``); [] when no sweep ran.
         "value_size_sweep": result.value_sweep,
     }
     if result.repeat_runs:
@@ -260,6 +266,27 @@ def _histogram_lines(result):
     return lines
 
 
+def _per_op_histogram_block(heading, per_op):
+    """Text-bar per-op histograms under one heading, or [].
+
+    ``per_op`` is an op name to log-spaced bucket list mapping —
+    the same shape as a result's ``histograms_by_op`` — so the
+    helper serves both the main run's per-op section and each
+    sweep step's. Each op's buckets are scaled to its own largest
+    bucket, and ops with no samples are absent from the mapping.
+    """
+    if not per_op:
+        return []
+    lines = [heading, ""]
+    for op, buckets in per_op.items():
+        total = sum(b["count"] for b in buckets)
+        lines.append(f"{op} ({total} ops)")
+        lines.append("")
+        lines += _histogram_bucket_lines(buckets, total)
+        lines.append("")
+    return lines
+
+
 def _per_op_histogram_lines(result):
     """Per-operation text-bar histograms for one result, or [].
 
@@ -269,16 +296,30 @@ def _per_op_histogram_lines(result):
     from the overall distribution instead of being swamped by the
     fast ops.
     """
-    per_op = result.per_op_histograms
-    if not per_op:
-        return []
-    lines = [f"### Per-operation latency histogram — {result.name}", ""]
-    for op, buckets in per_op.items():
-        total = sum(b["count"] for b in buckets)
-        lines.append(f"{op} ({total} ops)")
-        lines.append("")
-        lines += _histogram_bucket_lines(buckets, total)
-        lines.append("")
+    return _per_op_histogram_block(
+        f"### Per-operation latency histogram — {result.name}",
+        result.per_op_histograms,
+    )
+
+
+def _sweep_per_op_histogram_lines(label, entries):
+    """Per-operation histograms for each sweep step, or [].
+
+    ``label`` formats one step (e.g. ``lambda e: f"{e['keys']} keys"``);
+    each entry carries ``histograms_by_op`` in the same shape as a
+    regular run's — one log-spaced bucket list per operation that
+    ran in that step — so a sweep step's slow op type shows the
+    same way the main run's does. Entries without the key (older
+    reports, or hand-built results) are skipped, so the table
+    still renders.
+    """
+    lines = []
+    for entry in entries:
+        per_op = entry.get("histograms_by_op")
+        if not per_op:
+            continue
+        lines += _per_op_histogram_block(
+            f"#### {label(entry)} — per-op latency histogram", per_op)
     return lines
 
 
@@ -408,7 +449,12 @@ def _tail_lines(result):
 
 
 def _sweep_lines(result):
-    """Keyspace sweep table for one result, or [] when no sweep ran."""
+    """Keyspace sweep table for one result, or [] when no sweep ran.
+
+    The table is followed by a per-operation latency histogram
+    per swept size, so a size where one op type slows down shows
+    which op it is, not just that the p99 moved.
+    """
     if not result.sweep:
         return []
     lines = [
@@ -424,6 +470,8 @@ def _sweep_lines(result):
             f"{entry['p99_ms']:.3f} |"
         )
     lines.append("")
+    lines += _sweep_per_op_histogram_lines(
+        lambda entry: f"{entry['keys']:,} keys", result.sweep)
     return lines
 
 
@@ -459,7 +507,12 @@ def _repeat_lines(result):
 
 
 def _client_sweep_lines(result):
-    """Client-count sweep table for one result, or [] when no sweep ran."""
+    """Client-count sweep table for one result, or [] when no sweep ran.
+
+    The table is followed by a per-operation latency histogram
+    per swept count, so a count where one op type slows down shows
+    which op it is, not just that the p99 moved.
+    """
     if not result.client_sweep:
         return []
     lines = [
@@ -475,11 +528,19 @@ def _client_sweep_lines(result):
             f"{entry['p99_ms']:.3f} |"
         )
     lines.append("")
+    lines += _sweep_per_op_histogram_lines(
+        lambda entry: f"{entry['clients']} clients",
+        result.client_sweep)
     return lines
 
 
 def _value_size_sweep_lines(result):
-    """Value-size sweep table for one result, or [] when no sweep ran."""
+    """Value-size sweep table for one result, or [] when no sweep ran.
+
+    The table is followed by a per-operation latency histogram
+    per swept size, so a size where one op type slows down shows
+    which op it is, not just that the p99 moved.
+    """
     if not result.value_sweep:
         return []
     lines = [
@@ -495,6 +556,9 @@ def _value_size_sweep_lines(result):
             f"{entry['p99_ms']:.3f} |"
         )
     lines.append("")
+    lines += _sweep_per_op_histogram_lines(
+        lambda entry: f"{entry['value_size']:,} byte values",
+        result.value_sweep)
     return lines
 
 
@@ -951,7 +1015,11 @@ def render_markdown(results, workload, command_line, comparison=None,
             "- The Keyspace sweep section re-runs the same workload "
             "once per keyspace size, so ops/sec and p99 per size show "
             "how keyspace size affects throughput; the main results "
-            "table above uses the base keyspace size."
+            "table above uses the base keyspace size. Each swept size "
+            "also gets its own per-operation latency histograms, so a "
+            "size where one op type slows down names the op. The JSON "
+            "report carries the same buckets per sweep step under "
+            "`keyspace_sweep[].histograms_by_op`."
         )
     if workload.sweep_clients:
         lines.append(
@@ -959,14 +1027,22 @@ def render_markdown(results, workload, command_line, comparison=None,
             "once per client count, so ops/sec and p99 per count show "
             "how concurrency affects throughput — where adding "
             "clients stops helping and the server saturates; the main "
-            "results table above uses the base client count."
+            "results table above uses the base client count. Each "
+            "swept count also gets its own per-operation latency "
+            "histograms, so a count where one op type slows down "
+            "names the op. The JSON report carries the same buckets "
+            "per sweep step under `client_sweep[].histograms_by_op`."
         )
     if workload.sweep_value_size:
         lines.append(
             "- The Value size sweep section re-runs the same workload "
             "once per value size, so ops/sec and p99 per size show "
             "how value size affects throughput; the main results "
-            "table above uses the base value size."
+            "table above uses the base value size. Each swept size "
+            "also gets its own per-operation latency histograms, so a "
+            "size where one op type slows down names the op. The JSON "
+            "report carries the same buckets per sweep step under "
+            "`value_size_sweep[].histograms_by_op`."
         )
     if workload.repeat > 1:
         lines.append(
