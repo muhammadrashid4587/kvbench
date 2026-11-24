@@ -432,8 +432,10 @@ class TestFormatTrend(unittest.TestCase):
     def test_trend_shows_latest_runs_per_op_histograms(self):
         # Two mixed runs; the latest run's SET latencies are
         # slower (200_000 ns lands in the 0.25 ms bucket, the
-        # first run's 20_000 ns in the 0.1 ms bucket), so only
-        # the latest run's shape can show.
+        # first run's 20_000 ns in the 0.1 ms bucket), so the
+        # latest run's block shows the slower shape — and the
+        # first-to-last comparison below it shows the first
+        # run's shape, so the two can be read side by side.
         workload = _make_workload()
         first = _make_mixed_result(ops_per_sec=40000.0)
         latest = _make_result(
@@ -458,10 +460,14 @@ class TestFormatTrend(unittest.TestCase):
         self.assertIn("INCR (100 ops)", text)
         # The latest run's SET shape, not the first run's.
         self.assertIn("- <= 0.25 ms: 500 (100.0%)", text)
-        self.assertNotIn("- <= 0.1 ms: 500 (100.0%)", text)
         self.assertEqual(
             text.count("#### Per-op latency histogram — latest run"),
             1)
+        # The comparison below it carries the first run's shape.
+        self.assertIn(
+            "#### Per-op histogram comparison — first vs last run",
+            text)
+        self.assertIn("- <= 0.1 ms: 500 (100.0%)", text)
 
     def test_trend_without_histograms_names_the_reason(self):
         # A history record written before 0.43.0 carries no
@@ -503,6 +509,145 @@ class TestFormatTrend(unittest.TestCase):
         self.assertIn("histograms are malformed", text)
         self.assertNotIn("Per-op latency histogram — latest run",
                          text)
+
+    def test_trend_compares_first_and_last_run_histograms(self):
+        # Two mixed runs; the latest run's SET latencies are
+        # slower (200_000 ns lands in the 0.25 ms bucket, the
+        # first run's 20_000 ns in the 0.1 ms bucket), while GET
+        # and INCR stay put — the comparison table names SET as
+        # the op that moved, and the first run's block shows
+        # where it started.
+        workload = _make_workload()
+        first = _make_mixed_result(ops_per_sec=40000.0)
+        latest = _make_result(
+            ops=1000, ops_per_sec=50000.0,
+            latencies_by_op={
+                "SET": [200_000] * 500,
+                "GET": [20_000] * 400,
+                "INCR": [20_000] * 100,
+            })
+        entries = [
+            build_record(first, workload, "kvbench"),
+            build_record(latest, workload, "kvbench"),
+        ]
+        text = format_trend(entries)
+        first_ts = entries[0]["timestamp"][:19].replace("T", " ")
+        self.assertIn(
+            "#### Per-op histogram comparison — first vs last run",
+            text)
+        # SET p50/p99 0.020 -> 0.200 ms (+900.0%); its whole
+        # share moved out of the <= 0.1 ms bucket.
+        self.assertIn(
+            "| SET | 0.020 | 0.200 | 0.020 | 0.200 | +900.0% | "
+            "-100.0 pp (<= 0.1 ms) |",
+            text)
+        # GET did not move at all: +0.0% and no bucket drift.
+        self.assertIn(
+            "| GET | 0.020 | 0.020 | 0.020 | 0.020 | +0.0% | "
+            "+0.0 pp (<= 0.1 ms) |",
+            text)
+        self.assertIn(
+            "#### Per-op latency histogram — first run "
+            f"({first_ts})",
+            text)
+        self.assertEqual(
+            text.count("#### Per-op latency histogram — first run"),
+            1)
+        # The first run's SET shape, not the latest run's.
+        self.assertIn("- <= 0.1 ms: 500 (100.0%)", text)
+
+    def test_trend_comparison_with_single_run_names_no_comparison(self):
+        # One run in the window is both first and last: there is
+        # nothing to compare, so the trend says so instead of
+        # rendering a comparison table.
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(), workload, "kvbench"),
+        ]
+        text = format_trend(entries)
+        self.assertIn("no first-to-last histogram comparison", text)
+        self.assertNotIn(
+            "#### Per-op histogram comparison — first vs last run",
+            text)
+
+    def test_trend_comparison_without_histograms_names_the_reason(self):
+        # The first run was recorded before 0.43.0 and carries no
+        # "histograms_by_op" key: the comparison renders a note
+        # naming that instead of a table.
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(_make_mixed_result(ops_per_sec=50000.0),
+                         workload, "kvbench"),
+        ]
+        del entries[0]["histograms_by_op"]
+        text = format_trend(entries)
+        self.assertIn("recorded before 0.43.0", text)
+        self.assertIn(
+            "no first-to-last histogram comparison is shown", text)
+        self.assertNotIn(
+            "#### Per-op histogram comparison — first vs last run",
+            text)
+
+    def test_trend_comparison_with_no_per_op_latencies_names_the_reason(self):
+        # The last run recorded no per-op latencies and carries an
+        # empty histograms mapping: a note, not a comparison.
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(_make_result(ops_per_sec=50000.0),
+                         workload, "kvbench"),
+        ]
+        self.assertEqual(entries[1]["histograms_by_op"], {})
+        text = format_trend(entries)
+        self.assertIn("recorded no per-op latencies", text)
+        self.assertIn(
+            "no first-to-last histogram comparison is shown", text)
+        self.assertNotIn(
+            "#### Per-op histogram comparison — first vs last run",
+            text)
+
+    def test_trend_comparison_with_malformed_histograms_names_the_reason(self):
+        # The first run's recorded histograms are not op name to
+        # bucket list: a note naming that, instead of a crash.
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(_make_mixed_result(ops_per_sec=50000.0),
+                         workload, "kvbench"),
+        ]
+        entries[0]["histograms_by_op"] = {"SET": {"upper_ms": 0.1}}
+        text = format_trend(entries)
+        self.assertIn("histograms are malformed", text)
+        self.assertIn(
+            "no first-to-last histogram comparison is shown", text)
+        self.assertNotIn(
+            "#### Per-op histogram comparison — first vs last run",
+            text)
+
+    def test_trend_comparison_marks_ops_missing_from_one_run(self):
+        # A read-only last run never ran SET: the SET row shows
+        # the first run's numbers with "-" for the last run's
+        # side, and no drift, instead of inventing numbers.
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(_make_result(
+                ops_per_sec=50000.0,
+                latencies_by_op={"GET": [20_000] * 1000}),
+                workload, "kvbench"),
+        ]
+        text = format_trend(entries)
+        self.assertIn(
+            "| SET | 0.020 | - | 0.020 | - | - | - |", text)
+        self.assertIn(
+            "| GET | 0.020 | 0.020 | 0.020 | 0.020 | +0.0% | "
+            "+0.0 pp (<= 0.1 ms) |",
+            text)
 
     def test_each_backend_gets_its_own_latest_histogram(self):
         workload = _make_workload()

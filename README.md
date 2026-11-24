@@ -599,7 +599,20 @@ trend names the op whose latency shape moved. History records
 carry the histograms since 0.43.0; a latest run recorded before
 that, one recorded with no per-op latencies, or one whose
 recorded histograms are malformed shows a note naming the
-reason instead of a histogram block.
+reason instead of a histogram block. Below the latest run's
+histograms each backend also gets a per-op histogram comparison
+between the first and last runs in the trend — a table with each
+op's p50 and p99 in the first and last runs, the p99 change, and
+the bucket drift (the largest single-bucket share move, in
+percentage points, with the bucket it moved in) — plus the first
+run's per-op histogram block, drawn with the same shared helper
+as the latest run's, so the two shapes can be read side by side
+and a p99 move shows how each op's latency shape moved between
+the first and last runs. A backend with a single run in the
+window has no comparison; a first or last run recorded before
+0.43.0, one recorded with no per-op latencies, or one whose
+recorded histograms are malformed shows a note naming the reason
+instead of a comparison.
 
 A sweep run recorded with `--history` also records each sweep
 step — one ops/sec and p99 per keyspace size, client count, value
@@ -1089,6 +1102,22 @@ make test
 
 ## Roadmap
 
+- Per-operation histogram comparison across the `--trend`
+  first and last runs: each backend's trend ends with a per-op
+  table comparing its first and last runs in the window — each
+  op's p50 and p99 in both runs, the p99 change, and the bucket
+  drift (the largest single-bucket share move, in percentage
+  points, with the bucket it moved in) — plus the first run's
+  per-operation latency histogram block, drawn with the same
+  shared histogram-block helper as the latest run's block just
+  above, so the two shapes can be read side by side and a p99
+  move shows how each op's latency shape moved between the
+  first and last runs. An op that never ran in one of the runs
+  shows `-` for that side; a backend with a single run in the
+  window has no comparison, and a first or last run recorded
+  before 0.43.0, one recorded with no per-op latencies, or one
+  whose recorded histograms are malformed renders a note naming
+  the reason instead of a comparison. Done in 0.45.0.
 - Per-operation latency histograms in the `--trend` output:
   each backend's trend ends with its latest run's per-operation
   latency histograms — the same log-spaced buckets per operation

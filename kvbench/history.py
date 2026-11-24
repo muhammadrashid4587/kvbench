@@ -26,6 +26,12 @@ single-run report, so the views cannot disagree. Since 0.44.0
 the trend view shows each backend's latest run's per-operation
 latency histograms too, drawn with the same shared helper, so
 a p99 move in the trend names the op whose latency shape moved.
+Since 0.45.0 the trend view also compares the first and last
+runs' per-operation latency histograms — a per-op table of the
+p50/p99 shift and the bucket drift, plus the first run's
+histogram block drawn with the same shared helper next to the
+latest run's — so a p99 move in the trend shows how each op's
+latency shape moved between the first and last runs.
 Since 0.37.0
 each record also carries its sweep steps — one ops/sec and p99
 per keyspace size, client count, value size and pipeline depth —
@@ -517,6 +523,138 @@ def _trend_histogram_lines(entry):
     ]
 
 
+def _bucket_drift(first_buckets, last_buckets):
+    """Largest single-bucket share move between two bucket lists.
+
+    Returns ``(change_pp, label)`` — the signed change in
+    percentage points of the bucket whose share of ops moved
+    most between the first and last runs, and that bucket's
+    label (``<= 0.25 ms`` or ``> 1000 ms`` for the overflow
+    bucket) — or None when either list holds no samples. Buckets
+    are scanned in edge order, so a tie keeps the fastest
+    bucket and the pick is stable.
+    """
+    first_total = sum(b["count"] for b in first_buckets)
+    last_total = sum(b["count"] for b in last_buckets)
+    if not first_total or not last_total:
+        return None
+    first_shares = {b["upper_ms"]: b["count"] / first_total * 100
+                    for b in first_buckets}
+    last_shares = {b["upper_ms"]: b["count"] / last_total * 100
+                   for b in last_buckets}
+    # The overflow bucket (upper_ms None) sorts last.
+    edges = sorted(set(first_shares) | set(last_shares),
+                   key=lambda upper: (upper is None, upper or 0))
+    best = None
+    for upper in edges:
+        change = (last_shares.get(upper, 0.0)
+                  - first_shares.get(upper, 0.0))
+        if best is None or abs(change) > abs(best[0]):
+            label = ("> 1000 ms" if upper is None
+                     else f"<= {upper:g} ms")
+            best = (change, label)
+    return best
+
+
+def _trend_histogram_comparison_lines(first, last):
+    """Per-op histogram comparison between the trend's first and last runs.
+
+    A per-op table — each op's p50 and p99 in the first and last
+    runs, the p99 change, and the bucket drift (the largest
+    single-bucket share move, in percentage points, with the
+    bucket it moved in) — followed by the first run's per-op
+    histogram block, drawn with the same shared helper as the
+    latest run's block just above, so the two shapes can be read
+    side by side. The p50/p99 shift reads from each run's
+    ``per_op`` entry (records since 0.22.0); an op that never ran
+    in one of the runs, or a record with no per-op data, shows
+    ``-`` for that side instead of a number. A run recorded
+    before 0.43.0 carries no ``histograms_by_op`` key at all; a
+    run recorded with no per-op latencies carries an empty
+    mapping; a hand-made history file may carry something else
+    entirely — each renders a note naming the reason instead of
+    a comparison, the same notes the latest-run block uses, so
+    the trend never crashes on a record shape it cannot draw.
+    """
+    first_ts = first.get("timestamp", "")[:19].replace("T", " ")
+    last_ts = last.get("timestamp", "")[:19].replace("T", " ")
+    if first is last:
+        return [
+            "- Only one run in the trend window, so there is no "
+            "first-to-last histogram comparison.",
+            "",
+        ]
+    notes = []
+    for which, entry, histograms in (
+            ("first", first, first.get("histograms_by_op")),
+            ("last", last, last.get("histograms_by_op"))):
+        timestamp = entry.get("timestamp", "")[:19].replace("T", " ")
+        if histograms is None:
+            notes.append(
+                f"- The {which} run ({timestamp}) was recorded "
+                "before 0.43.0, so this run carries no per-op "
+                "histograms — no first-to-last histogram "
+                "comparison is shown.")
+        elif not histograms:
+            notes.append(
+                f"- The {which} run ({timestamp}) recorded no "
+                "per-op latencies, so there are no histograms to "
+                "show — no first-to-last histogram comparison is "
+                "shown.")
+        elif _histograms_or_none(histograms) is None:
+            notes.append(
+                f"- The {which} run's ({timestamp}) recorded "
+                "per-op histograms are malformed, so no "
+                "histograms are shown — no first-to-last "
+                "histogram comparison is shown.")
+    if notes:
+        return notes + [""]
+    first_clean = _histograms_or_none(first["histograms_by_op"])
+    last_clean = _histograms_or_none(last["histograms_by_op"])
+    lines = ["#### Per-op histogram comparison — first vs last run", ""]
+    lines.append("| Op | p50 first (ms) | p50 last (ms) | p99 first (ms) | "
+                 "p99 last (ms) | p99 change | Bucket drift |")
+    lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
+
+    def _fmt(value):
+        return (f"{value:.3f}"
+                if isinstance(value, (int, float)) else "-")
+
+    for op in ("SET", "GET", "INCR", "DEL"):
+        if op not in first_clean and op not in last_clean:
+            continue
+        first_op = (first.get("per_op") or {}).get(op) or {}
+        last_op = (last.get("per_op") or {}).get(op) or {}
+        p50_first = first_op.get("p50_ms")
+        p50_last = last_op.get("p50_ms")
+        p99_first = first_op.get("p99_ms")
+        p99_last = last_op.get("p99_ms")
+        if (isinstance(p99_first, (int, float))
+                and isinstance(p99_last, (int, float))
+                and p99_first):
+            change = (p99_last - p99_first) / p99_first * 100
+            p99_change = f"{change:+.1f}%"
+        else:
+            p99_change = "-"
+        drift = "-"
+        if op in first_clean and op in last_clean:
+            moved = _bucket_drift(first_clean[op], last_clean[op])
+            if moved is not None:
+                drift = f"{moved[0]:+.1f} pp ({moved[1]})"
+        lines.append(
+            f"| {op} | {_fmt(p50_first)} | {_fmt(p50_last)} | "
+            f"{_fmt(p99_first)} | {_fmt(p99_last)} | "
+            f"{p99_change} | {drift} |")
+    lines.append("")
+    # The first run's shapes, next to the latest run's block just
+    # above — the same shared helper draws both, so the views
+    # cannot disagree.
+    lines.extend(_per_op_histogram_block(
+        f"#### Per-op latency histogram — first run ({first_ts})",
+        first_clean))
+    return lines
+
+
 def format_trend(entries, limit=20):
     """Render an ops/sec-over-time trend chart per backend.
 
@@ -531,14 +669,18 @@ def format_trend(entries, limit=20):
     value size, pipeline depth, read:write ratio) for the steps
     that ran, so a step's throughput trend reads on its own too,
     and the latest run's per-operation latency histograms, so a
-    p99 move in the trend names the op whose latency shape moved.
-    Runs recorded before 0.43.0 carry no per-op histograms and
-    render a note naming that instead of a histogram block, as
-    do runs recorded with no per-op latencies and records whose
-    histograms are malformed. A
+    p99 move in the trend names the op whose latency shape moved,
+    plus a per-op histogram comparison between the first and
+    last runs in the window — each op's p50/p99 shift and bucket
+    drift, with the first run's histogram block drawn with the
+    same shared helper — so a p99 move shows how each op's
+    latency shape moved. Runs recorded before 0.43.0 carry no
+    per-op histograms and render a note naming that instead of
+    histogram blocks, as do runs recorded with no per-op
+    latencies and records whose histograms are malformed. A
     corrupt line never reaches here — ``load_history`` already
     skips it — and a backend with a single recorded run shows no
-    delta, just its one value.
+    delta, just its one value, and no first-to-last comparison.
     """
     if not entries:
         return "No runs recorded yet. Re-run a benchmark with --history."
@@ -593,6 +735,11 @@ def format_trend(entries, limit=20):
         # in the window — the last trend step — so the chart ends
         # with where each op's latency sits now.
         sections.extend(_trend_histogram_lines(window[-1]))
+        # Per-op histogram comparison between the first and last
+        # runs in the window, so a p99 move shows how each op's
+        # latency shape moved between them.
+        sections.extend(
+            _trend_histogram_comparison_lines(window[0], window[-1]))
     return "\n".join(sections)
 
 
