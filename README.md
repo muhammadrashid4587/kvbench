@@ -45,7 +45,13 @@ C. Pure Python 3 standard library, no dependencies.
   at contention on that key rather than the server as a whole.
   Under a zipfian distribution these are the keys the skew
   concentrates on; counters report under their own key
-  (`kvbench:counter:<rank>`).
+  (`<prefix>:counter:<rank>`).
+  With `--key-prefix NAME` (default `kvbench`) every key is
+  prefixed with that name (`<prefix>:<rank>` for SET/GET,
+  `<prefix>:counter:<rank>` for INCR), so runs against a shared
+  store do not collide with each other — or with another tool's
+  keys — and the prefix is recorded in both reports, so a report
+  shows which keys the run touched.
   With `--sweep-keyspace 100,1000,10000,100000` the same workload
   is re-run once per keyspace size, and the reports show ops/sec
   and p99 per size, so a run shows how keyspace size affects
@@ -234,6 +240,10 @@ python -m kvbench.cli --ops 20000 --clients 4 --timeout 1
 # the per-run values land in the JSON report under
 # results[].repeat.runs
 python -m kvbench.cli --ops 20000 --clients 4 --repeat 3
+
+# prefix all keys, so a run against a shared store does not collide
+# with another run's keys (or another tool's)
+python -m kvbench.cli --ops 20000 --clients 4 --key-prefix nightly
 ```
 
 Pipelined latencies are the batch round-trip time divided by the batch
@@ -254,7 +264,11 @@ recorded in the JSON report; a non-positive value is rejected),
 `--ops` (default 10000), `--duration` (e.g. `10s` or `2m`; a fixed
 wall-clock run instead of a fixed op count — mutually exclusive
 with `--ops`), `--clients` (default 4), `--keys` (default
-1000), `--value-size` (default 32), `--mix` (default 50:40:10 — a
+1000), `--key-prefix` (default `kvbench` — every key is
+`<prefix>:<rank>` for SET/GET and `<prefix>:counter:<rank>` for
+INCR; a different prefix keeps runs against a shared store from
+colliding, and the prefix is recorded in both reports; an empty
+prefix is rejected), `--value-size` (default 32), `--mix` (default 50:40:10 — a
 `SET:GET:INCR` weight triple, a `READ:WRITE` ratio such as `80:20`,
 or a preset: `read-heavy` 15:80:5, `balanced` 45:45:10,
 `write-heavy` 80:15:5), `--pipeline` (default 1, sequential),
@@ -770,6 +784,13 @@ make test
 
 ## Roadmap
 
+- ~~Key prefix (`--key-prefix NAME`): prefix every benchmark key
+  (`<prefix>:<rank>` for SET/GET, `<prefix>:counter:<rank>` for
+  INCR) so runs against a shared store do not collide, with the
+  prefix recorded in both reports (`workload.key_prefix` in JSON,
+  a line in the Markdown workload section); the default prefix
+  `kvbench` keeps old key names, and an empty prefix is rejected
+  (exit 2) before any benchmark runs.~~ Done in 0.28.0.
 - ~~Repeat runs (`--repeat N`): run the benchmark N times and
   report the median ops/sec and p99 over the N runs, per
   operation as well as overall, with the per-run values recorded

@@ -357,6 +357,14 @@ def build_parser():
                         "results")
     parser.add_argument("--clients", type=int, default=4)
     parser.add_argument("--keys", type=int, default=1_000)
+    parser.add_argument("--key-prefix", default="kvbench",
+                        metavar="PREFIX",
+                        help="prefix for every benchmark key "
+                        "(<prefix>:<rank> for SET/GET, "
+                        "<prefix>:counter:<rank> for INCR; default "
+                        "kvbench) — a different prefix keeps runs "
+                        "against a shared store from colliding, and "
+                        "the prefix is recorded in both reports")
     parser.add_argument("--value-size", type=int, default=32)
     parser.add_argument("--mix", default="50:40:10",
                         help="SET:GET:INCR weights (e.g. 50:40:10), a "
@@ -758,6 +766,7 @@ def main(argv=None):
                  (0 if duration_s is not None else 10_000)),
             clients=args.clients,
             keys=args.keys,
+            key_prefix=args.key_prefix,
             value_size=args.value_size,
             set_weight=set_w,
             get_weight=get_w,

@@ -231,6 +231,34 @@ class TestZipfianDistribution(unittest.TestCase):
                      distribution="zipfian", zipf_skew=-1.0)
 
 
+class TestKeyPrefix(unittest.TestCase):
+    def test_default_prefix_is_kvbench(self):
+        workload = Workload(ops=200, clients=2, keys=20, value_size=8)
+        result = run_workload(DictClient, workload, "baseline (dict)")
+        self.assertTrue(result.latencies_by_key)
+        self.assertTrue(all(key.startswith("kvbench:")
+                            for key in result.latencies_by_key))
+
+    def test_custom_prefix_applies_to_all_keys(self):
+        # SET/GET keys and INCR counter keys all carry the prefix,
+        # so a run against a shared store touches only its own keys.
+        workload = Workload(ops=500, clients=2, keys=20, value_size=8,
+                            key_prefix="nightly")
+        result = run_workload(DictClient, workload, "baseline (dict)")
+        keys = set(result.latencies_by_key)
+        self.assertTrue(keys)
+        self.assertTrue(all(key.startswith("nightly:")
+                            for key in keys))
+        self.assertTrue(any(key.startswith("nightly:counter:")
+                            for key in keys))
+        self.assertFalse(any(key.startswith("kvbench:")
+                             for key in keys))
+
+    def test_empty_prefix_rejected(self):
+        with self.assertRaises(ValueError):
+            Workload(ops=10, clients=1, keys=10, key_prefix="")
+
+
 class TestHotKeyLatency(unittest.TestCase):
     def test_zipfian_hot_key_is_rank_zero(self):
         # Under zipfian the hottest key by access count is rank 0:

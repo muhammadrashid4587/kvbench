@@ -502,6 +502,57 @@ class TestTimeoutRun(unittest.TestCase):
         self.assertEqual(main(["--timeout=-5", "--ops", "10"]), 2)
 
 
+class TestKeyPrefixFlag(unittest.TestCase):
+    def test_default_prefix_is_kvbench(self):
+        args = build_parser().parse_args([])
+        self.assertEqual(args.key_prefix, "kvbench")
+
+    def test_key_prefix_value_kept(self):
+        args = build_parser().parse_args(["--key-prefix", "nightly"])
+        self.assertEqual(args.key_prefix, "nightly")
+
+
+class TestKeyPrefixRun(unittest.TestCase):
+    def test_prefix_run_records_prefix_and_prefixed_keys(self):
+        server = _start_server()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                output = os.path.join(tmp, "report.md")
+                code = main([
+                    "--host", "127.0.0.1",
+                    "--port", str(server.server_address[1]),
+                    "--ops", "200", "--clients", "2",
+                    "--key-prefix", "nightly",
+                    "--output", output,
+                ])
+                self.assertEqual(code, 0)
+                with open(output, encoding="utf-8") as f:
+                    text = f.read()
+                self.assertIn("Key prefix: nightly", text)
+                with open(os.path.join(tmp, "report.json"),
+                          encoding="utf-8") as f:
+                    parsed = json.load(f)
+                self.assertEqual(parsed["workload"]["key_prefix"],
+                                 "nightly")
+                # The run touched only prefixed keys on the server.
+                self.assertTrue(server.store)
+                self.assertTrue(all(
+                    name.startswith("nightly:")
+                    for name in server.store))
+                hot = parsed["results"][0]["hot_keys"]
+                self.assertTrue(hot)
+                self.assertTrue(all(
+                    entry["key"].startswith("nightly:")
+                    for entry in hot))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_empty_prefix_rejected(self):
+        self.assertEqual(
+            main(["--key-prefix", "", "--ops", "10"]), 2)
+
+
 class TestCsvFlag(unittest.TestCase):
     def test_defaults_no_csv(self):
         args = build_parser().parse_args([])

@@ -40,6 +40,12 @@ class Workload:
     ops: int = 10_000
     clients: int = 4
     keys: int = 1_000
+    # Prefix for every benchmark key ("<prefix>:<rank>" for SET/GET,
+    # "<prefix>:counter:<rank>" for INCR). "kvbench" is the old
+    # behaviour; a different prefix lets runs against a shared store
+    # avoid colliding with each other — and with other tools' keys —
+    # while the reports record which prefix was used.
+    key_prefix: str = "kvbench"
     value_size: int = 32
     set_weight: int = 50
     get_weight: int = 40
@@ -123,6 +129,8 @@ class Workload:
     repeat: int = 1
 
     def __post_init__(self):
+        if not self.key_prefix:
+            raise ValueError("key prefix must be non-empty")
         if self.clients <= 0 or self.keys <= 0:
             raise ValueError("clients and keys must be positive")
         if self.distribution not in ("uniform", "zipfian"):
@@ -326,8 +334,9 @@ class BenchmarkResult:
         by key, so the order is deterministic). Keys that never ran
         are absent, and ``top_n`` of 0 returns []. A key that was
         both SET/GET and INCRed reports under one key string each:
-        ``kvbench:<rank>`` for SET/GET and ``kvbench:counter:<rank>``
-        for INCR, because counters live in their own keyspace.
+        ``<prefix>:<rank>`` for SET/GET and
+        ``<prefix>:counter:<rank>`` for INCR, because counters live
+        in their own keyspace.
         """
         if top_n <= 0 or not self.latencies_by_key:
             return []
@@ -538,10 +547,10 @@ def run_workload(client_factory, workload, name):
                     # previously SET to a non-numeric value would error,
                     # exactly as it does on a real Redis server.
                     if op == "INCR":
-                        key = f"kvbench:counter:{rank}"
+                        key = f"{workload.key_prefix}:counter:{rank}"
                         batch.append(("INCR", key))
                     else:
-                        key = f"kvbench:{rank}"
+                        key = f"{workload.key_prefix}:{rank}"
                         if op == "SET":
                             batch.append(("SET", key, value))
                         else:

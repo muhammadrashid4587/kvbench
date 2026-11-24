@@ -23,6 +23,8 @@ def _workload_dict(workload):
         "warmup_s": workload.warmup_s,
         "clients": workload.clients,
         "keys": workload.keys,
+        # Prefix for every benchmark key (default "kvbench").
+        "key_prefix": workload.key_prefix,
         "value_size": workload.value_size,
         "mix": {
             "set": workload.set_weight,
@@ -696,6 +698,7 @@ def render_markdown(results, workload, command_line, comparison=None,
         scope_line,
         f"- Clients (threads): {workload.clients}",
         f"- Keyspace: {workload.keys} keys",
+        f"- Key prefix: {workload.key_prefix}",
         distribution_line,
         f"- Value size: {workload.value_size} bytes",
         f"- Mix: SET {workload.set_weight} / GET {workload.get_weight} / "
