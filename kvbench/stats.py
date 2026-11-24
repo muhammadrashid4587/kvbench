@@ -31,6 +31,33 @@ def median(values):
     return (ordered[mid - 1] + ordered[mid]) / 2
 
 
+def spread_summary(values):
+    """Summarize the run-to-run spread of a sequence of values.
+
+    Returns ``{"min", "median", "max", "spread", "spread_pct"}``:
+    the smallest and largest values, the median, the spread
+    (max - min) and the spread as a percentage of the median —
+    how much the runs vary relative to their typical value, so a
+    wide spread says the runs were noisy and a narrow one says
+    the median is trustworthy. ``spread_pct`` is None when the
+    median is 0: a percentage of nothing is meaningless, and the
+    spread itself still reports. Raises on empty input, like
+    :func:`median`.
+    """
+    if not values:
+        raise ValueError("spread of empty data")
+    ordered = sorted(values)
+    med = median(values)
+    spread = ordered[-1] - ordered[0]
+    return {
+        "min": ordered[0],
+        "median": med,
+        "max": ordered[-1],
+        "spread": spread,
+        "spread_pct": (spread / med * 100) if med else None,
+    }
+
+
 def summarize(latencies_ns):
     """Summarize a list of latencies (ns) into a dict of ms figures."""
     if not latencies_ns:

@@ -274,7 +274,10 @@ python -m kvbench.cli --ops 20000 --clients 4 \
 # the per-run values land in the JSON report under
 # results[].repeat.runs, each run with its own per-operation
 # latency histograms, and the Markdown report shows a per-run
-# per-op histogram block under the Repeat runs table
+# per-op histogram block under the Repeat runs table — plus a
+# spread summary (min, max, spread and spread as a percentage of
+# the median, overall and per operation) under
+# results[].repeat.spread in JSON and in a table in Markdown
 python -m kvbench.cli --ops 20000 --clients 4 --repeat 3
 
 # prefix all keys, so a run against a shared store does not collide
@@ -788,13 +791,19 @@ workload section carries the swept sizes under `sweep_value_size`.
 
 With `--repeat N` the report has a Repeat runs section: one table
 per backend with a row per run — ops, ops/sec, mean and p99 — so
-the spread behind the reported medians reads at a glance. Each
-run also gets its own per-operation latency histogram block under
-the table, with the same log-spaced buckets per op as the regular
-run's per-op histograms, so a run where one op type slows down
-names the op. The JSON report carries the same rows per result
-under `repeat.runs`, with the per-op buckets per run under
-`histograms_by_op`.
+the spread behind the reported medians reads at a glance. Below
+the table a spread summary table lists, for ops/sec and p99
+overall and per operation, the min, median, max, spread (max -
+min) and spread as a percentage of the median, so a run that
+swings wildly reads at a glance; a single run has no spread, so
+the table is absent for `--repeat 1`. Each run also gets its own
+per-operation latency histogram block under the table, with the
+same log-spaced buckets per op as the regular run's per-op
+histograms, so a run where one op type slows down names the op.
+The JSON report carries the same rows per result under
+`repeat.runs`, with the per-op buckets per run under
+`histograms_by_op`, and the spread summary under
+`repeat.spread`.
 
 Below the table, each backend gets a per-operation stats table:
 ops, ops/sec, mean, p50, p95 and p99 latency split by SET, GET,
@@ -869,6 +878,13 @@ make test
 
 ## Roadmap
 
+- Run-to-run spread summary for `--repeat` runs: for each op and
+  overall, min / max / spread (max - min) and spread as a
+  percentage of the median, under `results[].repeat.spread` in
+  JSON and as a table under the Repeat runs table in Markdown —
+  so a run that swings wildly reads at a glance instead of just
+  moving the median. A single run has no spread to report, so
+  the section is absent for `--repeat 1`. Done in 0.35.0.
 - Per-operation latency histograms in the `--repeat` runs:
   each run in the repeat table carries the same log-spaced
   buckets per operation that ran as the regular run's

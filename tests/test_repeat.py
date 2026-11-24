@@ -19,7 +19,7 @@ from kvbench.bench import (DictClient, Workload, run_repeated_workload)
 from kvbench.cli import build_parser, main
 from kvbench.history import build_record
 from kvbench.report import render_json, render_markdown, to_json_dict
-from kvbench.stats import histogram, median
+from kvbench.stats import histogram, median, spread_summary
 
 try:
     from test_cli import _start_server
@@ -327,6 +327,141 @@ class TestSingleRunJsonUnchanged(unittest.TestCase):
         doc = to_json_dict([plain], workload, "kvbench")
         self.assertNotIn("repeat", doc["workload"])
         self.assertNotIn("repeat", doc["results"][0])
+
+
+class TestSpreadSummary(unittest.TestCase):
+    def test_known_values(self):
+        entry = spread_summary([100, 120, 110])
+        self.assertEqual(entry["min"], 100)
+        self.assertEqual(entry["median"], 110)
+        self.assertEqual(entry["max"], 120)
+        self.assertEqual(entry["spread"], 20)
+        self.assertAlmostEqual(entry["spread_pct"], 20 / 110 * 100)
+
+    def test_even_count_median_is_the_mean_of_the_middle_two(self):
+        entry = spread_summary([10, 30])
+        self.assertEqual(entry["median"], 20)
+        self.assertEqual(entry["spread"], 20)
+        self.assertAlmostEqual(entry["spread_pct"], 100.0)
+
+    def test_identical_values_have_zero_spread(self):
+        entry = spread_summary([50, 50, 50])
+        self.assertEqual(entry["spread"], 0)
+        self.assertEqual(entry["spread_pct"], 0.0)
+
+    def test_zero_median_gives_null_percentage(self):
+        # A percentage of a zero median is meaningless: the spread
+        # still reports, but the percentage is null, not a
+        # division-by-zero number.
+        entry = spread_summary([0, 0, 5])
+        self.assertEqual(entry["min"], 0)
+        self.assertEqual(entry["median"], 0)
+        self.assertEqual(entry["max"], 5)
+        self.assertEqual(entry["spread"], 5)
+        self.assertIsNone(entry["spread_pct"])
+
+    def test_empty_raises(self):
+        with self.assertRaises(ValueError):
+            spread_summary([])
+
+
+class TestRepeatSpread(unittest.TestCase):
+    def test_spread_matches_the_per_run_values(self):
+        workload = Workload(ops=200, clients=2)
+        result = run_repeated_workload(DictClient, workload,
+                                       "baseline (dict)", 3)
+        runs = result.repeat_runs
+        ops_values = sorted(e["ops_per_sec"] for e in runs)
+        overall_ops = result.repeat_spread["overall"]["ops_per_sec"]
+        self.assertEqual(overall_ops["min"], ops_values[0])
+        self.assertEqual(overall_ops["median"],
+                         _median_of(ops_values))
+        self.assertEqual(overall_ops["max"], ops_values[-1])
+        self.assertEqual(overall_ops["spread"],
+                         ops_values[-1] - ops_values[0])
+        self.assertAlmostEqual(
+            overall_ops["spread_pct"],
+            (ops_values[-1] - ops_values[0])
+            / _median_of(ops_values) * 100)
+        p99_values = sorted(e["p99_ms"] for e in runs)
+        overall_p99 = result.repeat_spread["overall"]["p99_ms"]
+        self.assertEqual(overall_p99["min"], p99_values[0])
+        self.assertEqual(overall_p99["median"], _median_of(p99_values))
+        self.assertEqual(overall_p99["max"], p99_values[-1])
+        self.assertEqual(overall_p99["spread"],
+                         p99_values[-1] - p99_values[0])
+        for op in ("SET", "GET", "INCR"):
+            op_ops = sorted(e["per_op"][op]["ops_per_sec"]
+                            for e in runs)
+            entry = result.repeat_spread["per_op"][op]["ops_per_sec"]
+            self.assertEqual(entry["min"], op_ops[0])
+            self.assertEqual(entry["median"], _median_of(op_ops))
+            self.assertEqual(entry["max"], op_ops[-1])
+            self.assertEqual(entry["spread"], op_ops[-1] - op_ops[0])
+            op_p99 = sorted(e["per_op"][op]["p99_ms"] for e in runs)
+            entry = result.repeat_spread["per_op"][op]["p99_ms"]
+            self.assertEqual(entry["min"], op_p99[0])
+            self.assertEqual(entry["median"], _median_of(op_p99))
+            self.assertEqual(entry["max"], op_p99[-1])
+
+    def test_spread_renders_in_json_and_markdown(self):
+        workload = Workload(ops=200, clients=2, repeat=3)
+        result = run_repeated_workload(DictClient, workload,
+                                       "baseline (dict)", 3)
+        parsed = json.loads(render_json([result], workload, "kvbench"))
+        spread = parsed["results"][0]["repeat"]["spread"]
+        self.assertEqual(set(spread), {"overall", "per_op"})
+        self.assertEqual(set(spread["overall"]),
+                         {"ops_per_sec", "p99_ms"})
+        for entry in (spread["overall"]["ops_per_sec"],
+                      spread["overall"]["p99_ms"]):
+            self.assertEqual(set(entry), {
+                "min", "median", "max", "spread", "spread_pct"})
+        for op, entry in spread["per_op"].items():
+            self.assertEqual(set(entry), {"ops_per_sec", "p99_ms"})
+        text = render_markdown([result], workload, "kvbench")
+        self.assertIn("Repeat-run spread", text)
+        self.assertIn("| ops/sec |", text)
+        self.assertIn("| p99 (ms) |", text)
+        self.assertIn("| SET ops/sec |", text)
+        self.assertIn("| SET p99 (ms) |", text)
+
+    def test_single_run_has_no_spread(self):
+        workload = Workload(ops=200, clients=2)
+        result = run_repeated_workload(DictClient, workload,
+                                       "baseline (dict)", 1)
+        self.assertEqual(result.repeat_spread, {})
+        parsed = json.loads(render_json([result], workload, "kvbench"))
+        self.assertNotIn("spread", parsed["results"][0]["repeat"])
+        text = render_markdown([result], workload, "kvbench")
+        self.assertNotIn("Repeat-run spread", text)
+
+    def test_zero_median_spread_renders_null_and_n_a(self):
+        # A hand-built spread with a zero median: JSON carries
+        # null for the percentage and Markdown shows n/a.
+        workload = Workload(ops=200, clients=2, repeat=3)
+        result = run_repeated_workload(DictClient, workload,
+                                       "baseline (dict)", 3)
+        result.repeat_spread = {
+            "overall": {
+                "ops_per_sec": {
+                    "min": 0.0, "median": 0.0, "max": 5.0,
+                    "spread": 5.0, "spread_pct": None,
+                },
+                "p99_ms": {
+                    "min": 0.1, "median": 0.2, "max": 0.3,
+                    "spread": 0.2, "spread_pct": 100.0,
+                },
+            },
+            "per_op": {},
+        }
+        parsed = json.loads(render_json([result], workload, "kvbench"))
+        ops = parsed["results"][0]["repeat"]["spread"]["overall"]
+        self.assertIsNone(ops["ops_per_sec"]["spread_pct"])
+        self.assertEqual(ops["p99_ms"]["spread_pct"], 100.0)
+        text = render_markdown([result], workload, "kvbench")
+        self.assertIn("Repeat-run spread", text)
+        self.assertIn("n/a", text)
 
 
 if __name__ == "__main__":

@@ -17,8 +17,8 @@ import time
 from dataclasses import dataclass, field, replace
 
 from .distribution import ZipfianSampler
-from .stats import attribute_tail, histogram, median, summarize, \
-    time_series
+from .stats import attribute_tail, histogram, median, spread_summary, \
+    summarize, time_series
 
 
 def format_duration(seconds):
@@ -316,6 +316,14 @@ class BenchmarkResult:
     # ran in no repeat is absent. When set, ``per_op_summary``
     # reports these medians for the ops it covers.
     median_per_op: dict = field(default_factory=dict)
+    # Run-to-run spread summary over the repeated runs, or {} for
+    # a single run: {"overall": {"ops_per_sec", "p99_ms"},
+    # "per_op": {op: {"ops_per_sec", "p99_ms"}}} where each leaf is
+    # the :func:`kvbench.stats.spread_summary` dict (min, median,
+    # max, spread, spread as a percentage of the median) for that
+    # figure over the runs. Empty when fewer than two runs ran —
+    # one run has no spread to report.
+    repeat_spread: dict = field(default_factory=dict)
 
     @property
     def hot_hit_rate(self):
@@ -797,7 +805,11 @@ def run_repeated_workload(client_factory, workload, name, repeat):
     histograms of that run under ``histograms_by_op`` — the same
     log-spaced buckets per op as the main run's, so a run where
     one op type slows down names the op), so a report can show
-    the spread. A run that cannot reach the backend raises, like
+    the spread. With more than one run ``repeat_spread`` carries
+    the run-to-run spread summary (min, median, max, spread and
+    spread as a percentage of the median) for ops/sec and p99,
+    overall and per operation — a single run has no spread, so
+    the field stays empty. A run that cannot reach the backend raises, like
     :func:`run_workload` does — the repeat stops there instead of
     reporting a median over partial runs.
     """
@@ -855,6 +867,31 @@ def run_repeated_workload(client_factory, workload, name, repeat):
     representative.median_p99_ms = median(
         [entry["p99_ms"] for entry in per_run])
     representative.median_per_op = median_per_op
+    if len(per_run) > 1:
+        # Run-to-run spread: min, median, max, spread (max - min)
+        # and spread as a percentage of the median, for ops/sec and
+        # p99 overall and per operation. A single run has no spread
+        # to report, so the field stays empty.
+        per_op_spread = {}
+        for op in ("SET", "GET", "INCR", "DEL"):
+            ops_values = [entry["per_op"][op]["ops_per_sec"]
+                          for entry in per_run if op in entry["per_op"]]
+            p99_values = [entry["per_op"][op]["p99_ms"]
+                          for entry in per_run if op in entry["per_op"]]
+            if ops_values:
+                per_op_spread[op] = {
+                    "ops_per_sec": spread_summary(ops_values),
+                    "p99_ms": spread_summary(p99_values),
+                }
+        representative.repeat_spread = {
+            "overall": {
+                "ops_per_sec": spread_summary(
+                    [entry["ops_per_sec"] for entry in per_run]),
+                "p99_ms": spread_summary(
+                    [entry["p99_ms"] for entry in per_run]),
+            },
+            "per_op": per_op_spread,
+        }
     return representative
 
 

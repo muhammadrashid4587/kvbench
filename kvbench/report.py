@@ -143,6 +143,14 @@ def _result_dict(result, top_n=5):
             "median_p99_ms": result.median_p99_ms,
             "median_per_op": result.median_per_op,
         }
+        if result.repeat_spread:
+            # Only a run repeated more than once carries a spread:
+            # one run has no spread to report, so a single
+            # ``--repeat 1`` run keeps the old shape. ``spread``
+            # is min, median, max, spread (max - min) and spread
+            # as a percentage of the median, for ops/sec and p99
+            # overall and per operation.
+            doc["repeat"]["spread"] = result.repeat_spread
     return doc
 
 
@@ -478,16 +486,84 @@ def _sweep_lines(result):
     return lines
 
 
+def _spread_pct_text(entry):
+    """Spread as a percentage of the median, or "n/a".
+
+    ``spread_pct`` is null when the median is 0 — a percentage of
+    nothing is meaningless — so the table shows n/a instead of a
+    division-by-zero number.
+    """
+    pct = entry["spread_pct"]
+    return f"{pct:.1f}%" if pct is not None else "n/a"
+
+
+def _repeat_spread_lines(result):
+    """Run-to-run spread table for a repeated result, or [].
+
+    One row per figure — ops/sec and p99 overall, then ops/sec and
+    p99 per operation that ran — with min, median, max, spread
+    (max - min) and spread as a percentage of the median, so a run
+    that swings wildly reads at a glance. Empty for a single run:
+    one run has no spread to report.
+    """
+    spread = result.repeat_spread
+    if not spread:
+        return []
+    lines = [
+        f"### Repeat-run spread — {result.name}",
+        "",
+        "How much the runs vary: min, median, max, spread "
+        "(max - min) and spread as a percentage of the median, for "
+        "ops/sec and p99 overall and per operation — a wide spread "
+        "says the runs were noisy, a narrow one says the median is "
+        "trustworthy.",
+        "",
+        "| Metric | Min | Median | Max | Spread | Spread % |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    overall = spread["overall"]
+    ops = overall["ops_per_sec"]
+    lines.append(
+        f"| ops/sec | {ops['min']:,.0f} | {ops['median']:,.0f} | "
+        f"{ops['max']:,.0f} | {ops['spread']:,.0f} | "
+        f"{_spread_pct_text(ops)} |"
+    )
+    p99 = overall["p99_ms"]
+    lines.append(
+        f"| p99 (ms) | {p99['min']:.3f} | {p99['median']:.3f} | "
+        f"{p99['max']:.3f} | {p99['spread']:.3f} | "
+        f"{_spread_pct_text(p99)} |"
+    )
+    for op, entry in spread["per_op"].items():
+        ops = entry["ops_per_sec"]
+        lines.append(
+            f"| {op} ops/sec | {ops['min']:,.0f} | "
+            f"{ops['median']:,.0f} | {ops['max']:,.0f} | "
+            f"{ops['spread']:,.0f} | {_spread_pct_text(ops)} |"
+        )
+        p99 = entry["p99_ms"]
+        lines.append(
+            f"| {op} p99 (ms) | {p99['min']:.3f} | "
+            f"{p99['median']:.3f} | {p99['max']:.3f} | "
+            f"{p99['spread']:.3f} | {_spread_pct_text(p99)} |"
+        )
+    lines.append("")
+    return lines
+
+
 def _repeat_lines(result):
     """Per-run table for a repeated result, or [] for a single run.
 
     One row per run with its ops/sec and p99, so the spread behind
     the reported medians is visible; the summary table above
     already shows the medians themselves. The table is followed by
-    a per-operation latency histogram per run — the same shared
-    helper the sweep sections use, so a run where one op type
-    slows down names the op. Runs recorded before 0.34.0 carry no
-    ``histograms_by_op`` and render the table only.
+    the run-to-run spread summary (min, median, max, spread and
+    spread as a percentage of the median, overall and per
+    operation), and then by a per-operation latency histogram per
+    run — the same shared helper the sweep sections use, so a
+    run where one op type slows down names the op. Runs recorded
+    before 0.34.0 carry no ``histograms_by_op`` and render the
+    table only.
     """
     if not result.repeat_runs:
         return []
@@ -510,6 +586,7 @@ def _repeat_lines(result):
             f"{entry['p99_ms']:.3f} | {entry['errors']} |"
         )
     lines.append("")
+    lines += _repeat_spread_lines(result)
     lines += _sweep_per_op_histogram_lines(
         lambda entry: f"Run {entry['run']}", result.repeat_runs)
     return lines
@@ -1061,12 +1138,15 @@ def render_markdown(results, workload, command_line, comparison=None,
             "well as overall; the mean, p50, p95, histogram, tail "
             "attribution and per-second series come from the run "
             "whose ops/sec is the median, and the Repeat runs "
-            "section lists every run's ops/sec and p99, each "
-            "followed by its own per-operation latency histograms, "
-            "so a run where one op type slows down names the op. "
-            "The JSON report carries the same per-run values under "
-            "`results[].repeat.runs`, with each run's buckets under "
-            "`histograms_by_op`."
+            "section lists every run's ops/sec and p99, followed by "
+            "a spread summary (min, median, max, spread and spread "
+            "as a percentage of the median, overall and per "
+            "operation) and each run's own per-operation latency "
+            "histograms, so a run where one op type slows down "
+            "names the op. The JSON report carries the same "
+            "per-run values under `results[].repeat.runs`, with "
+            "each run's buckets under `histograms_by_op` and the "
+            "spread summary under `results[].repeat.spread`."
         )
     if comparison is not None:
         baseline_desc = (
