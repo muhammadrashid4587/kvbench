@@ -7,7 +7,11 @@ C. Pure Python 3 standard library, no dependencies.
 ## What it is
 
 - A small RESP client (`kvbench/resp.py`) that talks to any
-  Redis-compatible server over a socket.
+  Redis-compatible server over a socket. The connect and read
+  timeout is 5 seconds by default; `--timeout SECONDS` raises it
+  for a loaded or remote server, or lowers it to fail fast on a
+  dead one. The timeout is recorded in both reports, so a run
+  that timed out can be told apart from one that was just slow.
 - A workload runner (`kvbench/bench.py`) that runs a configurable
   SET/GET/INCR mix across N threads, measuring per-op latency.
   With `--pipeline N` it sends N commands per round trip instead of
@@ -219,6 +223,11 @@ python -m kvbench.cli --ops 20000 --clients 4 \
 # also write a per-second throughput CSV for plotting
 python -m kvbench.cli --ops 20000 --clients 4 --duration 10s \
     --csv timeseries.csv
+
+# a loaded or remote server may need more than the 5 s default
+# before a reply counts as a timeout — or fail fast on a dead one
+python -m kvbench.cli --ops 20000 --clients 4 --timeout 30
+python -m kvbench.cli --ops 20000 --clients 4 --timeout 1
 ```
 
 Pipelined latencies are the batch round-trip time divided by the batch
@@ -228,6 +237,10 @@ its workload settings, and the JSON report carries it under
 `workload.pipeline`.
 
 Options: `--host` (default 127.0.0.1), `--port` (default 6379),
+`--timeout` (default 5.0, socket timeout in seconds for the
+server connection — connect and read; raise it for a loaded or
+remote server, lower it to fail fast on a dead one; a non-positive
+value is rejected),
 `--ops` (default 10000), `--duration` (e.g. `10s` or `2m`; a fixed
 wall-clock run instead of a fixed op count — mutually exclusive
 with `--ops`), `--clients` (default 4), `--keys` (default
@@ -747,6 +760,15 @@ make test
 
 ## Roadmap
 
+- ~~Configurable socket timeout (`--timeout SECONDS`): the
+  connect and read timeout for the RESP connection, 5 s by
+  default — raise it for a loaded or remote server, lower it to
+  fail fast on a dead one — recorded in both reports
+  (`workload.timeout_s`, a line in the Markdown workload
+  section), and a non-positive value fails (exit 2) before any
+  benchmark runs. The timeout is a transport setting, not part
+  of the workload, so `--compare-same-workload` does not treat a
+  changed timeout as a different workload.~~ Done in 0.26.0.
 - ~~History export/import (`--history-export` / `--history-import`):
   write the run history out as portable JSON (all backends or
   one backend) and merge an export back into a history file,

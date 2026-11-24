@@ -458,6 +458,50 @@ class TestWarmupRun(unittest.TestCase):
         self.assertEqual(main(["--warmup=-5s", "--ops", "10"]), 2)
 
 
+class TestTimeoutFlag(unittest.TestCase):
+    def test_defaults_five_seconds(self):
+        args = build_parser().parse_args([])
+        self.assertEqual(args.timeout, 5.0)
+
+    def test_timeout_value_kept(self):
+        args = build_parser().parse_args(["--timeout", "10"])
+        self.assertEqual(args.timeout, 10.0)
+
+
+class TestTimeoutRun(unittest.TestCase):
+    def test_timeout_run_records_timeout(self):
+        server = _start_server()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                output = os.path.join(tmp, "report.md")
+                code = main([
+                    "--host", "127.0.0.1",
+                    "--port", str(server.server_address[1]),
+                    "--ops", "200", "--clients", "2",
+                    "--timeout", "10",
+                    "--output", output,
+                ])
+                self.assertEqual(code, 0)
+                with open(output, encoding="utf-8") as f:
+                    text = f.read()
+                self.assertIn("Socket timeout: 10 s", text)
+                with open(os.path.join(tmp, "report.json"),
+                          encoding="utf-8") as f:
+                    parsed = json.load(f)
+                self.assertEqual(parsed["workload"]["timeout_s"], 10.0)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_bad_timeout_rejected(self):
+        for bad in ("0", "-1"):
+            code = main(["--timeout", bad, "--ops", "10"])
+            self.assertEqual(code, 2, msg=bad)
+        # A leading dash would be read as an option flag, so pass it
+        # with "="; the parser must still reject the value itself.
+        self.assertEqual(main(["--timeout=-5", "--ops", "10"]), 2)
+
+
 class TestCsvFlag(unittest.TestCase):
     def test_defaults_no_csv(self):
         args = build_parser().parse_args([])

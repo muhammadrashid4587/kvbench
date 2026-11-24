@@ -80,6 +80,11 @@ class Workload:
     # per-key latency stats in the reports. 0 disables per-key
     # tracking entirely.
     hot_keys: int = 5
+    # Socket timeout in seconds for the RESP connection: connect and
+    # read timeout, passed to RespClient. 5.0 is the old hardcoded
+    # value; a loaded or remote server may need more, and a dead
+    # server fails faster with less.
+    timeout_s: float = 5.0
     # Keyspace sizes for a sweep: when non-empty the same workload is
     # re-run once per size (see run_keyspace_sweep) and the per-size
     # ops/sec and p99 land in the reports, so a run shows how
@@ -129,6 +134,8 @@ class Workload:
             raise ValueError("warmup must be non-negative")
         if self.hot_keys < 0:
             raise ValueError("hot_keys must be non-negative")
+        if self.timeout_s <= 0:
+            raise ValueError("timeout must be positive")
         if any(not isinstance(size, int) or size <= 0
                for size in self.sweep_keyspace):
             raise ValueError("sweep keyspace sizes must be positive integers")

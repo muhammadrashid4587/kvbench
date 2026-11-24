@@ -116,6 +116,14 @@ class TestRespClient(unittest.TestCase):
         with RespClient("127.0.0.1", self.port) as client:
             self.assertEqual(client.pipeline([]), [])
 
+    def test_timeout_default_is_five_seconds(self):
+        with RespClient("127.0.0.1", self.port) as client:
+            self.assertEqual(client._sock.gettimeout(), 5.0)
+
+    def test_timeout_is_applied_to_socket(self):
+        with RespClient("127.0.0.1", self.port, timeout=10) as client:
+            self.assertEqual(client._sock.gettimeout(), 10)
+
 
 if __name__ == "__main__":
     unittest.main()

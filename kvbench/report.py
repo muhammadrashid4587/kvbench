@@ -32,6 +32,9 @@ def _workload_dict(workload):
         "mix_label": workload.mix_label or None,
         "seed": workload.seed,
         "pipeline": workload.pipeline,
+        # Socket timeout for the server connection in seconds; the
+        # same value for connect and read, the RespClient default.
+        "timeout_s": workload.timeout_s,
         "distribution": workload.distribution,
         # The skew only means anything for zipfian; null otherwise.
         "zipf_skew": (workload.zipf_skew
@@ -639,6 +642,7 @@ def render_markdown(results, workload, command_line, comparison=None,
         f"INCR {workload.incr_weight}"
         + (f" ({workload.mix_label})" if workload.mix_label else ""),
         f"- Pipeline depth: {workload.pipeline} command(s) per round trip",
+        f"- Socket timeout: {workload.timeout_s:g} s",
     ]
     if warmup_line is not None:
         lines.append(warmup_line)

@@ -246,7 +246,10 @@ def workload_differences(current_workload, baseline_workload):
     workloads match, so the comparison is apples-to-apples. The
     sweep settings are deliberately not compared: a sweep re-runs
     the same workload at other sizes/counts, but the main result
-    it is compared against is the same either way.
+    it is compared against is the same either way. The socket
+    timeout is not compared either: it is a transport setting,
+    not part of the workload, and a run that timed out shows it
+    in its error count.
     """
     if not isinstance(baseline_workload, dict):
         return list(_WORKLOAD_KEYS)

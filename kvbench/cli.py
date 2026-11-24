@@ -338,6 +338,11 @@ def build_parser():
     parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=6379)
+    parser.add_argument("--timeout", type=float, default=5.0,
+                        help="socket timeout in seconds for the server "
+                        "connection (connect and read; default 5.0) — "
+                        "raise it for a loaded or remote server, lower "
+                        "it to fail fast on a dead one")
     parser.add_argument("--ops", type=int, default=None,
                         help="total ops to run (default 10000; "
                         "mutually exclusive with --duration)")
@@ -749,6 +754,7 @@ def main(argv=None):
             incr_weight=incr_w,
             seed=args.seed,
             pipeline=args.pipeline,
+            timeout_s=args.timeout,
             mix_label=mix_label,
             duration_s=duration_s,
             warmup_s=warmup_s,
@@ -844,7 +850,7 @@ def main(argv=None):
                   file=sys.stderr)
 
     def server_factory():
-        return RespClient(args.host, args.port)
+        return RespClient(args.host, args.port, timeout=args.timeout)
 
     scope = (f"{format_duration(duration_s)} duration"
              if duration_s is not None else f"{workload.ops} ops")
@@ -870,7 +876,7 @@ def main(argv=None):
 
     for host, port in compare_targets:
         def compare_factory(host=host, port=port):
-            return RespClient(host, port)
+            return RespClient(host, port, timeout=args.timeout)
 
         print(f"kvbench {__version__}: same workload against "
               f"{host}:{port}")
