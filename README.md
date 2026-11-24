@@ -12,6 +12,13 @@ C. Pure Python 3 standard library, no dependencies.
   for a loaded or remote server, or lowers it to fail fast on a
   dead one. The timeout is recorded in both reports, so a run
   that timed out can be told apart from one that was just slow.
+  With `--password` the client sends AUTH on connect (`AUTH
+  username password` with `--username`, the Redis 6 ACL form),
+  so a password-protected server can be benchmarked — a wrong
+  password fails the run (exit 1) before any op is counted, and
+  the password itself is never written to the reports or the
+  history: the recorded command line shows `***` in its place,
+  while both reports record that the run authenticated.
 - A workload runner (`kvbench/bench.py`) that runs a configurable
   SET/GET/INCR mix across N threads, measuring per-op latency.
   With `--pipeline N` it sends N commands per round trip instead of
@@ -245,6 +252,15 @@ python -m kvbench.cli --ops 20000 --clients 4 --duration 10s \
 python -m kvbench.cli --ops 20000 --clients 4 --timeout 30
 python -m kvbench.cli --ops 20000 --clients 4 --timeout 1
 
+# benchmark a password-protected server (real Redis with
+# requirepass): AUTH on connect, and the password never lands in
+# the reports or the history — the recorded command line shows ***
+# in its place
+python -m kvbench.cli --ops 20000 --clients 4 --password secret
+# ACL-style auth: AUTH username password
+python -m kvbench.cli --ops 20000 --clients 4 \
+    --username alice --password secret
+
 # run the same benchmark 3 times and report the median ops/sec and
 # p99 over the 3 runs, so one noisy run does not set the numbers —
 # the per-run values land in the JSON report under
@@ -267,6 +283,13 @@ Options: `--host` (default 127.0.0.1), `--port` (default 6379),
 server connection — connect and read; raise it for a loaded or
 remote server, lower it to fail fast on a dead one; a non-positive
 value is rejected),
+`--password` (authenticate on connect with AUTH before
+benchmarking, for a password-protected server; a wrong password
+fails the run (exit 1) before any op runs; the password is never
+written to the reports or the history — the recorded command line
+shows `***` in its place),
+`--username` (with `--password`, authenticate as this user — AUTH
+username password, the Redis 6 ACL form; needs `--password`),
 `--repeat` (default 1, how many times to run the benchmark: above
 1 the reported ops/sec and p99 are the medians over the runs,
 per operation as well as overall, and the per-run values are
@@ -807,6 +830,15 @@ make test
 
 ## Roadmap
 
+- ~~Authentication (`--password` / `--username`): AUTH on connect
+  for password-protected servers — `AUTH password`, or `AUTH
+  username password` with `--username` (the Redis 6 ACL form) —
+  failing fast (exit 1) on a wrong password; the password is never
+  recorded (the command line in both reports and the history shows
+  `***` in its place), while both reports record that the run
+  authenticated (`workload.auth` in JSON, an Authentication line
+  in Markdown); a run without `--password` keeps the old report
+  shape exactly.~~ Done in 0.30.0.
 - ~~Value-size sweep (`--sweep-value-size 32,128,1024`): re-run
   the same workload at several value sizes, with ops/sec and p99
   per size in both reports, so a run shows how value size affects

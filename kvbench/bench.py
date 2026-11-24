@@ -92,6 +92,11 @@ class Workload:
     # value; a loaded or remote server may need more, and a dead
     # server fails faster with less.
     timeout_s: float = 5.0
+    # Whether the run authenticates on connect (``--password``):
+    # the client sends AUTH before any benchmark op. Only the fact
+    # that auth was used is carried here — never the password or
+    # username, so they cannot leak into a report or the history.
+    auth: bool = False
     # Keyspace sizes for a sweep: when non-empty the same workload is
     # re-run once per size (see run_keyspace_sweep) and the per-size
     # ops/sec and p99 land in the reports, so a run shows how

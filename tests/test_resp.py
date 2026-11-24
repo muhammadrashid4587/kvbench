@@ -8,10 +8,21 @@ from kvbench.resp import RespClient, RespError
 
 
 class FakeHandler(socketserver.BaseRequestHandler):
-    """Speaks just enough RESP for the client tests."""
+    """Speaks just enough RESP for the client tests.
+
+    When the server's ``password`` is set, every command before a
+    successful AUTH gets a NOAUTH error, like a real
+    password-protected server; AUTH takes the password, or the
+    username and password (the Redis 6 ACL form), and only
+    ``secret`` (user ``alice``) is accepted. With no password set
+    the server needs no auth, which is the old behaviour the
+    non-auth tests rely on.
+    """
 
     def handle(self):
         store = {}
+        password = getattr(self.server, "password", None)
+        authed = password is None
         rfile = self.request.makefile("rb")
         while True:
             line = rfile.readline()
@@ -26,7 +37,21 @@ class FakeHandler(socketserver.BaseRequestHandler):
                 length = int(header[1:-2])
                 args.append(rfile.read(length + 2)[:-2].decode())
             cmd = args[0].upper()
-            if cmd == "PING":
+            if cmd == "AUTH":
+                # AUTH password, or AUTH username password: either
+                # way the password must match the server's, and
+                # the username, when given, must be "alice".
+                if (password is not None
+                        and (args[1:] == [password]
+                             or args[1:] == ["alice", password])):
+                    authed = True
+                    reply = b"+OK\r\n"
+                else:
+                    reply = (b"-WRONGPASS invalid username-password "
+                             b"pair\r\n")
+            elif not authed:
+                reply = (b"-NOAUTH Authentication required\r\n")
+            elif cmd == "PING":
                 reply = b"+PONG\r\n"
             elif cmd == "SET":
                 store[args[1]] = args[2]
@@ -52,6 +77,8 @@ class FakeHandler(socketserver.BaseRequestHandler):
 class FakeServer(socketserver.ThreadingTCPServer):
     daemon_threads = True
     allow_reuse_address = True
+    # Password clients must AUTH with, or None for no auth.
+    password = None
 
 
 class TestRespClient(unittest.TestCase):
@@ -62,11 +89,20 @@ class TestRespClient(unittest.TestCase):
         cls.thread = threading.Thread(target=cls.server.serve_forever,
                                       daemon=True)
         cls.thread.start()
+        # A second server that requires AUTH, for the auth tests.
+        cls.auth_server = FakeServer(("127.0.0.1", 0), FakeHandler)
+        cls.auth_server.password = "secret"
+        cls.auth_port = cls.auth_server.server_address[1]
+        cls.auth_thread = threading.Thread(
+            target=cls.auth_server.serve_forever, daemon=True)
+        cls.auth_thread.start()
 
     @classmethod
     def tearDownClass(cls):
         cls.server.shutdown()
         cls.server.server_close()
+        cls.auth_server.shutdown()
+        cls.auth_server.server_close()
 
     def test_ping(self):
         with RespClient("127.0.0.1", self.port) as client:
@@ -123,6 +159,41 @@ class TestRespClient(unittest.TestCase):
     def test_timeout_is_applied_to_socket(self):
         with RespClient("127.0.0.1", self.port, timeout=10) as client:
             self.assertEqual(client._sock.gettimeout(), 10)
+
+    def test_auth_with_password(self):
+        # AUTH on connect, then commands work as usual.
+        with RespClient("127.0.0.1", self.auth_port,
+                        password="secret") as client:
+            self.assertEqual(client.command("SET", "k", "v"), "OK")
+            self.assertEqual(client.command("GET", "k"), "v")
+
+    def test_auth_with_username_and_password(self):
+        # The Redis 6 ACL form: AUTH username password.
+        with RespClient("127.0.0.1", self.auth_port,
+                        username="alice",
+                        password="secret") as client:
+            self.assertEqual(client.command("PING"), "PONG")
+
+    def test_wrong_password_raises_on_connect(self):
+        # A bad password fails fast in the constructor, before any
+        # benchmark op is counted as an error.
+        with self.assertRaises(RespError):
+            RespClient("127.0.0.1", self.auth_port,
+                       password="wrong")
+
+    def test_no_password_against_auth_server_raises(self):
+        # Without a password there is nothing to AUTH with, so the
+        # constructor succeeds — but the server rejects the first
+        # command with NOAUTH, and that surfaces as a RespError.
+        with RespClient("127.0.0.1", self.auth_port) as client:
+            with self.assertRaises(RespError):
+                client.command("PING")
+
+    def test_username_without_password_rejected(self):
+        # There is nothing to authenticate with, so reject before
+        # even connecting: no server is needed for this one.
+        with self.assertRaises(ValueError):
+            RespClient("127.0.0.1", 1, username="alice")
 
 
 if __name__ == "__main__":

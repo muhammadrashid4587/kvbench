@@ -15,14 +15,21 @@ import unittest
 
 from kvbench.cli import MIX_PRESETS, _parse_client_sweep, _parse_duration, \
     _parse_host_port, _parse_keyspace_sweep, _parse_mix, \
-    _parse_value_size_sweep, build_parser, main
+    _parse_value_size_sweep, _redact_command_line, build_parser, main
 
 
 class _FakeRespHandler(socketserver.StreamRequestHandler):
-    """Minimal RESP: SET/GET/INCR against the server's own dict."""
+    """Minimal RESP: SET/GET/INCR against the server's own dict.
+
+    When the server's ``password`` is set, commands before a
+    successful AUTH get a NOAUTH error; AUTH takes the password,
+    or the username and password (the Redis 6 ACL form).
+    """
 
     def handle(self):
         store = self.server.store
+        password = getattr(self.server, "password", None)
+        authed = password is None
         while True:
             line = self.rfile.readline()
             if not line:
@@ -36,7 +43,18 @@ class _FakeRespHandler(socketserver.StreamRequestHandler):
                 length = int(length_line[1:-2])
                 args.append(self.rfile.read(length + 2)[:-2].decode())
             op = args[0].upper()
-            if op == "SET":
+            if op == "AUTH":
+                if (password is not None
+                        and (args[1:] == [password]
+                             or args[1:] == ["alice", password])):
+                    authed = True
+                    self.wfile.write(b"+OK\r\n")
+                else:
+                    self.wfile.write(
+                        b"-WRONGPASS invalid username-password pair\r\n")
+            elif not authed:
+                self.wfile.write(b"-NOAUTH Authentication required\r\n")
+            elif op == "SET":
                 store[args[1]] = args[2]
                 self.wfile.write(b"+OK\r\n")
             elif op == "GET":
@@ -59,14 +77,17 @@ class _FakeRespHandler(socketserver.StreamRequestHandler):
 class _FakeRespServer(socketserver.ThreadingTCPServer):
     daemon_threads = True
     allow_reuse_address = True
+    # Password clients must AUTH with, or None for no auth.
+    password = None
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.store = {}
 
 
-def _start_server():
+def _start_server(password=None):
     server = _FakeRespServer(("127.0.0.1", 0), _FakeRespHandler)
+    server.password = password
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server
@@ -684,6 +705,156 @@ class TestCsvRun(unittest.TestCase):
                 self.assertEqual(code, 0)
                 self.assertFalse(os.path.exists(
                     os.path.join(tmp, "timeseries.csv")))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
+class TestAuthFlag(unittest.TestCase):
+    def test_defaults_are_no_auth(self):
+        args = build_parser().parse_args([])
+        self.assertIsNone(args.username)
+        self.assertIsNone(args.password)
+
+    def test_username_without_password_rejected(self):
+        self.assertEqual(
+            main(["--username", "alice", "--ops", "10"]), 2)
+
+    def test_empty_password_rejected(self):
+        self.assertEqual(
+            main(["--password", "", "--ops", "10"]), 2)
+
+
+class TestRedactCommandLine(unittest.TestCase):
+    def test_password_value_hidden(self):
+        self.assertEqual(
+            _redact_command_line(
+                ["kvbench", "--ops", "100", "--password", "secret"]),
+            "kvbench --ops 100 --password ***")
+
+    def test_password_equals_form_hidden(self):
+        self.assertEqual(
+            _redact_command_line(
+                ["kvbench", "--password=secret", "--ops", "100"]),
+            "kvbench --password=*** --ops 100")
+
+    def test_without_password_unchanged(self):
+        argv = ["kvbench", "--ops", "100", "--clients", "2"]
+        self.assertEqual(_redact_command_line(argv), " ".join(argv))
+
+    def test_username_is_kept(self):
+        # Only the password is secret; the username may stay.
+        self.assertEqual(
+            _redact_command_line(
+                ["kvbench", "--username", "alice",
+                 "--password", "secret"]),
+            "kvbench --username alice --password ***")
+
+
+class TestAuthRun(unittest.TestCase):
+    def test_auth_run_reports_auth_and_hides_password(self):
+        server = _start_server(password="secret")
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                output = os.path.join(tmp, "report.md")
+                code = main([
+                    "--host", "127.0.0.1",
+                    "--port", str(server.server_address[1]),
+                    "--ops", "200", "--clients", "2",
+                    "--password", "secret",
+                    "--output", output,
+                ])
+                self.assertEqual(code, 0)
+                with open(output, encoding="utf-8") as f:
+                    text = f.read()
+                self.assertIn("Authentication: enabled", text)
+                self.assertNotIn("secret", text)
+                with open(os.path.join(tmp, "report.json"),
+                          encoding="utf-8") as f:
+                    doc = json.load(f)
+                self.assertTrue(doc["workload"]["auth"])
+                self.assertNotIn("secret", doc["command"])
+                self.assertIn("--password ***", doc["command"])
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_auth_with_username(self):
+        server = _start_server(password="secret")
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                code = main([
+                    "--host", "127.0.0.1",
+                    "--port", str(server.server_address[1]),
+                    "--ops", "200", "--clients", "2",
+                    "--username", "alice", "--password", "secret",
+                    "--output", os.path.join(tmp, "report.md"),
+                ])
+                self.assertEqual(code, 0)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_no_auth_run_keeps_old_workload_shape(self):
+        # Without --password the JSON workload dict has no "auth"
+        # key at all, so old reports and comparisons keep matching.
+        server = _start_server()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                code = main([
+                    "--host", "127.0.0.1",
+                    "--port", str(server.server_address[1]),
+                    "--ops", "200", "--clients", "2",
+                    "--output", os.path.join(tmp, "report.md"),
+                ])
+                self.assertEqual(code, 0)
+                with open(os.path.join(tmp, "report.json"),
+                          encoding="utf-8") as f:
+                    doc = json.load(f)
+                self.assertNotIn("auth", doc["workload"])
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_wrong_password_fails_cleanly(self):
+        server = _start_server(password="secret")
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                code = main([
+                    "--host", "127.0.0.1",
+                    "--port", str(server.server_address[1]),
+                    "--ops", "200", "--clients", "2",
+                    "--password", "wrong",
+                    "--output", os.path.join(tmp, "report.md"),
+                ])
+                # Exit 1, not a traceback from a worker thread.
+                self.assertEqual(code, 1)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_no_password_against_auth_server_fails(self):
+        # Without a password there is nothing to AUTH with, so the
+        # run goes ahead — and the server rejects every op with
+        # NOAUTH. Those rejections count as op errors, like any
+        # other server error, and the first one names the cause:
+        # the run completes with all 200 ops errored, not a crash.
+        server = _start_server(password="secret")
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                code = main([
+                    "--host", "127.0.0.1",
+                    "--port", str(server.server_address[1]),
+                    "--ops", "200", "--clients", "2",
+                    "--output", os.path.join(tmp, "report.md"),
+                ])
+                self.assertEqual(code, 0)
+                with open(os.path.join(tmp, "report.json"),
+                          encoding="utf-8") as f:
+                    doc = json.load(f)
+                self.assertEqual(doc["results"][0]["errors"], 200)
+                self.assertIn("NOAUTH",
+                              doc["results"][0]["error_sample"])
         finally:
             server.shutdown()
             server.server_close()

@@ -87,6 +87,14 @@ Usage:
     # runs; CLI flags still override the preset values
     python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
         --ops 20000 --clients 4 --slo-preset slo.json
+    # benchmark a password-protected server: AUTH on connect, with
+    # the password redacted from the recorded command line, so it
+    # never lands in the reports or the history file
+    python -m kvbench.cli --ops 20000 --clients 4 \\
+        --password secret
+    # ACL-style auth: AUTH username password
+    python -m kvbench.cli --ops 20000 --clients 4 \\
+        --username alice --password secret
 """
 
 import argparse
@@ -107,8 +115,34 @@ from .history import DEFAULT_HISTORY_FILE, export_history, \
     write_best_worst_json, write_trend
 from .report import _workload_dict, render_csv, write_csv, write_json, \
     write_report
-from .resp import RespClient
+from .resp import RespClient, RespError
 from .slo import evaluate_slo, format_slo_verdict, load_slo_preset
+
+
+def _redact_command_line(argv):
+    """Render an argv list as a command line with the password hidden.
+
+    The value after ``--password`` (``--password secret``) or in
+    ``--password=secret`` form is replaced with ``***``, so the
+    password never lands in the Markdown/JSON reports or the
+    history file, which all record the command line. Every other
+    argument is passed through unchanged.
+    """
+    out = []
+    hide_next = False
+    for arg in argv:
+        if hide_next:
+            out.append("***")
+            hide_next = False
+            continue
+        if arg == "--password":
+            out.append(arg)
+            hide_next = True
+        elif arg.startswith("--password="):
+            out.append("--password=***")
+        else:
+            out.append(arg)
+    return " ".join(out)
 
 
 def json_path_for(output_path, json_arg):
@@ -377,6 +411,17 @@ def build_parser():
                         "connection (connect and read; default 5.0) — "
                         "raise it for a loaded or remote server, lower "
                         "it to fail fast on a dead one")
+    parser.add_argument("--password", default=None, metavar="PASSWORD",
+                        help="authenticate on connect (AUTH) before "
+                        "benchmarking, for a password-protected server "
+                        "(e.g. real Redis with requirepass); the "
+                        "password is never written to the reports or "
+                        "the history — the recorded command line "
+                        "shows *** in its place")
+    parser.add_argument("--username", default=None, metavar="USERNAME",
+                        help="with --password, authenticate as this "
+                        "user (AUTH username password, the Redis 6 "
+                        "ACL form); needs --password")
     parser.add_argument("--ops", type=int, default=None,
                         help="total ops to run (default 10000; "
                         "mutually exclusive with --duration)")
@@ -726,6 +771,14 @@ def main(argv=None):
         print(format_prune(summary, history_path))
         return 0
     try:
+        if args.username is not None and args.password is None:
+            raise ValueError(
+                "--username needs --password: AUTH takes a username "
+                "and a password together")
+        if args.password is not None and args.password == "":
+            raise ValueError(
+                "--password must not be empty: pass a real password, "
+                "or leave it out for a server with no auth")
         set_w, get_w, incr_w, mix_label = _parse_mix(args.mix)
         compare_targets = [_parse_host_port(t) for t in args.compare]
         duration_s = (_parse_duration(args.duration)
@@ -814,6 +867,7 @@ def main(argv=None):
             seed=args.seed,
             pipeline=args.pipeline,
             timeout_s=args.timeout,
+            auth=args.password is not None,
             mix_label=mix_label,
             duration_s=duration_s,
             warmup_s=warmup_s,
@@ -859,7 +913,12 @@ def main(argv=None):
                           + (", same workload"
                              if args.compare_same_workload else "")
                           + ")")
-    command_line = " ".join(sys.argv)
+    # The recorded command line is the one actually run: the argv
+    # passed to main(), or sys.argv when main() was called bare —
+    # with the password redacted, so it never lands in the reports
+    # or the history file.
+    command_line = _redact_command_line(
+        list(argv) if argv is not None else sys.argv)
     results = []
 
     def _warmup_note(result):
@@ -934,7 +993,9 @@ def main(argv=None):
                   file=sys.stderr)
 
     def server_factory():
-        return RespClient(args.host, args.port, timeout=args.timeout)
+        return RespClient(args.host, args.port, timeout=args.timeout,
+                          username=args.username,
+                          password=args.password)
 
     def _run(factory, name):
         """Run the workload once, or --repeat times and report the
@@ -967,7 +1028,11 @@ def main(argv=None):
           f"{workload.pipeline} against {args.host}:{args.port}")
     try:
         result = _run(server_factory, f"cinder ({args.host}:{args.port})")
-    except (ConnectionError, OSError) as exc:
+    except (ConnectionError, OSError, RespError) as exc:
+        # RespError here is an AUTH failure at connect (a wrong
+        # password raises from the RespClient constructor): the run
+        # never started, so fail cleanly instead of crashing on a
+        # traceback from inside a worker thread.
         print(f"kvbench: cannot reach {args.host}:{args.port}: {exc}",
               file=sys.stderr)
         return 1
@@ -982,13 +1047,15 @@ def main(argv=None):
 
     for host, port in compare_targets:
         def compare_factory(host=host, port=port):
-            return RespClient(host, port, timeout=args.timeout)
+            return RespClient(host, port, timeout=args.timeout,
+                              username=args.username,
+                              password=args.password)
 
         print(f"kvbench {__version__}: same workload against "
               f"{host}:{port}")
         try:
             compared = _run(compare_factory, f"compare ({host}:{port})")
-        except (ConnectionError, OSError) as exc:
+        except (ConnectionError, OSError, RespError) as exc:
             print(f"kvbench: cannot reach {host}:{port}: {exc}",
                   file=sys.stderr)
             return 1

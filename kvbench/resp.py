@@ -25,14 +25,34 @@ def _encode_command(*args):
 
 
 class RespClient:
-    """A single RESP connection. One client per thread; not thread-safe."""
+    """A single RESP connection. One client per thread; not thread-safe.
 
-    def __init__(self, host="127.0.0.1", port=6379, timeout=5.0):
+    With ``password`` given, the client authenticates right after
+    connecting (``AUTH password``, or ``AUTH username password``
+    when ``username`` is given too, the Redis 6 ACL form) and a
+    wrong password raises :class:`RespError` from the constructor,
+    so a run against a password-protected server fails fast
+    instead of counting every op as an error. ``username`` without
+    ``password`` is rejected: there is nothing to authenticate
+    with.
+    """
+
+    def __init__(self, host="127.0.0.1", port=6379, timeout=5.0,
+                 username=None, password=None):
+        if username is not None and password is None:
+            raise ValueError(
+                "username needs a password: AUTH takes a username "
+                "and a password together")
         self.host = host
         self.port = port
         self._sock = socket.create_connection((host, port), timeout=timeout)
         self._sock.settimeout(timeout)
         self._rfile = self._sock.makefile("rb")
+        if password is not None:
+            if username is not None:
+                self.command("AUTH", username, password)
+            else:
+                self.command("AUTH", password)
 
     def __enter__(self):
         return self

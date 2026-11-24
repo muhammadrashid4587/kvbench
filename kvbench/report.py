@@ -66,6 +66,11 @@ def _workload_dict(workload):
         # null when they were given on the command line.
         "slo_preset": workload.slo_preset,
     }
+    if workload.auth:
+        # Only an authenticated run records it: a run without auth
+        # keeps the old workload shape exactly, and the password
+        # itself is never recorded — only that AUTH was used.
+        doc["auth"] = True
     if workload.repeat > 1:
         # Only a repeated run records the repeat count: a single
         # run's workload dict is unchanged, so old reports and
@@ -722,6 +727,13 @@ def render_markdown(results, workload, command_line, comparison=None,
         )
     else:
         repeat_line = None
+    if workload.auth:
+        auth_line = (
+            "- Authentication: enabled (the client sent AUTH on "
+            "connect; the password is never recorded in this report)"
+        )
+    else:
+        auth_line = None
     lines = [
         "# kvbench report",
         "",
@@ -754,6 +766,8 @@ def render_markdown(results, workload, command_line, comparison=None,
         lines.append(value_sweep_line)
     if repeat_line is not None:
         lines.append(repeat_line)
+    if auth_line is not None:
+        lines.append(auth_line)
     lines += [
         "",
         "## Results",
