@@ -494,6 +494,47 @@ class TestReport(unittest.TestCase):
         self.assertIsNone(parsed["workload"]["sweep_clients"])
         self.assertEqual(parsed["results"][0]["client_sweep"], [])
 
+    def test_value_size_sweep_in_markdown_and_json(self):
+        workload = Workload(ops=100, clients=2, keys=10, value_size=8,
+                            sweep_value_size=[8, 64])
+        result = BenchmarkResult(
+            name="cinder", ops=100, elapsed_s=0.01, errors=0,
+            latencies_ns=[100_000] * 100,
+            value_sweep=[
+                {"value_size": 8, "ops": 100, "ops_per_sec": 10_000,
+                 "mean_ms": 0.1, "p99_ms": 0.12},
+                {"value_size": 64, "ops": 100, "ops_per_sec": 9_000,
+                 "mean_ms": 0.11, "p99_ms": 0.15},
+            ],
+        )
+        text = render_markdown([result], workload, "kvbench")
+        self.assertIn("Value size sweep: 8, 64 bytes", text)
+        self.assertIn("## Value size sweep", text)
+        self.assertIn("Value size sweep — cinder", text)
+        self.assertIn("| Value size (bytes) | Ops | Ops/sec | "
+                      "Mean (ms) | p99 (ms) |", text)
+        self.assertIn("| 8 | 100 | 10,000 | 0.100 | 0.120 |", text)
+        self.assertIn("| 64 | 100 | 9,000 | 0.110 | 0.150 |", text)
+        self.assertIn("how value size affects throughput", text)
+        parsed = json.loads(render_json([result], workload, "kvbench"))
+        self.assertEqual(parsed["workload"]["sweep_value_size"], [8, 64])
+        sweep = parsed["results"][0]["value_size_sweep"]
+        self.assertEqual(len(sweep), 2)
+        self.assertEqual(sweep[0]["value_size"], 8)
+        self.assertAlmostEqual(sweep[0]["ops_per_sec"], 10_000)
+        self.assertAlmostEqual(sweep[0]["p99_ms"], 0.12)
+        self.assertEqual(sweep[1]["value_size"], 64)
+
+    def test_no_value_size_sweep_omits_section(self):
+        workload = _workload()
+        text = render_markdown([_result()], workload, "kvbench")
+        self.assertNotIn("## Value size sweep", text)
+        self.assertNotIn("Value size sweep:", text)
+        self.assertNotIn("how value size affects throughput", text)
+        parsed = json.loads(render_json([_result()], workload, "kvbench"))
+        self.assertIsNone(parsed["workload"]["sweep_value_size"])
+        self.assertEqual(parsed["results"][0]["value_size_sweep"], [])
+
     def test_json_path_for(self):
         self.assertEqual(json_path_for("report.md", None), "report.json")
         self.assertEqual(json_path_for("out/run.md", None), "out/run.json")

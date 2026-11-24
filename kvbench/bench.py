@@ -103,6 +103,13 @@ class Workload:
     # concurrency affects throughput — where adding clients stops
     # helping and the server saturates. Empty means no sweep.
     sweep_clients: list = field(default_factory=list)
+    # Value sizes (bytes) for a sweep: when non-empty the same
+    # workload is re-run once per size (see run_value_size_sweep)
+    # and the per-size ops/sec and p99 land in the reports, so a
+    # run shows how value size affects throughput — a store that
+    # copies values on every SET slows as values grow, while one
+    # that only moves pointers does not. Empty means no sweep.
+    sweep_value_size: list = field(default_factory=list)
     # SLO gate thresholds: p99 latency cap in milliseconds and error
     # rate cap in percent of attempted ops. None means that side of
     # the gate is not set; the gate only applies when at least one
@@ -160,6 +167,10 @@ class Workload:
         if any(not isinstance(count, int) or count <= 0
                for count in self.sweep_clients):
             raise ValueError("sweep client counts must be positive integers")
+        if any(not isinstance(size, int) or size <= 0
+               for size in self.sweep_value_size):
+            raise ValueError(
+                "sweep value sizes must be positive integers")
         if self.pipeline < 1:
             raise ValueError("pipeline depth must be at least 1")
         if self.slo_p99_ms is not None and self.slo_p99_ms < 0:
@@ -254,6 +265,12 @@ class BenchmarkResult:
     # p99 latency of that run. Empty when no sweep ran
     # (``--sweep-clients`` not given). Same shape as ``sweep``.
     client_sweep: list = field(default_factory=list)
+    # Value-size sweep results for this backend: one entry per
+    # swept size, in ascending size order, each with the size
+    # (``value_size`` in bytes), the ops completed, and the ops/sec,
+    # mean and p99 latency of that run. Empty when no sweep ran
+    # (``--sweep-value-size`` not given). Same shape as ``sweep``.
+    value_sweep: list = field(default_factory=list)
     # Repeated-run detail (see run_repeated_workload): one summary
     # dict per run, in run order, each with the run index (``run``),
     # ops, elapsed, ops/sec, errors, mean/p50/p95/p99 and the
@@ -830,6 +847,39 @@ def run_client_sweep(client_factory, workload, counts):
         summary = result.summary
         out.append({
             "clients": count,
+            "ops": result.ops,
+            "ops_per_sec": result.ops_per_sec,
+            "mean_ms": summary["mean_ms"],
+            "p99_ms": summary["p99_ms"],
+        })
+    return out
+
+
+def run_value_size_sweep(client_factory, workload, sizes):
+    """Run the same workload once per value size in ``sizes``.
+
+    Each run is a fresh copy of ``workload`` with ``value_size``
+    replaced by that size in bytes; everything else (ops, clients,
+    keys, mix, distribution, pipeline, warmup, seed) is identical,
+    so the per-size numbers isolate the effect of value size on
+    throughput — whether the store's cost grows with the bytes it
+    moves. Returns a list of ``{"value_size", "ops", "ops_per_sec",
+    "mean_ms", "p99_ms"}`` dicts, in the order ``sizes`` was
+    given. If a run cannot reach the backend the sweep stops there
+    and the sizes completed so far are returned — the caller
+    reports the shortfall.
+    """
+    out = []
+    for size in sizes:
+        swept = replace(workload, value_size=size)
+        try:
+            result = run_workload(client_factory, swept,
+                                  f"sweep ({size} byte values)")
+        except (ConnectionError, OSError):
+            break
+        summary = result.summary
+        out.append({
+            "value_size": size,
             "ops": result.ops,
             "ops_per_sec": result.ops_per_sec,
             "mean_ms": summary["mean_ms"],

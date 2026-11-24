@@ -49,6 +49,9 @@ def _workload_dict(workload):
         # Client counts swept in this run, or null when no sweep.
         "sweep_clients": (list(workload.sweep_clients)
                           if workload.sweep_clients else None),
+        # Value sizes (bytes) swept in this run, or null when no sweep.
+        "sweep_value_size": (list(workload.sweep_value_size)
+                             if workload.sweep_value_size else None),
         # SLO gate thresholds for this run, or null when not set.
         "slo_p99_ms": workload.slo_p99_ms,
         "slo_error_rate_pct": workload.slo_error_rate_pct,
@@ -102,6 +105,10 @@ def _result_dict(result, top_n=5):
         # Client-count sweep: one per-count summary per swept count
         # (clients, ops, ops/sec, mean and p99); [] when no sweep ran.
         "client_sweep": result.client_sweep,
+        # Value-size sweep: one per-size summary per swept size
+        # (value_size in bytes, ops, ops/sec, mean and p99);
+        # [] when no sweep ran.
+        "value_size_sweep": result.value_sweep,
     }
     if result.repeat_runs:
         # Only a repeated run carries this: a single run's result
@@ -428,6 +435,26 @@ def _client_sweep_lines(result):
     return lines
 
 
+def _value_size_sweep_lines(result):
+    """Value-size sweep table for one result, or [] when no sweep ran."""
+    if not result.value_sweep:
+        return []
+    lines = [
+        f"### Value size sweep — {result.name}",
+        "",
+        "| Value size (bytes) | Ops | Ops/sec | Mean (ms) | p99 (ms) |",
+        "| ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for entry in result.value_sweep:
+        lines.append(
+            f"| {entry['value_size']:,} | {entry['ops']} | "
+            f"{entry['ops_per_sec']:,.0f} | {entry['mean_ms']:.3f} | "
+            f"{entry['p99_ms']:.3f} |"
+        )
+    lines.append("")
+    return lines
+
+
 def _time_series_lines(result):
     """Per-second ops/latency table for one result, or [] when empty."""
     series = result.time_series
@@ -675,6 +702,16 @@ def render_markdown(results, workload, command_line, comparison=None,
         )
     else:
         client_sweep_line = None
+    if workload.sweep_value_size:
+        value_sweep_line = (
+            "- Value size sweep: "
+            + ", ".join(f"{s:,}" for s in workload.sweep_value_size)
+            + " bytes (the same workload re-run once per value "
+            "size; per-size ops/sec and p99 are in the Value size "
+            "sweep section below)"
+        )
+    else:
+        value_sweep_line = None
     if workload.repeat > 1:
         repeat_line = (
             f"- Repeat: {workload.repeat} runs (the same workload "
@@ -713,6 +750,8 @@ def render_markdown(results, workload, command_line, comparison=None,
         lines.append(sweep_line)
     if client_sweep_line is not None:
         lines.append(client_sweep_line)
+    if value_sweep_line is not None:
+        lines.append(value_sweep_line)
     if repeat_line is not None:
         lines.append(repeat_line)
     lines += [
@@ -741,6 +780,11 @@ def render_markdown(results, workload, command_line, comparison=None,
         client_sweep_lines += _client_sweep_lines(result)
     if client_sweep_lines:
         lines += ["", "## Client sweep", ""] + client_sweep_lines
+    value_sweep_lines = []
+    for result in results:
+        value_sweep_lines += _value_size_sweep_lines(result)
+    if value_sweep_lines:
+        lines += ["", "## Value size sweep", ""] + value_sweep_lines
     repeat_lines = []
     for result in results:
         repeat_lines += _repeat_lines(result)
@@ -853,6 +897,13 @@ def render_markdown(results, workload, command_line, comparison=None,
             "how concurrency affects throughput — where adding "
             "clients stops helping and the server saturates; the main "
             "results table above uses the base client count."
+        )
+    if workload.sweep_value_size:
+        lines.append(
+            "- The Value size sweep section re-runs the same workload "
+            "once per value size, so ops/sec and p99 per size show "
+            "how value size affects throughput; the main results "
+            "table above uses the base value size."
         )
     if workload.repeat > 1:
         lines.append(

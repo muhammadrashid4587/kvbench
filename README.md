@@ -61,6 +61,11 @@ C. Pure Python 3 standard library, no dependencies.
   per client count, and the reports show ops/sec and p99 per
   count, so a run shows how concurrency affects throughput — where
   adding clients stops helping and the server saturates.
+  With `--sweep-value-size 32,128,1024` the same workload is
+  re-run once per value size in bytes, and the reports show ops/sec
+  and p99 per size, so a run shows how value size affects
+  throughput — a store that copies values on every SET slows as
+  values grow, while one that only moves pointers does not.
   When the tail is high the reports attribute it: slow ops (at or
   above the overall p99) are broken down by operation type, by
   client, by hot vs cold keys, and by second, and the finding
@@ -162,6 +167,11 @@ python -m kvbench.cli --ops 20000 --clients 4 \
 # sweep the client count: the same workload re-run at 1, 2, 4
 # and 8 clients, with ops/sec and p99 per count
 python -m kvbench.cli --ops 20000 --sweep-clients 1,2,4,8
+
+# sweep the value size: the same workload re-run at 32, 128 and
+# 1024 byte values, with ops/sec and p99 per size
+python -m kvbench.cli --ops 20000 --clients 4 \
+    --sweep-value-size 32,128,1024
 
 # record the run in the history file, then look at the ops/sec
 # trend over time (default file: ~/.kvbench/history.jsonl)
@@ -289,6 +299,9 @@ per size and report ops/sec and p99 per size in both reports),
 `--sweep-clients` (comma-separated client counts, e.g. `1,2,4,8`:
 re-run the same workload once per count and report ops/sec and p99
 per count in both reports),
+`--sweep-value-size` (comma-separated value sizes in bytes, e.g.
+`32,128,1024`: re-run the same workload once per size and report
+ops/sec and p99 per size in both reports),
 `--output` (default report.md), `--json`
 (default: same name as `--output` with a `.json` extension),
 `--csv` (write a per-second throughput CSV alongside the reports:
@@ -711,6 +724,16 @@ concurrency on throughput reads at a glance. The JSON report
 carries the same rows per result under `client_sweep`, and the
 workload section carries the swept counts under `sweep_clients`.
 
+With `--sweep-value-size` the report has a Value size sweep section
+right below the Client sweep (or the Keyspace sweep, or the results
+table, when there is no client sweep): one table per backend with a
+row per swept size — value size in bytes, ops, ops/sec, mean and
+p99 — so the effect of value size on throughput reads at a glance:
+a store that copies values on every SET slows as values grow, while
+one that only moves pointers does not. The JSON report carries the
+same rows per result under `value_size_sweep`, and the workload
+section carries the swept sizes under `sweep_value_size`.
+
 Below the table, each backend gets a per-operation stats table:
 ops, ops/sec, mean, p50, p95 and p99 latency split by SET, GET and
 INCR. Ops that never ran (e.g. INCR in an `80:20` read:write mix)
@@ -784,6 +807,10 @@ make test
 
 ## Roadmap
 
+- ~~Value-size sweep (`--sweep-value-size 32,128,1024`): re-run
+  the same workload at several value sizes, with ops/sec and p99
+  per size in both reports, so a run shows how value size affects
+  throughput.~~ Done in 0.29.0.
 - ~~Key prefix (`--key-prefix NAME`): prefix every benchmark key
   (`<prefix>:<rank>` for SET/GET, `<prefix>:counter:<rank>` for
   INCR) so runs against a shared store do not collide, with the

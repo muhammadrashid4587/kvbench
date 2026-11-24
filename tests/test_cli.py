@@ -14,7 +14,8 @@ import threading
 import unittest
 
 from kvbench.cli import MIX_PRESETS, _parse_client_sweep, _parse_duration, \
-    _parse_host_port, _parse_keyspace_sweep, _parse_mix, build_parser, main
+    _parse_host_port, _parse_keyspace_sweep, _parse_mix, \
+    _parse_value_size_sweep, build_parser, main
 
 
 class _FakeRespHandler(socketserver.StreamRequestHandler):
@@ -407,6 +408,81 @@ class TestClientSweepRun(unittest.TestCase):
     def test_bad_client_sweep_rejected(self):
         for bad in ("bogus", "0", "1,abc", "1,,2"):
             code = main(["--sweep-clients", bad, "--ops", "10"])
+            self.assertEqual(code, 2, msg=bad)
+
+
+class TestParseValueSizeSweep(unittest.TestCase):
+    def test_comma_list(self):
+        self.assertEqual(_parse_value_size_sweep("32,128,1024"),
+                         [32, 128, 1024])
+
+    def test_single_size(self):
+        self.assertEqual(_parse_value_size_sweep("64"), [64])
+
+    def test_sorted_and_deduped(self):
+        self.assertEqual(_parse_value_size_sweep("128,32,128"),
+                         [32, 128])
+        self.assertEqual(_parse_value_size_sweep(" 64 , 256 "),
+                         [64, 256])
+
+    def test_invalid(self):
+        for bad in ("", "0", "-8", "32,abc", "32,,128", "32.5",
+                    "32,0", ",64"):
+            with self.assertRaises(ValueError, msg=bad):
+                _parse_value_size_sweep(bad)
+
+
+class TestValueSizeSweepFlag(unittest.TestCase):
+    def test_defaults_no_sweep(self):
+        args = build_parser().parse_args([])
+        self.assertIsNone(args.sweep_value_size)
+
+    def test_sweep_value_kept(self):
+        args = build_parser().parse_args(
+            ["--sweep-value-size", "32,128"])
+        self.assertEqual(args.sweep_value_size, "32,128")
+
+
+class TestValueSizeSweepRun(unittest.TestCase):
+    def test_value_size_sweep_run_reports_per_size(self):
+        server = _start_server()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                output = os.path.join(tmp, "report.md")
+                code = main([
+                    "--host", "127.0.0.1",
+                    "--port", str(server.server_address[1]),
+                    "--ops", "200", "--clients", "2",
+                    "--sweep-value-size", "8,64",
+                    "--output", output,
+                ])
+                self.assertEqual(code, 0)
+                with open(output, encoding="utf-8") as f:
+                    text = f.read()
+                self.assertIn("Value size sweep: 8, 64 bytes", text)
+                self.assertIn("## Value size sweep", text)
+                self.assertIn("| 8 | 200 |", text)
+                self.assertIn("| 64 | 200 |", text)
+                self.assertIn("how value size affects throughput", text)
+                with open(os.path.join(tmp, "report.json"),
+                          encoding="utf-8") as f:
+                    parsed = json.load(f)
+                self.assertEqual(parsed["workload"]["sweep_value_size"],
+                                 [8, 64])
+                sweep = parsed["results"][0]["value_size_sweep"]
+                self.assertEqual(len(sweep), 2)
+                self.assertEqual(sweep[0]["value_size"], 8)
+                self.assertEqual(sweep[0]["ops"], 200)
+                self.assertGreater(sweep[0]["ops_per_sec"], 0)
+                self.assertGreaterEqual(sweep[0]["p99_ms"], 0)
+                self.assertEqual(sweep[1]["value_size"], 64)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_bad_value_size_sweep_rejected(self):
+        for bad in ("bogus", "0", "32,abc", "32,,128"):
+            code = main(["--sweep-value-size", bad, "--ops", "10"])
             self.assertEqual(code, 2, msg=bad)
 
 

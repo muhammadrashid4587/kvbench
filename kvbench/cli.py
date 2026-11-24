@@ -25,6 +25,11 @@ Usage:
     # and 8 clients, with ops/sec and p99 per count
     python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
         --ops 20000 --sweep-clients 1,2,4,8 --output report.md
+    # sweep the value size: the same workload re-run at 32, 128 and
+    # 1024 byte values, with ops/sec and p99 per size
+    python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
+        --ops 20000 --clients 4 \\
+        --sweep-value-size 32,128,1024 --output report.md
     # record the run in the history file, then compare later runs
     # against it (ops/sec trend over time)
     python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
@@ -92,7 +97,7 @@ from datetime import datetime, timezone
 from . import __version__
 from .bench import DictClient, Workload, format_duration, \
     run_client_sweep, run_keyspace_sweep, run_repeated_workload, \
-    run_workload
+    run_value_size_sweep, run_workload
 from .compare import compare_results, format_verdict, load_baseline, \
     load_history_baseline
 from .history import DEFAULT_HISTORY_FILE, export_history, \
@@ -245,6 +250,34 @@ def _parse_client_sweep(text):
     return sorted(set(counts))
 
 
+def _parse_value_size_sweep(text):
+    """Parse a ``--sweep-value-size`` value into a sorted list of
+    distinct positive ints, e.g. ``32,128,1024`` -> [32, 128, 1024].
+    Duplicates are dropped and the sizes are sorted, so
+    ``128,32,128`` sweeps 32 then 128.
+    """
+    if not text:
+        raise ValueError(
+            "sweep-value-size must list value sizes in bytes, "
+            "e.g. 32,128,1024")
+    sizes = []
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            raise ValueError(
+                "sweep-value-size sizes must be comma-separated "
+                "integers, e.g. 32,128,1024")
+        try:
+            size = int(part)
+        except ValueError as exc:
+            raise ValueError(
+                "sweep-value-size sizes must be integers") from exc
+        if size <= 0:
+            raise ValueError("sweep-value-size sizes must be positive")
+        sizes.append(size)
+    return sorted(set(sizes))
+
+
 def _parse_slo_op(text):
     """Parse a ``--slo-op`` value into (op, p99_ms, error_rate_pct).
 
@@ -394,6 +427,11 @@ def build_parser():
                         help="re-run the same workload once per "
                         "client count, e.g. 1,2,4,8, and report "
                         "ops/sec and p99 per count")
+    parser.add_argument("--sweep-value-size", default=None,
+                        metavar="BYTES",
+                        help="re-run the same workload once per "
+                        "value size in bytes, e.g. 32,128,1024, and "
+                        "report ops/sec and p99 per size")
     parser.add_argument("--repeat", type=int, default=1, metavar="N",
                         help="run the benchmark N times and report the "
                         "median ops/sec and p99 over the N runs "
@@ -698,6 +736,8 @@ def main(argv=None):
                        if args.sweep_keyspace else [])
         client_counts = (_parse_client_sweep(args.sweep_clients)
                          if args.sweep_clients else [])
+        value_sizes = (_parse_value_size_sweep(args.sweep_value_size)
+                       if args.sweep_value_size else [])
         if args.repeat < 1:
             raise ValueError(
                 "--repeat must be a positive integer")
@@ -782,6 +822,7 @@ def main(argv=None):
             hot_keys=args.hot_keys,
             sweep_keyspace=sweep_sizes,
             sweep_clients=client_counts,
+            sweep_value_size=value_sizes,
             repeat=args.repeat,
             slo_p99_ms=slo_p99_ms,
             slo_error_rate_pct=slo_error_rate,
@@ -869,6 +910,29 @@ def main(argv=None):
                   f"{len(client_counts)} counts (backend unreachable)",
                   file=sys.stderr)
 
+    def _run_value_size_sweep(factory, result):
+        """Re-run the workload once per swept value size and attach
+        the per-size summaries to ``result``.
+
+        Prints one line per size. A sweep that stops early (the
+        backend went away mid-sweep) keeps the sizes that completed
+        and says so on stderr instead of failing the whole run —
+        the main result already landed.
+        """
+        if not value_sizes:
+            return
+        result.value_sweep = run_value_size_sweep(
+            factory, workload, value_sizes)
+        for entry in result.value_sweep:
+            print(f"  value-size sweep {entry['value_size']:,} bytes: "
+                  f"{entry['ops_per_sec']:,.0f} ops/sec, "
+                  f"p99 {entry['p99_ms']:.3f} ms")
+        if len(result.value_sweep) < len(value_sizes):
+            print(f"kvbench: value-size sweep on {result.name} stopped "
+                  f"after {len(result.value_sweep)} of "
+                  f"{len(value_sizes)} sizes (backend unreachable)",
+                  file=sys.stderr)
+
     def server_factory():
         return RespClient(args.host, args.port, timeout=args.timeout)
 
@@ -914,6 +978,7 @@ def main(argv=None):
           f"errors {result.errors}{_warmup_note(result)}{median_note}")
     _run_sweep(server_factory, result)
     _run_client_sweep(server_factory, result)
+    _run_value_size_sweep(server_factory, result)
 
     for host, port in compare_targets:
         def compare_factory(host=host, port=port):
@@ -935,6 +1000,7 @@ def main(argv=None):
               f"{median_note}")
         _run_sweep(compare_factory, compared)
         _run_client_sweep(compare_factory, compared)
+        _run_value_size_sweep(compare_factory, compared)
 
     if args.baseline:
         baseline = _run(DictClient, "baseline (dict)")
@@ -945,6 +1011,7 @@ def main(argv=None):
               f"{_warmup_note(baseline)}{median_note}")
         _run_sweep(DictClient, baseline)
         _run_client_sweep(DictClient, baseline)
+        _run_value_size_sweep(DictClient, baseline)
 
     comparison = None
     if baseline_doc is not None:
