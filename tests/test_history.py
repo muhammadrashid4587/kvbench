@@ -5,15 +5,17 @@ import json
 import os
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 
 from kvbench import __version__
 from kvbench.bench import BenchmarkResult, Workload
 from kvbench.cli import main
 from kvbench.history import DEFAULT_HISTORY_FILE, \
-    best_worst_comparison, build_record, format_best_worst, \
-    format_history, format_trend, load_history, record_run, \
-    write_best_worst, write_best_worst_json, write_trend, _sparkline
+    best_worst_comparison, build_record, export_history, \
+    format_best_worst, format_history, format_import, \
+    format_trend, import_history, load_export, load_history, \
+    record_run, write_best_worst, write_best_worst_json, \
+    write_trend, _sparkline
 
 
 def _make_result(name="cinder (127.0.0.1:6379)", ops=1000,
@@ -835,6 +837,362 @@ class TestDefaultPath(unittest.TestCase):
         self.assertTrue(DEFAULT_HISTORY_FILE.startswith(
             os.path.expanduser("~")))
         self.assertTrue(DEFAULT_HISTORY_FILE.endswith("history.jsonl"))
+
+
+class TestExportHistory(unittest.TestCase):
+    def _entries(self, rates=(40000.0, 50000.0)):
+        workload = _make_workload()
+        return [
+            build_record(_make_result(ops_per_sec=rate), workload,
+                         "kvbench")
+            for rate in rates
+        ]
+
+    def test_export_writes_portable_json(self):
+        entries = self._entries()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "history.json")
+            document = export_history(path, entries)
+            self.assertEqual(document["tool"], "kvbench")
+            self.assertEqual(document["version"], __version__)
+            self.assertIn("exported_at", document)
+            self.assertEqual(document["records"], entries)
+            with open(path, encoding="utf-8") as f:
+                parsed = json.load(f)
+            self.assertEqual(parsed, document)
+
+    def test_export_filters_to_one_backend(self):
+        workload = _make_workload()
+        entries = [
+            build_record(_make_result(name="baseline (dict)",
+                                      ops_per_sec=90000.0),
+                         workload, "kvbench"),
+            build_record(_make_result(ops_per_sec=40000.0), workload,
+                         "kvbench"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "history.json")
+            document = export_history(
+                path, entries,
+                backends=["cinder (127.0.0.1:6379)"])
+            self.assertEqual(len(document["records"]), 1)
+            self.assertEqual(document["records"][0]["ops_per_sec"],
+                             40000.0)
+
+    def test_export_of_empty_history_writes_empty_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "history.json")
+            document = export_history(path, [])
+            self.assertEqual(document["records"], [])
+            with open(path, encoding="utf-8") as f:
+                self.assertEqual(json.load(f)["records"], [])
+
+    def test_export_creates_parent_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "exports", "history.json")
+            export_history(path, self._entries())
+            with open(path, encoding="utf-8") as f:
+                self.assertEqual(len(json.load(f)["records"]), 2)
+
+
+class TestLoadExport(unittest.TestCase):
+    def _write(self, path, text):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def test_round_trip_through_export(self):
+        workload = _make_workload()
+        entries = [build_record(_make_result(), workload, "kvbench")]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "history.json")
+            export_history(path, entries)
+            self.assertEqual(load_export(path), entries)
+
+    def test_missing_file_raises_value_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                load_export(os.path.join(tmp, "nope.json"))
+
+    def test_invalid_json_raises_value_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "history.json")
+            self._write(path, "not json at all")
+            with self.assertRaises(ValueError):
+                load_export(path)
+
+    def test_top_level_list_raises_value_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "history.json")
+            self._write(path, json.dumps([{"backend": "cinder"}]))
+            with self.assertRaises(ValueError):
+                load_export(path)
+
+    def test_missing_records_list_raises_value_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "history.json")
+            self._write(path, json.dumps({"tool": "kvbench"}))
+            with self.assertRaises(ValueError):
+                load_export(path)
+
+    def test_record_without_backend_raises_value_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "history.json")
+            self._write(path, json.dumps({"records": [
+                {"timestamp": "2026-11-23T10:00:00+00:00"}]}))
+            with self.assertRaises(ValueError):
+                load_export(path)
+
+    def test_record_without_timestamp_raises_value_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "history.json")
+            self._write(path, json.dumps({"records": [
+                {"backend": "cinder"}]}))
+            with self.assertRaises(ValueError):
+                load_export(path)
+
+    def test_non_object_record_raises_value_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "history.json")
+            self._write(path, json.dumps({"records": ["cinder"]}))
+            with self.assertRaises(ValueError):
+                load_export(path)
+
+
+class TestImportHistory(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.history = os.path.join(self.tmp.name, "history.jsonl")
+        self.export = os.path.join(self.tmp.name, "history.json")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _entries(self, rates=(40000.0, 50000.0), name=None,
+                 start_day=1):
+        # Timestamps are set explicitly so the (backend,
+        # timestamp) merge key is deterministic.
+        workload = _make_workload()
+        entries = []
+        for day, rate in enumerate(rates, start=start_day):
+            entry = build_record(
+                _make_result(name=name or "cinder (127.0.0.1:6379)",
+                             ops_per_sec=rate),
+                workload, "kvbench")
+            entry["timestamp"] = f"2026-11-0{day}T10:00:00+00:00"
+            entries.append(entry)
+        return entries
+
+    def test_import_into_empty_history_adds_all(self):
+        entries = self._entries()
+        export_history(self.export, entries)
+        summary = import_history(self.export, self.history)
+        self.assertEqual(summary, {"added": 2, "duplicates": 0,
+                                   "conflicts": 0})
+        self.assertEqual(load_history(self.history), entries)
+
+    def test_reimport_is_all_duplicates_and_adds_nothing(self):
+        entries = self._entries()
+        export_history(self.export, entries)
+        import_history(self.export, self.history)
+        summary = import_history(self.export, self.history)
+        self.assertEqual(summary, {"added": 0, "duplicates": 2,
+                                   "conflicts": 0})
+        self.assertEqual(len(load_history(self.history)), 2)
+
+    def test_conflict_keeps_the_existing_record(self):
+        entries = self._entries()
+        export_history(self.export, entries)
+        import_history(self.export, self.history)
+        # Same backend and timestamp as the first run, but a
+        # different ops/sec: the existing record must win.
+        changed = [dict(entries[0])]
+        changed[0]["ops_per_sec"] = 99999.0
+        export_history(self.export, changed)
+        summary = import_history(self.export, self.history)
+        self.assertEqual(summary, {"added": 0, "duplicates": 0,
+                                   "conflicts": 1})
+        self.assertEqual(load_history(self.history)[0]["ops_per_sec"],
+                         40000.0)
+
+    def test_new_records_are_appended_in_export_order(self):
+        first = self._entries(rates=(40000.0,))
+        export_history(self.export, first)
+        import_history(self.export, self.history)
+        # Later timestamps (days 2 and 3): both are new records.
+        second = self._entries(rates=(50000.0, 60000.0), start_day=2)
+        # Same backend, later timestamps: both are new.
+        export_history(self.export, second)
+        summary = import_history(self.export, self.history)
+        self.assertEqual(summary["added"], 2)
+        loaded = load_history(self.history)
+        self.assertEqual([e["ops_per_sec"] for e in loaded],
+                         [40000.0, 50000.0, 60000.0])
+
+    def test_same_timestamp_different_backend_is_a_new_record(self):
+        cinder = self._entries(rates=(40000.0,))
+        baseline = self._entries(rates=(90000.0,),
+                                 name="baseline (dict)")
+        export_history(self.export, cinder + baseline)
+        summary = import_history(self.export, self.history)
+        self.assertEqual(summary["added"], 2)
+        self.assertEqual(
+            [e["backend"] for e in load_history(self.history)],
+            ["cinder (127.0.0.1:6379)", "baseline (dict)"])
+
+    def test_bad_export_raises_and_leaves_history_untouched(self):
+        entries = self._entries()
+        record_run(self.history, [_make_result()], _make_workload(),
+                   "kvbench")
+        before = load_history(self.history)
+        with open(self.export, "w", encoding="utf-8") as f:
+            f.write("not json at all")
+        with self.assertRaises(ValueError):
+            import_history(self.export, self.history)
+        self.assertEqual(load_history(self.history), before)
+
+    def test_import_creates_parent_directory(self):
+        nested = os.path.join(self.tmp.name, "a", "b", "history.jsonl")
+        export_history(self.export, self._entries())
+        summary = import_history(self.export, nested)
+        self.assertEqual(summary["added"], 2)
+        self.assertEqual(len(load_history(nested)), 2)
+
+    def test_format_import_names_each_outcome(self):
+        text = format_import(
+            {"added": 2, "duplicates": 1, "conflicts": 1},
+            "history.json", "history.jsonl")
+        self.assertIn("added 2 run(s)", text)
+        self.assertIn("skipped 1 duplicate run(s)", text)
+        self.assertIn("kept the existing record for 1 conflicting "
+                      "run(s)", text)
+
+    def test_format_import_with_nothing_new(self):
+        text = format_import(
+            {"added": 0, "duplicates": 0, "conflicts": 0},
+            "history.json", "history.jsonl")
+        self.assertIn("nothing new to import", text)
+
+
+class TestHistoryExportImportCli(unittest.TestCase):
+    def _record(self, path, rates, name=None):
+        workload = _make_workload()
+        record_run(path,
+                   [_make_result(name=name or
+                                 "cinder (127.0.0.1:6379)",
+                                 ops_per_sec=rate)
+                    for rate in rates],
+                   workload, "kvbench")
+
+    def test_export_flag_writes_file_and_exits_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            history = os.path.join(tmp, "history.jsonl")
+            self._record(history, (40000.0, 50000.0))
+            out_path = os.path.join(tmp, "history.json")
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = main(["--history-export", out_path,
+                             "--history-file", history])
+            self.assertEqual(code, 0)
+            self.assertIn("Exported 2 run(s)", out.getvalue())
+            with open(out_path, encoding="utf-8") as f:
+                parsed = json.load(f)
+            self.assertEqual(len(parsed["records"]), 2)
+            self.assertEqual(parsed["tool"], "kvbench")
+
+    def test_export_backend_filters_the_export(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            history = os.path.join(tmp, "history.jsonl")
+            self._record(history, (40000.0,))
+            self._record(history, (90000.0,), name="baseline (dict)")
+            out_path = os.path.join(tmp, "history.json")
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = main(["--history-export", out_path,
+                             "--history-file", history,
+                             "--history-export-backend",
+                             "baseline (dict)"])
+            self.assertEqual(code, 0)
+            with open(out_path, encoding="utf-8") as f:
+                parsed = json.load(f)
+            self.assertEqual(len(parsed["records"]), 1)
+            self.assertEqual(parsed["records"][0]["backend"],
+                             "baseline (dict)")
+
+    def test_export_backend_without_export_fails(self):
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()):
+            with redirect_stderr(err):
+                code = main(["--history-export-backend", "cinder"])
+        self.assertEqual(code, 2)
+        self.assertIn("--history-export-backend needs --history-export",
+                      err.getvalue())
+
+    def test_export_and_import_together_fail(self):
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()):
+            with redirect_stderr(err):
+                code = main(["--history-export", "a.json",
+                             "--history-import", "b.json"])
+        self.assertEqual(code, 2)
+        self.assertIn("--history-export and --history-import are "
+                      "mutually exclusive", err.getvalue())
+
+    def test_import_flag_merges_and_reports_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # Two source runs (Nov 1 and Nov 2); the target
+            # already holds the Nov 1 run, identical, so the
+            # import adds one run and skips one duplicate.
+            workload = _make_workload()
+            source_entries = []
+            for day, rate in ((1, 40000.0), (2, 50000.0)):
+                entry = build_record(_make_result(ops_per_sec=rate),
+                                     workload, "kvbench")
+                entry["timestamp"] = (
+                    f"2026-11-0{day}T10:00:00+00:00")
+                source_entries.append(entry)
+            export_path = os.path.join(tmp, "history.json")
+            export_history(export_path, source_entries)
+            target = os.path.join(tmp, "target.jsonl")
+            with open(target, "w", encoding="utf-8") as f:
+                f.write(json.dumps(source_entries[0]) + "\n")
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = main(["--history-import", export_path,
+                             "--history-file", target])
+            self.assertEqual(code, 0)
+            text = out.getvalue()
+            self.assertIn("added 1 run(s)", text)
+            self.assertIn("skipped 1 duplicate run(s)", text)
+            self.assertEqual(len(load_history(target)), 2)
+
+    def test_import_bad_file_fails_with_exit_two(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            history = os.path.join(tmp, "history.jsonl")
+            self._record(history, (40000.0,))
+            bad = os.path.join(tmp, "bad.json")
+            with open(bad, "w", encoding="utf-8") as f:
+                f.write('{"records": [{"backend": "cinder"}]}')
+            err = io.StringIO()
+            with redirect_stdout(io.StringIO()):
+                with redirect_stderr(err):
+                    code = main(["--history-import", bad,
+                                 "--history-file", history])
+            self.assertEqual(code, 2)
+            self.assertIn("no 'timestamp'", err.getvalue())
+            # The history file is untouched by the failed import.
+            self.assertEqual(len(load_history(history)), 1)
+
+    def test_import_missing_file_fails_with_exit_two(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            history = os.path.join(tmp, "history.jsonl")
+            err = io.StringIO()
+            with redirect_stdout(io.StringIO()):
+                with redirect_stderr(err):
+                    code = main(["--history-import",
+                                 os.path.join(tmp, "nope.json"),
+                                 "--history-file", history])
+            self.assertEqual(code, 2)
+            self.assertIn("cannot read history export", err.getvalue())
 
 
 if __name__ == "__main__":

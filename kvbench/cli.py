@@ -44,6 +44,11 @@ Usage:
     python -m kvbench.cli --prune --prune-keep 20
     python -m kvbench.cli --prune --prune-before 2026-11-01T00:00:00Z \
         --dry-run
+    # export the history as portable JSON, and merge an export
+    # back into the history on another machine — identical runs
+    # are skipped, conflicting runs keep the existing record
+    python -m kvbench.cli --history-export history.json
+    python -m kvbench.cli --history-import history.json
     # compare this run against a previous run's JSON report, side
     # by side, and fail the run when it regressed past 5%
     python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
@@ -89,8 +94,9 @@ from .bench import DictClient, Workload, format_duration, \
     run_client_sweep, run_keyspace_sweep, run_workload
 from .compare import compare_results, format_verdict, load_baseline, \
     load_history_baseline
-from .history import DEFAULT_HISTORY_FILE, format_best_worst, \
-    format_history, format_prune, format_trend, load_history, \
+from .history import DEFAULT_HISTORY_FILE, export_history, \
+    format_best_worst, format_history, format_import, format_prune, \
+    format_trend, import_history, load_history, \
     prune_history, record_run, write_best_worst, \
     write_best_worst_json, write_trend
 from .report import _workload_dict, render_csv, write_csv, write_json, \
@@ -425,6 +431,25 @@ def build_parser():
     parser.add_argument("--history-limit", type=int, default=20,
                         help="how many recent runs --show-history and "
                         "--trend print per backend (default 20)")
+    parser.add_argument("--history-export", default=None, metavar="PATH",
+                        help="export the recorded run history as "
+                        "portable JSON to this file and exit (no "
+                        "benchmark is run); use "
+                        "--history-export-backend to export one "
+                        "backend instead of all of them")
+    parser.add_argument("--history-export-backend", action="append",
+                        default=[], metavar="NAME",
+                        help="with --history-export, only export runs "
+                        "of this backend (e.g. cinder "
+                        "(127.0.0.1:6379)); repeatable, other backends "
+                        "are left out")
+    parser.add_argument("--history-import", default=None, metavar="PATH",
+                        help="import a history export (see "
+                        "--history-export) into the history file and "
+                        "exit (no benchmark is run): new runs are "
+                        "appended, identical runs are skipped, and "
+                        "runs that conflict with a recorded run keep "
+                        "the existing record")
     parser.add_argument("--prune", action="store_true",
                         help="prune old runs from the history file "
                         "(see --history-file) and exit (no benchmark "
@@ -519,6 +544,37 @@ def main(argv=None):
         # even when nothing is listening.
         entries = load_history(history_path)
         print(format_history(entries, limit=args.history_limit))
+        return 0
+    if args.history_export_backend and not args.history_export:
+        print("kvbench: --history-export-backend needs "
+              "--history-export: it only applies when exporting "
+              "the history file", file=sys.stderr)
+        return 2
+    if args.history_export and args.history_import:
+        print("kvbench: --history-export and --history-import are "
+              "mutually exclusive: export or import in one run, "
+              "not both", file=sys.stderr)
+        return 2
+    if args.history_export:
+        # Export-only mode: no server is contacted. The export
+        # is portable JSON, so a history can move between
+        # machines and be merged back with --history-import.
+        entries = load_history(history_path)
+        document = export_history(
+            args.history_export, entries,
+            backends=args.history_export_backend)
+        print(f"Exported {len(document['records'])} run(s) to "
+              f"{args.history_export}")
+        return 0
+    if args.history_import:
+        # Import-only mode: no server is contacted. A bad export
+        # file fails (exit 2) and the history is left untouched.
+        try:
+            summary = import_history(args.history_import, history_path)
+        except ValueError as exc:
+            print(f"kvbench: {exc}", file=sys.stderr)
+            return 2
+        print(format_import(summary, args.history_import, history_path))
         return 0
     if args.trend_out and not args.trend:
         print("kvbench: --trend-out needs --trend: it writes the "

@@ -169,6 +169,12 @@ python -m kvbench.cli --prune --prune-keep 20
 python -m kvbench.cli --prune --prune-before 2026-11-01T00:00:00Z \
     --dry-run
 
+# export the history as portable JSON, and merge an export back
+# into the history on another machine — identical runs are
+# skipped, conflicting runs keep the existing record
+python -m kvbench.cli --history-export history.json
+python -m kvbench.cli --history-import history.json
+
 # same trend chart, written to a Markdown file as well, so it
 # can be committed or attached to a report
 python -m kvbench.cli --trend --trend-out trend.md
@@ -270,6 +276,18 @@ comparison to a Markdown file; needs `--best-worst`),
 comparison as JSON; needs `--best-worst`),
 `--history-limit` (how many recent runs `--show-history` and
 default 20),
+`--history-export PATH` (export the recorded run history as
+portable JSON to this file and exit, no benchmark is run — all
+backends, or only the ones named with `--history-export-backend`),
+`--history-export-backend NAME` (with `--history-export`, only
+export runs of this backend, e.g. `cinder (127.0.0.1:6379)`;
+repeatable, other backends are left out),
+`--history-import PATH` (import a history export — see
+`--history-export` — into the history file and exit, no
+benchmark is run: new runs are appended, identical runs are
+skipped, and runs that conflict with a recorded run keep the
+existing record; a bad export file fails with exit 2 and the
+history is left untouched),
 `--prune` (prune old runs from the history file and exit, no
 benchmark is run — see below),
 `--prune-keep N` (with `--prune`, keep the N most recent runs
@@ -414,6 +432,26 @@ their original order; corrupt lines are dropped on rewrite,
 since loading already skips them, and a run whose timestamp
 cannot be parsed is kept by `--prune-before` — its age cannot
 be known, so the prune does not guess.
+
+With `--history-export PATH` the same history is written out as
+portable JSON — one document with a `records` list, the tool and
+version that wrote it, and the export time — so a history can
+move between machines: `--history-export-backend NAME`
+(repeatable) exports only that backend's runs, and an empty
+history exports an empty records list. With `--history-import
+PATH` an export is merged back into the history file
+(`--history-file`, default `~/.kvbench/history.jsonl`): records
+merge by (backend, timestamp), so a record already in the
+history with identical content is skipped as a duplicate, a
+record with the same backend and timestamp but different
+content is a conflict — the existing record is kept and the
+imported one dropped, so an import never overwrites a recorded
+run — and new records are appended in export order. The import
+prints how many runs were added, skipped as duplicates, and
+kept over conflicts. A missing, unreadable or malformed export
+file — not JSON, no `records` list, or a record with no backend
+or timestamp — fails the run (exit 2) before the history file
+is touched, so a bad import never half-merges.
 
 ## Comparing against a previous run
 
@@ -709,6 +747,12 @@ make test
 
 ## Roadmap
 
+- ~~History export/import (`--history-export` / `--history-import`):
+  write the run history out as portable JSON (all backends or
+  one backend) and merge an export back into a history file,
+  merging by (backend, timestamp) — identical records deduped,
+  conflicts keep the existing record, and a bad export file
+  fails (exit 2) before anything is merged.~~ Done in 0.25.0.
 - ~~Per-backend history pruning (`--prune`): keep the N most
   recent runs per backend (`--prune-keep`), or drop runs older
   than a date (`--prune-before`), with a per-backend filter

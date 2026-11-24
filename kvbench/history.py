@@ -764,6 +764,166 @@ def format_prune(summary, path):
     return "\n".join(lines)
 
 
+def export_history(path, entries, backends=None):
+    """Write history entries as portable JSON to ``path``.
+
+    The file is one JSON document — ``{"tool": "kvbench",
+    "version": ..., "exported_at": ..., "records": [...]}`` — so
+    a history can move between machines and be merged back with
+    ``import_history``. ``backends`` limits the export to the
+    named backends; None exports every backend. Creates the
+    parent directory when needed. Returns the exported document.
+    """
+    selected = set(backends) if backends else None
+    records = [entry for entry in entries
+               if selected is None
+               or entry.get("backend") in selected]
+    document = {
+        "tool": "kvbench",
+        "version": __version__,
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "records": records,
+    }
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(document, f, indent=2)
+        f.write("\n")
+    return document
+
+
+def load_export(path):
+    """Load an exported history file, or raise ValueError.
+
+    Validates the file shape: it must be a JSON object with a
+    ``records`` list, and every record must be an object carrying
+    a ``backend`` and a ``timestamp`` — the (backend, timestamp)
+    pair ``import_history`` merges on. A missing or unreadable
+    file, invalid JSON, or a record without those fields is bad
+    input, so nothing is imported from it.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            document = json.load(f)
+    except OSError as exc:
+        raise ValueError(
+            f"cannot read history export {path}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"history export {path} is not valid JSON: {exc}") from exc
+    if not isinstance(document, dict):
+        raise ValueError(
+            f"history export {path} must be a JSON object with a "
+            f"'records' list")
+    records = document.get("records")
+    if not isinstance(records, list):
+        raise ValueError(
+            f"history export {path} must carry a 'records' list")
+    for record in records:
+        if not isinstance(record, dict):
+            raise ValueError(
+                f"history export {path} holds a record that is not "
+                f"a JSON object")
+        backend = record.get("backend")
+        timestamp = record.get("timestamp")
+        if not isinstance(backend, str) or not backend:
+            raise ValueError(
+                f"history export {path} holds a record with no "
+                f"'backend'")
+        if not isinstance(timestamp, str) or not timestamp:
+            raise ValueError(
+                f"history export {path} holds a record with no "
+                f"'timestamp'")
+    return records
+
+
+def import_history(path, history_path):
+    """Merge an exported history file into the history file.
+
+    ``path`` is an export written by ``export_history`` (validated
+    by ``load_export`` first — a bad file raises ValueError and
+    nothing is merged). Records merge by (backend, timestamp): a
+    record whose key is not in the history is appended; one whose
+    key exists and is identical is skipped as a duplicate; one
+    whose key exists but differs is a conflict — the existing
+    record is kept and the imported one dropped, so an import
+    never overwrites a recorded run. The file is rewritten
+    atomically (temp file + rename) only when new records were
+    added, keeping the surviving runs in their original order
+    with new records appended in export order; corrupt lines are
+    dropped on rewrite, since ``load_history`` already skips them.
+
+    Returns a summary dict: added, duplicates and conflicts
+    counts.
+    """
+    imported = load_export(path)
+    existing = load_history(history_path)
+    by_key = {}
+    for entry in existing:
+        by_key[(entry.get("backend"), entry.get("timestamp"))] = entry
+    added = duplicates = conflicts = 0
+    new_entries = []
+    for record in imported:
+        key = (record.get("backend"), record.get("timestamp"))
+        current = by_key.get(key)
+        if current is None:
+            new_entries.append(record)
+            by_key[key] = record
+            added += 1
+        elif current == record:
+            duplicates += 1
+        else:
+            conflicts += 1
+    if new_entries:
+        directory = os.path.dirname(os.path.abspath(history_path))
+        os.makedirs(directory, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(
+            dir=directory, prefix=".history-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                for entry in existing + new_entries:
+                    f.write(json.dumps(entry) + "\n")
+            os.replace(tmp_path, history_path)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+    return {"added": added, "duplicates": duplicates,
+            "conflicts": conflicts}
+
+
+def format_import(summary, export_path, history_path):
+    """Render an import summary as text.
+
+    One line per outcome — how many runs were added, how many
+    were already recorded (duplicates), and how many conflicted
+    with an existing run (the existing record was kept). An
+    export that held no new runs says so instead of reporting
+    zeroes.
+    """
+    lines = [f"Imported {export_path} into {history_path}:"]
+    lines.append("")
+    if summary["added"]:
+        lines.append(f"- added {summary['added']} run(s)")
+    if summary["duplicates"]:
+        lines.append(
+            f"- skipped {summary['duplicates']} duplicate run(s) "
+            f"already in the history")
+    if summary["conflicts"]:
+        lines.append(
+            f"- kept the existing record for "
+            f"{summary['conflicts']} conflicting run(s) (same "
+            f"backend and timestamp, different content)")
+    if not (summary["added"] or summary["duplicates"]
+            or summary["conflicts"]):
+        lines.append("- nothing new to import: the export held no "
+                     "records")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def format_history(entries, limit=20):
     """Render history entries as a trend table (most recent first).
 
