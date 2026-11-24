@@ -858,10 +858,16 @@ def _comparison_lines(comparison):
 
     One row per backend matched by name, with the current and
     baseline ops/sec and p99 and the percentage change of each,
-    plus a verdict line per backend. Backends present in only one
-    of the two runs are named rather than silently dropped, and a
-    workload that differs from the baseline run's is flagged: the
-    numbers still print, but the comparison is approximate.
+    plus a verdict line per backend. The table is followed by a
+    per-operation latency histogram per compared backend — the
+    current run's and the baseline run's, drawn by the same
+    shared helper as the single-run per-op histograms, so the
+    comparison cannot disagree with them — and a note where the
+    baseline run carries no per-op histograms to draw. Backends
+    present in only one of the two runs are named rather than
+    silently dropped, and a workload that differs from the
+    baseline run's is flagged: the numbers still print, but the
+    comparison is approximate.
     """
     if not comparison:
         return []
@@ -904,6 +910,35 @@ def _comparison_lines(comparison):
                 f"{p99_delta_text} | {entry['verdict']} |"
             )
         lines.append("")
+        # Per-operation latency histograms per compared backend:
+        # the current run's, and the baseline run's when it carries
+        # them — a history baseline or a report written before
+        # 0.32.0 carries none, so only the current run's render,
+        # with a note saying why the baseline's are missing.
+        for entry in comparison["entries"]:
+            current = entry.get("histograms_by_op")
+            baseline_hists = entry.get("baseline_histograms_by_op")
+            lines += _per_op_histogram_block(
+                f"#### {entry['name']} — per-op latency histogram "
+                "(now)",
+                current)
+            if baseline_hists:
+                lines += _per_op_histogram_block(
+                    f"#### {entry['name']} — per-op latency histogram "
+                    "(prev)",
+                    baseline_hists)
+            elif current:
+                if comparison.get("source") == "history":
+                    reason = ("the history file carries no per-op "
+                              "histograms")
+                else:
+                    reason = ("the baseline report carries no "
+                              "per-op histograms")
+                lines.append(
+                    f"- {entry['name']}: {reason}, so only the "
+                    "current run's histograms are shown."
+                )
+                lines.append("")
     for name in comparison["unmatched_baseline"]:
         lines.append(
             f"- `{name}` is in the baseline run but not in this run, "
@@ -1433,7 +1468,16 @@ def render_markdown(results, workload, command_line, comparison=None,
             f"(`{comparison['file']}`): ops/sec and p99 side by "
             "side per backend, with the percentage change and a "
             "verdict. Backends are matched by name; a backend in "
-            "only one of the two runs has no comparison."
+            "only one of the two runs has no comparison. Each "
+            "compared backend also carries its per-operation "
+            "latency histograms — the current run's, and the "
+            "baseline run's when the baseline report carries them "
+            "(JSON reports since 0.32.0 do; a history baseline "
+            "carries none) — under "
+            "`comparison.entries[].histograms_by_op` and "
+            "`baseline_histograms_by_op` in JSON, and as blocks "
+            "under the comparison table in Markdown, so a p99 move "
+            "names the op whose latency shape moved."
         )
         if not comparison["workload_matches"]:
             lines.append(

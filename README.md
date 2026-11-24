@@ -686,7 +686,14 @@ the last one): each backend is matched by name, and both reports
 gain a Comparison with previous run section with ops/sec and p99
 side by side, the percentage change of each, and a verdict per
 backend — `faster`, `slower`, `about the same` (within 1%), or
-`regression` when a threshold was given and passed. Backends in
+`regression` when a threshold was given and passed. Each compared
+backend also carries its per-operation latency histograms — the
+current run's, and the baseline run's when the baseline report
+carries them (JSON reports since 0.32.0 do) — under
+`comparison.entries[].histograms_by_op` and
+`baseline_histograms_by_op` in JSON, and as blocks under the
+comparison table in Markdown, so a p99 move names the op whose
+latency shape moved. Backends in
 only one of the two runs are named rather than silently dropped,
 and when the workload differs from the baseline run's (ops,
 clients, keys, mix, pipeline, ...) the reports warn that the
@@ -1051,6 +1058,22 @@ make test
 
 ## Roadmap
 
+- Per-operation latency histograms in the `--compare` output
+  (`--compare-file` / `--compare-history`): each compared
+  backend carries the same log-spaced buckets per operation
+  that ran as the regular run's `histograms_by_op` — the
+  current run's under `comparison.entries[].histograms_by_op`
+  in JSON and as a per-backend histogram block under the
+  comparison table in Markdown, plus the baseline run's under
+  `baseline_histograms_by_op` when the baseline report carries
+  them (JSON reports since 0.32.0 do), reusing the shared
+  histogram-block helper so the comparison can't disagree
+  with the single-run output — so a p99 move names the op
+  whose latency shape moved, not just that the p99 moved. A
+  history baseline carries no per-op histograms, and reports
+  written before 0.32.0 carry none either, so those
+  comparisons show the current run's histograms only, with a
+  note saying why the baseline's are missing. Done in 0.41.0.
 - `--sweep-mix` mode: a sweep mode that varies the read:write
   mix across steps — `--sweep-mix 100:0,90:10,50:50,10:90`
   re-runs the same workload once per ratio, like the existing

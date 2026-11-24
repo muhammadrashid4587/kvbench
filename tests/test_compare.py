@@ -12,6 +12,7 @@ from kvbench.cli import main
 from kvbench.compare import compare_results, format_verdict, \
     load_baseline, load_history_baseline, workload_differences
 from kvbench.report import _workload_dict, render_json, render_markdown
+from kvbench.stats import histogram
 
 
 class _FakeRespHandler(socketserver.StreamRequestHandler):
@@ -88,8 +89,51 @@ def _result(name="cinder (127.0.0.1:6379)", latency_ns=100_000,
     )
 
 
+def _result_with_ops(name="cinder (127.0.0.1:6379)"):
+    """A result with per-op latencies: 50 SETs at 0.1 ms and
+    50 GETs at 0.2 ms, so its per-op histograms have something
+    to draw."""
+    by_op = {"SET": [100_000] * 50, "GET": [200_000] * 50}
+    return BenchmarkResult(
+        name=name,
+        ops=100,
+        elapsed_s=0.01,
+        errors=0,
+        latencies_ns=by_op["SET"] + by_op["GET"],
+        latencies_by_op=by_op,
+    )
+
+
+def _baseline_histograms():
+    """Baseline per-op histograms: 50 SETs at 0.1 ms, 50 GETs at
+    0.4 ms — the GET bucket differs from the current run's, so a
+    test can tell the two blocks apart."""
+    return {"SET": histogram([100_000] * 50),
+            "GET": histogram([400_000] * 50)}
+
+
 def _baseline_doc(name="cinder (127.0.0.1:6379)", ops_per_sec=10_000,
-                  p99_ms=0.1, workload=None, generated="2026-11-23T00:00:00+00:00"):
+                  p99_ms=0.1, workload=None, generated="2026-11-23T00:00:00+00:00",
+                  histograms_by_op=None):
+    result = {
+        "name": name,
+        "ops": 100,
+        "elapsed_s": 0.01,
+        "ops_per_sec": ops_per_sec,
+        "errors": 0,
+        "error_sample": "",
+        "summary": {
+            "count": 100,
+            "mean_ms": p99_ms,
+            "p50_ms": p99_ms,
+            "p95_ms": p99_ms,
+            "p99_ms": p99_ms,
+            "min_ms": p99_ms,
+            "max_ms": p99_ms,
+        },
+    }
+    if histograms_by_op is not None:
+        result["histograms_by_op"] = histograms_by_op
     return {
         "tool": "kvbench",
         "version": "0.13.0",
@@ -97,23 +141,7 @@ def _baseline_doc(name="cinder (127.0.0.1:6379)", ops_per_sec=10_000,
         "command": "kvbench --ops 100 --clients 2",
         "workload": workload if workload is not None
         else _workload_dict(_workload()),
-        "results": [{
-            "name": name,
-            "ops": 100,
-            "elapsed_s": 0.01,
-            "ops_per_sec": ops_per_sec,
-            "errors": 0,
-            "error_sample": "",
-            "summary": {
-                "count": 100,
-                "mean_ms": p99_ms,
-                "p50_ms": p99_ms,
-                "p95_ms": p99_ms,
-                "p99_ms": p99_ms,
-                "min_ms": p99_ms,
-                "max_ms": p99_ms,
-            },
-        }],
+        "results": [result],
     }
 
 
@@ -447,6 +475,56 @@ class TestLoadHistoryBaseline(unittest.TestCase):
 
 
 class TestCompareResults(unittest.TestCase):
+    def test_entries_carry_per_op_histograms(self):
+        comparison = compare_results(
+            [_result_with_ops()],
+            _baseline_doc(ops_per_sec=8_000, p99_ms=0.12,
+                          histograms_by_op=_baseline_histograms()),
+            _workload_dict(_workload()), "prev.json")
+        entry = comparison["entries"][0]
+        # The current run's histograms are the result's own
+        # per-op histograms — same buckets as the single-run
+        # report, from the same helper.
+        self.assertEqual(entry["histograms_by_op"],
+                         _result_with_ops().per_op_histograms)
+        self.assertEqual(
+            entry["histograms_by_op"]["SET"][0],
+            {"upper_ms": 0.1, "count": 50})
+        self.assertEqual(
+            entry["histograms_by_op"]["GET"][1],
+            {"upper_ms": 0.25, "count": 50})
+        # The baseline run's histograms come from the baseline
+        # report, with the GETs in a slower bucket.
+        self.assertEqual(entry["baseline_histograms_by_op"],
+                         _baseline_histograms())
+        self.assertEqual(
+            entry["baseline_histograms_by_op"]["GET"][2],
+            {"upper_ms": 0.5, "count": 50})
+
+    def test_baseline_without_histograms_is_none(self):
+        # A report written before 0.32.0 carries no
+        # histograms_by_op: the field is None, not invented.
+        comparison = compare_results(
+            [_result_with_ops()], _baseline_doc(),
+            _workload_dict(_workload()), "prev.json")
+        entry = comparison["entries"][0]
+        self.assertEqual(entry["histograms_by_op"],
+                         _result_with_ops().per_op_histograms)
+        self.assertIsNone(entry["baseline_histograms_by_op"])
+
+    def test_malformed_baseline_histograms_are_ignored(self):
+        # A hand-made baseline file may carry anything: a shape
+        # the renderer cannot draw reads as no baseline
+        # histograms instead of crashing the report.
+        for bad in ({"SET": "not a list"}, {"SET": [{"count": 1}]},
+                    ["SET"], "histograms"):
+            doc = _baseline_doc(histograms_by_op=bad)
+            comparison = compare_results(
+                [_result_with_ops()], doc,
+                _workload_dict(_workload()), "prev.json")
+            self.assertIsNone(
+                comparison["entries"][0]["baseline_histograms_by_op"])
+
     def test_faster_run(self):
         # 100 ops at 100us each over 0.01 s: 10,000 ops/sec, p99 0.1 ms.
         # Baseline: 8,000 ops/sec, p99 0.12 ms.
@@ -590,6 +668,74 @@ class TestComparisonInReports(unittest.TestCase):
             _baseline_doc(**kwargs),
             _workload_dict(_workload()), "prev.json")
 
+    def test_markdown_per_op_histograms(self):
+        comparison = compare_results(
+            [_result_with_ops()],
+            _baseline_doc(ops_per_sec=8_000, p99_ms=0.12,
+                          histograms_by_op=_baseline_histograms()),
+            _workload_dict(_workload()), "prev.json")
+        text = render_markdown([_result_with_ops()], _workload(),
+                               "kvbench", comparison)
+        # One block per run, drawn by the shared helper: the
+        # current run's SETs land in the 0.1 ms bucket, the
+        # baseline run's GETs in the 0.5 ms bucket.
+        self.assertIn(
+            "#### cinder (127.0.0.1:6379) — per-op latency histogram "
+            "(now)", text)
+        self.assertIn(
+            "#### cinder (127.0.0.1:6379) — per-op latency histogram "
+            "(prev)", text)
+        self.assertIn("SET (50 ops)", text)
+        self.assertIn("- <= 0.1 ms: 50 (100.0%)", text)
+        self.assertIn("GET (50 ops)", text)
+        self.assertIn("- <= 0.5 ms: 50 (100.0%)", text)
+        self.assertIn("per-operation latency histograms", text)
+
+    def test_markdown_baseline_without_histograms_notes_it(self):
+        comparison = compare_results(
+            [_result_with_ops()], _baseline_doc(),
+            _workload_dict(_workload()), "prev.json")
+        text = render_markdown([_result_with_ops()], _workload(),
+                               "kvbench", comparison)
+        self.assertIn(
+            "#### cinder (127.0.0.1:6379) — per-op latency histogram "
+            "(now)", text)
+        self.assertNotIn("per-op latency histogram (prev)", text)
+        self.assertIn("the baseline report carries no per-op "
+                      "histograms", text)
+
+    def test_markdown_history_baseline_notes_it(self):
+        # A history baseline carries no per-op histograms either,
+        # and the note names the history file as the reason.
+        comparison = compare_results(
+            [_result_with_ops()], _baseline_doc(),
+            _workload_dict(_workload()),
+            "history.jsonl (history run -1)", source="history")
+        text = render_markdown([_result_with_ops()], _workload(),
+                               "kvbench", comparison)
+        self.assertIn(
+            "#### cinder (127.0.0.1:6379) — per-op latency histogram "
+            "(now)", text)
+        self.assertNotIn("per-op latency histogram (prev)", text)
+        self.assertIn("the history file carries no per-op "
+                      "histograms", text)
+
+    def test_json_carries_per_op_histograms(self):
+        parsed = json.loads(render_json(
+            [_result_with_ops()], _workload(), "kvbench",
+            compare_results(
+                [_result_with_ops()],
+                _baseline_doc(ops_per_sec=8_000, p99_ms=0.12,
+                              histograms_by_op=_baseline_histograms()),
+                _workload_dict(_workload()), "prev.json")))
+        entry = parsed["comparison"]["entries"][0]
+        self.assertEqual(
+            entry["histograms_by_op"]["SET"][0],
+            {"upper_ms": 0.1, "count": 50})
+        self.assertEqual(
+            entry["baseline_histograms_by_op"]["GET"][2],
+            {"upper_ms": 0.5, "count": 50})
+
     def test_markdown_section(self):
         text = render_markdown([_result()], _workload(), "kvbench",
                                self._comparison(ops_per_sec=8_000,
@@ -696,6 +842,39 @@ class TestCompareFileCli(unittest.TestCase):
             self.assertEqual(
                 parsed["comparison"]["entries"][0]["name"],
                 f"cinder (127.0.0.1:{self.port})")
+
+    def test_compare_file_reports_per_op_histograms(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            baseline_json = self._run_baseline(tmp)
+            out = os.path.join(tmp, "run.md")
+            code = main(self._argv(["--ops", "100", "--clients", "1",
+                                    "--output", out,
+                                    "--compare-file", baseline_json]))
+            self.assertEqual(code, 0)
+            with open(out, encoding="utf-8") as f:
+                text = f.read()
+            name = f"cinder (127.0.0.1:{self.port})"
+            self.assertIn(
+                f"#### {name} — per-op latency histogram (now)", text)
+            self.assertIn(
+                f"#### {name} — per-op latency histogram (prev)", text)
+            parsed = json.loads(open(os.path.join(tmp, "run.json"),
+                                     encoding="utf-8").read())
+            entry = parsed["comparison"]["entries"][0]
+            # Both runs measured real ops against the fake server,
+            # so both histograms carry the ops that ran, and the
+            # bucket counts add up to the op count.
+            self.assertIn("SET", entry["histograms_by_op"])
+            self.assertIn("GET", entry["histograms_by_op"])
+            self.assertIn("SET", entry["baseline_histograms_by_op"])
+            self.assertIn("GET", entry["baseline_histograms_by_op"])
+            for key in ("histograms_by_op",
+                        "baseline_histograms_by_op"):
+                total = sum(
+                    bucket["count"]
+                    for buckets in entry[key].values()
+                    for bucket in buckets)
+                self.assertEqual(total, 100)
 
     def test_regression_threshold_exits_3(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -3,7 +3,9 @@
 ``--compare-file PATH`` loads a JSON report written by an earlier
 kvbench run (the ``--json`` output) and compares this run's results
 against it, backend by backend, matched by name: ops/sec and p99
-side by side, with the percentage change and a verdict per backend.
+side by side, with the percentage change and a verdict per backend,
+plus the per-operation latency histograms of both runs, so a p99
+move names the op whose latency shape moved.
 ``--regression-threshold PCT`` turns the comparison into a gate:
 the run exits non-zero when any backend's ops/sec fell by more than
 PCT, or its p99 rose by more than PCT, versus the baseline file.
@@ -207,6 +209,32 @@ def load_baseline(path):
     return doc
 
 
+def _histograms_or_none(value):
+    """A per-op histogram mapping, or None when it is not one.
+
+    A baseline JSON report written since 0.32.0 carries
+    ``histograms_by_op`` per result (op name to the same
+    log-spaced bucket list the single-run report uses); a history
+    baseline or an older report carries none, and a hand-made
+    file may carry something else entirely. Only a non-empty dict
+    of op name to bucket lists (each bucket a dict with
+    ``upper_ms`` and ``count``) passes through — anything else
+    reads as no baseline histograms, instead of crashing the
+    report on a shape it cannot draw.
+    """
+    if not isinstance(value, dict) or not value:
+        return None
+    for buckets in value.values():
+        if not isinstance(buckets, list):
+            return None
+        for bucket in buckets:
+            if (not isinstance(bucket, dict)
+                    or "upper_ms" not in bucket
+                    or "count" not in bucket):
+                return None
+    return value
+
+
 def _delta_pct(current, baseline):
     """Percentage change of ``current`` versus ``baseline``.
 
@@ -266,8 +294,17 @@ def compare_results(results, baseline_doc, current_workload,
     percentage change of each, the error counts, a verdict, and a
     ``regression`` flag: True when a threshold was given and the
     ops/sec fell by more than the threshold, or the p99 rose by
-    more than it. Backends present in only one of the two runs are
-    listed as unmatched instead of being silently dropped.
+    more than it. Each entry also carries the per-operation
+    latency histograms of both runs — the current run's under
+    ``histograms_by_op`` (the same log-spaced buckets as the
+    single-run report's, from the same helper, so the comparison
+    cannot disagree with it) and the baseline run's under
+    ``baseline_histograms_by_op`` when the baseline report
+    carries them (JSON reports since 0.32.0 do); a history
+    baseline or an older report carries none, so the field is
+    None and only the current run's histograms render. Backends
+    present in only one of the two runs are listed as unmatched
+    instead of being silently dropped.
     ``source`` is ``"report"`` for a baseline loaded from a JSON
     report file, ``"history"`` for one loaded from the history
     file — it only changes how the report describes the baseline.
@@ -317,6 +354,9 @@ def compare_results(results, baseline_doc, current_workload,
             "baseline_errors": baseline.get("errors"),
             "verdict": _verdict(ops_delta, p99_delta, regression),
             "regression": regression,
+            "histograms_by_op": result.per_op_histograms,
+            "baseline_histograms_by_op": _histograms_or_none(
+                baseline.get("histograms_by_op")),
         })
     differences = workload_differences(
         current_workload, baseline_doc.get("workload"))
