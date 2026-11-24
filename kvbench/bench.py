@@ -130,6 +130,17 @@ class Workload:
     # how pipelining affects throughput — where batching more
     # commands per round trip stops helping. Empty means no sweep.
     sweep_pipeline: list = field(default_factory=list)
+    # Read:write ratios for a sweep: when non-empty the same
+    # workload is re-run once per ratio (see run_mix_sweep) and the
+    # per-ratio ops/sec and p99 land in the reports, so a run shows
+    # how the read:write mix affects throughput — a store whose
+    # reads are cheap and writes expensive shows it as the mix
+    # moves from read-only to write-only. Each ratio is a (read,
+    # write) pair of non-negative ints summing above 0; a step
+    # runs GETs for the read share and SETs for the write share,
+    # with no INCRs or DELs, the same meaning as a two-part
+    # ``--mix``. Empty means no sweep.
+    sweep_mix: list = field(default_factory=list)
     # SLO gate thresholds: p99 latency cap in milliseconds and error
     # rate cap in percent of attempted ops. None means that side of
     # the gate is not set; the gate only applies when at least one
@@ -202,6 +213,14 @@ class Workload:
                for depth in self.sweep_pipeline):
             raise ValueError(
                 "sweep pipeline depths must be positive integers")
+        if any(not isinstance(ratio, (tuple, list))
+               or len(ratio) != 2
+               or any(not isinstance(v, int) or v < 0 for v in ratio)
+               or sum(ratio) <= 0
+               for ratio in self.sweep_mix):
+            raise ValueError(
+                "sweep mix ratios must be READ:WRITE pairs of "
+                "non-negative integers summing above 0")
         if self.pipeline < 1:
             raise ValueError("pipeline depth must be at least 1")
         if self.slo_p99_ms is not None and self.slo_p99_ms < 0:
@@ -334,6 +353,17 @@ class BenchmarkResult:
     # the run-to-run spread under ``repeat``. Empty when no sweep
     # ran (``--sweep-pipeline`` not given). Same shape as ``sweep``.
     pipeline_sweep: list = field(default_factory=list)
+    # Read:write mix sweep results for this backend: one entry per
+    # swept ratio, in read-heaviest-first order, each with the
+    # ratio (``mix`` as a ``"READ:WRITE"`` string), the ops
+    # completed, and the ops/sec, mean and p99 latency of that run,
+    # plus the per-operation latency histograms of that run
+    # (``histograms_by_op``). With ``--repeat`` above 1 each ratio
+    # runs that many times: the ops/sec and p99 are the medians
+    # over the runs and the entry carries the per-run values and
+    # the run-to-run spread under ``repeat``. Empty when no sweep
+    # ran (``--sweep-mix`` not given). Same shape as ``sweep``.
+    mix_sweep: list = field(default_factory=list)
     # Repeated-run detail (see run_repeated_workload): one summary
     # dict per run, in run order, each with the run index (``run``),
     # ops, elapsed, ops/sec, errors, mean/p50/p95/p99, the
@@ -1103,6 +1133,46 @@ def run_pipeline_sweep(client_factory, workload, depths, repeat=1):
             entry = _sweep_step(client_factory, swept,
                                 f"sweep (pipeline depth {depth})",
                                 {"pipeline": depth}, repeat)
+        except (ConnectionError, OSError):
+            break
+        out.append(entry)
+    return out
+
+
+def run_mix_sweep(client_factory, workload, mixes, repeat=1):
+    """Run the same workload once per read:write ratio in ``mixes``.
+
+    Each run is a fresh copy of ``workload`` with the mix replaced
+    by that ratio — reads are GETs, writes are SETs, with no INCRs
+    or DELs, the same meaning as a two-part ``--mix`` — and the
+    mix label cleared, since the step's mix is the ratio itself,
+    not the base workload's mix; everything else (ops, clients,
+    keys, distribution, pipeline, warmup, seed) is identical, so
+    the per-ratio numbers isolate the effect of the read:write
+    mix on throughput — where a store's writes start costing more
+    than its reads. Returns a list of ``{"mix", "ops",
+    "ops_per_sec", "mean_ms", "p99_ms", "histograms_by_op"}``
+    dicts, ``mix`` a ``"READ:WRITE"`` string, in the order
+    ``mixes`` was given — the per-op histograms are the same
+    log-spaced buckets per operation as the main run's
+    ``histograms_by_op``, so a slow op type's latency shape shows
+    per ratio. With ``repeat`` above 1 each ratio runs that many
+    times (see :func:`_sweep_step`): the reported ops/sec and p99
+    are the medians over the runs, and each entry carries the
+    per-run values and the run-to-run spread under ``repeat``. If
+    a run cannot reach the backend the sweep stops there and the
+    ratios completed so far are returned — the caller reports the
+    shortfall.
+    """
+    out = []
+    for read, write in mixes:
+        swept = replace(workload, set_weight=write, get_weight=read,
+                        incr_weight=0, del_weight=0, mix_label="")
+        label = f"{read}:{write}"
+        try:
+            entry = _sweep_step(client_factory, swept,
+                                f"sweep (mix {label})",
+                                {"mix": label}, repeat)
         except (ConnectionError, OSError):
             break
         out.append(entry)

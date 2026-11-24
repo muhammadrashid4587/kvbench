@@ -116,6 +116,11 @@ class TestBuildRecord(unittest.TestCase):
              "mean_ms": 0.020, "p99_ms": 0.020,
              "histograms_by_op": {}},
         ]
+        result.mix_sweep = [
+            {"mix": "90:10", "ops": 1000, "ops_per_sec": 52000.0,
+             "mean_ms": 0.020, "p99_ms": 0.020,
+             "histograms_by_op": {}},
+        ]
         record = build_record(result, _make_workload(), "kvbench")
         self.assertEqual(record["sweeps"], {
             "keyspace": [
@@ -136,6 +141,11 @@ class TestBuildRecord(unittest.TestCase):
             "pipeline": [
                 {"pipeline": 5, "ops": 1000,
                  "ops_per_sec": 55000.0, "mean_ms": 0.020,
+                 "p99_ms": 0.020},
+            ],
+            "mix": [
+                {"mix": "90:10", "ops": 1000,
+                 "ops_per_sec": 52000.0, "mean_ms": 0.020,
                  "p99_ms": 0.020},
             ],
         })
@@ -418,7 +428,7 @@ class TestFormatTrend(unittest.TestCase):
 
 class TestSweepTrend(unittest.TestCase):
     def _sweep_result(self, ops_per_sec, keys=100, clients=None,
-                      value_size=None, pipeline=None):
+                      value_size=None, pipeline=None, mix=None):
         result = _make_result(ops_per_sec=ops_per_sec)
         if keys is not None:
             result.sweep = [{"keys": keys, "ops": 1000,
@@ -442,6 +452,12 @@ class TestSweepTrend(unittest.TestCase):
                                       "ops_per_sec": ops_per_sec,
                                       "mean_ms": 0.020, "p99_ms": 0.020,
                                       "histograms_by_op": {}}]
+        if mix is not None:
+            result.mix_sweep = [{"mix": mix,
+                                 "ops": 1000,
+                                 "ops_per_sec": ops_per_sec,
+                                 "mean_ms": 0.020, "p99_ms": 0.020,
+                                 "histograms_by_op": {}}]
         return result
 
     def test_sweep_recorded_then_trended_across_two_runs(self):
@@ -488,16 +504,18 @@ class TestSweepTrend(unittest.TestCase):
             text.count("#### Keyspace sweep — 100 keys ops/sec trend"),
             1)
 
-    def test_all_three_sweep_kinds_render(self):
+    def test_all_five_sweep_kinds_render(self):
         workload = _make_workload()
         entries = [
             build_record(
                 self._sweep_result(40000.0, keys=100, clients=4,
-                                   value_size=128),
+                                   value_size=128, pipeline=5,
+                                   mix="90:10"),
                 workload, "kvbench"),
             build_record(
                 self._sweep_result(50000.0, keys=100, clients=4,
-                                   value_size=128),
+                                   value_size=128, pipeline=5,
+                                   mix="90:10"),
                 workload, "kvbench"),
         ]
         text = format_trend(entries)
@@ -508,6 +526,10 @@ class TestSweepTrend(unittest.TestCase):
         self.assertIn(
             "#### Value size sweep — 128 byte values ops/sec trend",
             text)
+        self.assertIn(
+            "#### Pipeline sweep — 5 commands ops/sec trend", text)
+        self.assertIn(
+            "#### Mix sweep — 90:10 read:write ops/sec trend", text)
         self.assertIn(
             "Client sweep — 4 clients first → last: 40,000 → "
             "50,000 ops/sec (+25.0%)", text)
@@ -535,6 +557,32 @@ class TestSweepTrend(unittest.TestCase):
             text)
         self.assertIn(
             "Pipeline sweep — 5 commands first → last: 40,000 → "
+            "50,000 ops/sec (+25.0%)", text)
+
+    def test_mix_sweep_step_trended_across_two_runs(self):
+        # A mix step recorded in one run and again in the next
+        # shows up in the trend with a delta and a first-to-last
+        # change, like the other sweep kinds — the ratio is a
+        # string step value, so it renders as "90:10 read:write".
+        workload = _make_workload()
+        entries = [
+            build_record(
+                self._sweep_result(40000.0, keys=None, mix="90:10"),
+                workload, "kvbench"),
+            build_record(
+                self._sweep_result(50000.0, keys=None, mix="90:10"),
+                workload, "kvbench"),
+        ]
+        text = format_trend(entries)
+        self.assertIn(
+            "#### Mix sweep — 90:10 read:write ops/sec trend", text)
+        self.assertIn("| 40,000 | - | 0.020 |", text)
+        self.assertIn("| 50,000 | +25.0% | 0.020 |", text)
+        self.assertIn(
+            "Mix sweep — 90:10 read:write trend (oldest → newest): ▁█",
+            text)
+        self.assertIn(
+            "Mix sweep — 90:10 read:write first → last: 40,000 → "
             "50,000 ops/sec (+25.0%)", text)
 
     def test_records_without_sweeps_render_no_sweep_sections(self):

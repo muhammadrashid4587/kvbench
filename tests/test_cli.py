@@ -15,7 +15,7 @@ import unittest
 
 from kvbench.cli import MIX_PRESETS, _parse_client_sweep, _parse_duration, \
     _parse_host_port, _parse_keyspace_sweep, _parse_mix, \
-    _parse_pipeline_sweep, _parse_value_size_sweep, \
+    _parse_mix_sweep, _parse_pipeline_sweep, _parse_value_size_sweep, \
     _redact_command_line, build_parser, main
 
 
@@ -589,6 +589,94 @@ class TestPipelineSweepRun(unittest.TestCase):
     def test_bad_pipeline_sweep_rejected(self):
         for bad in ("bogus", "0", "1,abc", "1,,5"):
             code = main(["--sweep-pipeline", bad, "--ops", "10"])
+            self.assertEqual(code, 2, msg=bad)
+
+
+class TestParseMixSweep(unittest.TestCase):
+    def test_comma_list_read_heaviest_first(self):
+        self.assertEqual(
+            _parse_mix_sweep("100:0,90:10,50:50,10:90"),
+            [(100, 0), (90, 10), (50, 50), (10, 90)])
+
+    def test_single_ratio(self):
+        self.assertEqual(_parse_mix_sweep("80:20"), [(80, 20)])
+
+    def test_sorted_and_deduped(self):
+        self.assertEqual(_parse_mix_sweep("50:50,100:0,50:50"),
+                         [(100, 0), (50, 50)])
+        self.assertEqual(_parse_mix_sweep(" 10:90 , 90:10 "),
+                         [(90, 10), (10, 90)])
+
+    def test_invalid(self):
+        for bad in ("", "0:0", "-5:10", "90", "90:10:5",
+                    "read-heavy", "90:abc", "90,,10", "90:10,",
+                    "90.5:10"):
+            with self.assertRaises(ValueError, msg=bad):
+                _parse_mix_sweep(bad)
+
+
+class TestMixSweepFlag(unittest.TestCase):
+    def test_defaults_no_sweep(self):
+        args = build_parser().parse_args([])
+        self.assertIsNone(args.sweep_mix)
+
+    def test_sweep_value_kept(self):
+        args = build_parser().parse_args(
+            ["--sweep-mix", "100:0,50:50"])
+        self.assertEqual(args.sweep_mix, "100:0,50:50")
+
+
+class TestMixSweepRun(unittest.TestCase):
+    def test_mix_sweep_run_reports_per_ratio(self):
+        server = _start_server()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                output = os.path.join(tmp, "report.md")
+                code = main([
+                    "--host", "127.0.0.1",
+                    "--port", str(server.server_address[1]),
+                    "--ops", "200", "--clients", "2",
+                    "--sweep-mix", "100:0,50:50,0:100",
+                    "--output", output,
+                ])
+                self.assertEqual(code, 0)
+                with open(output, encoding="utf-8") as f:
+                    text = f.read()
+                self.assertIn(
+                    "Mix sweep: 100:0, 50:50, 0:100 read:write", text)
+                self.assertIn("## Mix sweep", text)
+                self.assertIn("| 100:0 | 200 |", text)
+                self.assertIn("| 50:50 | 200 |", text)
+                self.assertIn("| 0:100 | 200 |", text)
+                self.assertIn(
+                    "how the read:write mix affects throughput", text)
+                with open(os.path.join(tmp, "report.json"),
+                          encoding="utf-8") as f:
+                    parsed = json.load(f)
+                self.assertEqual(parsed["workload"]["sweep_mix"],
+                                 ["100:0", "50:50", "0:100"])
+                sweep = parsed["results"][0]["mix_sweep"]
+                self.assertEqual(len(sweep), 3)
+                self.assertEqual(sweep[0]["mix"], "100:0")
+                self.assertEqual(sweep[0]["ops"], 200)
+                self.assertGreater(sweep[0]["ops_per_sec"], 0)
+                self.assertGreaterEqual(sweep[0]["p99_ms"], 0)
+                # The read-only step ran GETs only, the write-only
+                # step SETs only — the sweep really re-ran the
+                # workload at each ratio.
+                self.assertEqual(
+                    set(sweep[0]["histograms_by_op"]), {"GET"})
+                self.assertEqual(
+                    set(sweep[2]["histograms_by_op"]), {"SET"})
+                self.assertEqual(sweep[2]["mix"], "0:100")
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_bad_mix_sweep_rejected(self):
+        for bad in ("bogus", "0:0", "90", "90:10:5", "read-heavy",
+                    "90:abc", "90,,10"):
+            code = main(["--sweep-mix", bad, "--ops", "10"])
             self.assertEqual(code, 2, msg=bad)
 
 

@@ -18,7 +18,34 @@ import threading
 import unittest
 
 from kvbench.cli import _workload_conflicts, main
-from kvbench.workload import load_workload_file
+from kvbench.workload import _parse_mix_sweep, load_workload_file
+
+
+class TestParseMixSweep(unittest.TestCase):
+    def test_comma_list_read_heaviest_first(self):
+        self.assertEqual(
+            _parse_mix_sweep("100:0,90:10,50:50,10:90"),
+            [(100, 0), (90, 10), (50, 50), (10, 90)])
+
+    def test_single_ratio(self):
+        self.assertEqual(_parse_mix_sweep("80:20"), [(80, 20)])
+
+    def test_sorted_and_deduped(self):
+        self.assertEqual(_parse_mix_sweep("50:50,100:0,50:50"),
+                         [(100, 0), (50, 50)])
+        self.assertEqual(_parse_mix_sweep(" 10:90 , 90:10 "),
+                         [(90, 10), (10, 90)])
+
+    def test_write_only_and_read_only(self):
+        self.assertEqual(_parse_mix_sweep("0:100"), [(0, 100)])
+        self.assertEqual(_parse_mix_sweep("100:0"), [(100, 0)])
+
+    def test_invalid(self):
+        for bad in ("", "0:0", "-5:10", "10:-5", "90", "90:10:5",
+                    "read-heavy", "90:abc", "90,,10", "90:10,",
+                    ",90:10", "90.5:10"):
+            with self.assertRaises(ValueError, msg=bad):
+                _parse_mix_sweep(bad)
 
 
 class _FakeRespHandler(socketserver.StreamRequestHandler):
@@ -120,6 +147,7 @@ class TestLoadWorkloadFile(unittest.TestCase):
                 "sweep_clients": [4, 1, 2],
                 "sweep_value_size": [128, 32],
                 "sweep_pipeline": [10, 1, 5],
+                "sweep_mix": ["50:50", "100:0", "50:50"],
             })
             settings = load_workload_file(path)
             self.assertEqual(settings["ops"], 20000)
@@ -141,6 +169,10 @@ class TestLoadWorkloadFile(unittest.TestCase):
             self.assertEqual(settings["sweep_clients"], [1, 2, 4])
             self.assertEqual(settings["sweep_value_size"], [32, 128])
             self.assertEqual(settings["sweep_pipeline"], [1, 5, 10])
+            # The mix sweep is read-heaviest first, duplicates
+            # dropped, like the flag.
+            self.assertEqual(settings["sweep_mix"],
+                             [(100, 0), (50, 50)])
 
     def test_mix_preset_and_ratio(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -229,6 +261,13 @@ class TestLoadWorkloadFile(unittest.TestCase):
             {"sweep_keyspace": [100, 0]},
             {"sweep_keyspace": [100, "1000"]},
             {"sweep_clients": [1.5]},
+            {"sweep_mix": "100:0,90:10"},
+            {"sweep_mix": [100, 90]},
+            {"sweep_mix": ["0:0"]},
+            {"sweep_mix": ["90:10", 5]},
+            {"sweep_mix": ["read-heavy"]},
+            {"sweep_mix": ["90"]},
+            {"sweep_mix": ["90:10:5"]},
         ]
         with tempfile.TemporaryDirectory() as tmp:
             for data in bad:
@@ -241,6 +280,9 @@ class TestLoadWorkloadFile(unittest.TestCase):
             settings = load_workload_file(
                 _write_config(tmp, {"sweep_keyspace": []}))
             self.assertEqual(settings["sweep_keyspace"], [])
+            settings = load_workload_file(
+                _write_config(tmp, {"sweep_mix": []}))
+            self.assertEqual(settings["sweep_mix"], [])
 
 
 class TestWorkloadConflicts(unittest.TestCase):
@@ -267,6 +309,7 @@ class TestWorkloadConflicts(unittest.TestCase):
             for extra in (["--ops", "100"], ["--clients=2"],
                           ["--mix", "80:20"],
                           ["--sweep-keyspace", "100,1000"],
+                          ["--sweep-mix", "100:0,50:50"],
                           ["--repeat", "2"], ["--timeout", "1"],
                           ["--duration", "10s"]):
                 with self.subTest(extra=extra):

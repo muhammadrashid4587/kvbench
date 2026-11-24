@@ -19,7 +19,8 @@ from contextlib import redirect_stdout
 from io import StringIO
 
 from kvbench.bench import (DictClient, Workload, run_client_sweep,
-                           run_keyspace_sweep, run_pipeline_sweep,
+                           run_keyspace_sweep, run_mix_sweep,
+                           run_pipeline_sweep,
                            run_value_size_sweep, run_workload)
 from kvbench.cli import main
 from kvbench.report import render_json, render_markdown
@@ -188,6 +189,62 @@ class TestRepeatedPipelineSweep(unittest.TestCase):
         self.assertEqual(sweep, [])
 
 
+class TestRepeatedMixSweep(unittest.TestCase):
+    def test_each_step_runs_repeat_times_and_reports_medians(self):
+        workload = Workload(ops=200, clients=2, keys=10, value_size=8)
+        sweep = run_mix_sweep(DictClient, workload,
+                              [(100, 0), (90, 10), (50, 50), (10, 90),
+                               (0, 100)],
+                              repeat=3)
+        self.assertEqual([entry["mix"] for entry in sweep],
+                         ["100:0", "90:10", "50:50", "10:90", "0:100"])
+        for entry in sweep:
+            self.assertEqual(entry["ops"], 200)
+            _check_repeated_step(entry, 3)
+        # The base workload is untouched: the sweep copies it per ratio.
+        self.assertEqual(
+            (workload.set_weight, workload.get_weight,
+             workload.incr_weight, workload.del_weight),
+            (50, 40, 10, 5))
+        self.assertEqual(workload.mix_label, "")
+
+    def test_each_step_runs_only_its_mix(self):
+        # A step's ops are its ratio's ops only: reads are GETs,
+        # writes are SETs, with no INCRs or DELs.
+        workload = Workload(ops=200, clients=2, keys=10)
+        sweep = run_mix_sweep(DictClient, workload,
+                              [(100, 0), (50, 50), (0, 100)])
+        self.assertEqual(set(sweep[0]["histograms_by_op"]), {"GET"})
+        self.assertEqual(set(sweep[1]["histograms_by_op"]),
+                         {"SET", "GET"})
+        self.assertEqual(set(sweep[2]["histograms_by_op"]), {"SET"})
+
+    def test_repeat_one_keeps_the_old_shape(self):
+        workload = Workload(ops=200, clients=2, keys=10, value_size=8)
+        sweep = run_mix_sweep(DictClient, workload,
+                              [(100, 0), (50, 50)], repeat=1)
+        for entry in sweep:
+            self.assertNotIn("repeat", entry)
+            self.assertEqual(
+                set(entry),
+                {"mix", "ops", "ops_per_sec", "mean_ms", "p99_ms",
+                 "histograms_by_op"})
+
+    def test_repeat_zero_raises(self):
+        workload = Workload(ops=10, clients=1, keys=5)
+        with self.assertRaises(ValueError):
+            run_mix_sweep(DictClient, workload, [(100, 0)], repeat=0)
+
+    def test_sweep_stops_on_unreachable_backend(self):
+        def failing_factory():
+            raise ConnectionError("connection refused")
+
+        workload = Workload(ops=10, clients=1, keys=5)
+        sweep = run_mix_sweep(failing_factory, workload,
+                              [(100, 0), (50, 50)], repeat=3)
+        self.assertEqual(sweep, [])
+
+
 class TestRepeatedSweepRendering(unittest.TestCase):
     def _result_with_repeated_sweeps(self):
         workload = Workload(ops=200, clients=2, repeat=3)
@@ -200,6 +257,8 @@ class TestRepeatedSweepRendering(unittest.TestCase):
             DictClient, workload, [8, 64], repeat=3)
         result.pipeline_sweep = run_pipeline_sweep(
             DictClient, workload, [1, 5], repeat=3)
+        result.mix_sweep = run_mix_sweep(
+            DictClient, workload, [(100, 0), (50, 50)], repeat=3)
         return result, workload
 
     def test_repeated_sweep_renders_in_markdown_and_json(self):
@@ -216,12 +275,15 @@ class TestRepeatedSweepRendering(unittest.TestCase):
         self.assertIn("#### 64 byte values — repeat runs", text)
         self.assertIn("#### 1 commands — repeat runs", text)
         self.assertIn("#### 5 commands — repeat runs", text)
+        self.assertIn("#### mix 100:0 — repeat runs", text)
+        self.assertIn("#### mix 50:50 — repeat runs", text)
         self.assertIn("Median of 3 runs", text)
         self.assertIn("Spread: ops/sec", text)
         parsed = json.loads(render_json([result], workload, "kvbench"))
         doc = parsed["results"][0]
         for key in ("keyspace_sweep", "client_sweep",
-                    "value_size_sweep", "pipeline_sweep"):
+                    "value_size_sweep", "pipeline_sweep",
+                    "mix_sweep"):
             for entry in doc[key]:
                 self.assertEqual(len(entry["repeat"]["runs"]), 3)
                 self.assertEqual(
@@ -268,6 +330,7 @@ class TestRepeatedSweepCli(unittest.TestCase):
                         "--sweep-clients", "1,2",
                         "--sweep-value-size", "32,128",
                         "--sweep-pipeline", "1,5",
+                        "--sweep-mix", "100:0,50:50",
                         "--repeat", "2",
                         "--output", output,
                     ])
@@ -281,15 +344,20 @@ class TestRepeatedSweepCli(unittest.TestCase):
                               text)
                 self.assertIn("#### 1 commands — repeat runs", text)
                 self.assertIn("#### 5 commands — repeat runs", text)
+                self.assertIn("#### mix 100:0 — repeat runs", text)
+                self.assertIn("#### mix 50:50 — repeat runs", text)
                 with open(os.path.join(tmp, "report.json"),
                           encoding="utf-8") as f:
                     parsed = json.load(f)
                 self.assertEqual(parsed["workload"]["repeat"], 2)
                 self.assertEqual(parsed["workload"]["sweep_pipeline"],
                                  [1, 5])
+                self.assertEqual(parsed["workload"]["sweep_mix"],
+                                 ["100:0", "50:50"])
                 doc = parsed["results"][0]
                 for key in ("keyspace_sweep", "client_sweep",
-                            "value_size_sweep", "pipeline_sweep"):
+                            "value_size_sweep", "pipeline_sweep",
+                            "mix_sweep"):
                     self.assertEqual(len(doc[key]), 2)
                     for entry in doc[key]:
                         self.assertEqual(

@@ -726,6 +726,72 @@ class TestReport(unittest.TestCase):
         self.assertIsNone(parsed["workload"]["sweep_pipeline"])
         self.assertEqual(parsed["results"][0]["pipeline_sweep"], [])
 
+    def test_mix_sweep_in_markdown_and_json(self):
+        workload = Workload(ops=100, clients=2, keys=10, value_size=8,
+                            sweep_mix=[(100, 0), (50, 50), (0, 100)])
+        result = BenchmarkResult(
+            name="cinder", ops=100, elapsed_s=0.01, errors=0,
+            latencies_ns=[100_000] * 100,
+            mix_sweep=[
+                {"mix": "100:0", "ops": 100, "ops_per_sec": 9_000,
+                 "mean_ms": 0.11, "p99_ms": 0.14,
+                 "histograms_by_op": {
+                     "GET": [{"upper_ms": 0.1, "count": 100}],
+                 }},
+                {"mix": "50:50", "ops": 100, "ops_per_sec": 8_000,
+                 "mean_ms": 0.12, "p99_ms": 0.15,
+                 "histograms_by_op": {
+                     "SET": [{"upper_ms": 0.1, "count": 50}],
+                     "GET": [{"upper_ms": 0.1, "count": 0},
+                             {"upper_ms": 0.25, "count": 50}],
+                 }},
+                {"mix": "0:100", "ops": 100, "ops_per_sec": 7_000,
+                 "mean_ms": 0.13, "p99_ms": 0.16,
+                 "histograms_by_op": {
+                     "SET": [{"upper_ms": 0.1, "count": 100}],
+                 }},
+            ],
+        )
+        text = render_markdown([result], workload, "kvbench")
+        self.assertIn("Mix sweep: 100:0, 50:50, 0:100 read:write", text)
+        self.assertIn("## Mix sweep", text)
+        self.assertIn("Mix sweep — cinder", text)
+        self.assertIn("| Mix (read:write) | Ops | Ops/sec | Mean (ms) | "
+                      "p99 (ms) |", text)
+        self.assertIn("| 100:0 | 100 | 9,000 | 0.110 | 0.140 |", text)
+        self.assertIn("| 50:50 | 100 | 8,000 | 0.120 | 0.150 |", text)
+        self.assertIn("| 0:100 | 100 | 7,000 | 0.130 | 0.160 |", text)
+        self.assertIn(
+            "how the read:write mix affects throughput", text)
+        self.assertIn("#### mix 100:0 — per-op latency histogram",
+                      text)
+        self.assertIn("#### mix 50:50 — per-op latency histogram",
+                      text)
+        self.assertIn("GET (100 ops)", text)
+        self.assertIn("mix_sweep[].histograms_by_op", text)
+        parsed = json.loads(render_json([result], workload, "kvbench"))
+        self.assertEqual(parsed["workload"]["sweep_mix"],
+                         ["100:0", "50:50", "0:100"])
+        sweep = parsed["results"][0]["mix_sweep"]
+        self.assertEqual(len(sweep), 3)
+        self.assertEqual(sweep[0]["mix"], "100:0")
+        self.assertAlmostEqual(sweep[0]["ops_per_sec"], 9_000)
+        self.assertAlmostEqual(sweep[0]["p99_ms"], 0.14)
+        self.assertEqual(sweep[0]["histograms_by_op"]["GET"],
+                         [{"upper_ms": 0.1, "count": 100}])
+        self.assertEqual(sweep[2]["mix"], "0:100")
+
+    def test_no_mix_sweep_omits_section(self):
+        workload = _workload()
+        text = render_markdown([_result()], workload, "kvbench")
+        self.assertNotIn("## Mix sweep", text)
+        self.assertNotIn("Mix sweep:", text)
+        self.assertNotIn(
+            "how the read:write mix affects throughput", text)
+        parsed = json.loads(render_json([_result()], workload, "kvbench"))
+        self.assertIsNone(parsed["workload"]["sweep_mix"])
+        self.assertEqual(parsed["results"][0]["mix_sweep"], [])
+
     def test_json_path_for(self):
         self.assertEqual(json_path_for("report.md", None), "report.json")
         self.assertEqual(json_path_for("out/run.md", None), "out/run.json")

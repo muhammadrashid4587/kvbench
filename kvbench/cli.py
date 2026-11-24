@@ -35,6 +35,12 @@ Usage:
     python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
         --ops 20000 --clients 4 \\
         --sweep-pipeline 1,5,10 --output report.md
+    # sweep the read:write mix: the same workload re-run at 100:0,
+    # 90:10, 50:50 and 10:90 read:write, with ops/sec and p99 per
+    # ratio — reads are GETs, writes are SETs, no INCRs or DELs
+    python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
+        --ops 20000 --clients 4 \\
+        --sweep-mix 100:0,90:10,50:50,10:90 --output report.md
     # record the run in the history file, then compare later runs
     # against it (ops/sec trend over time)
     python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
@@ -114,10 +120,11 @@ from datetime import datetime, timezone
 
 from . import __version__
 from .bench import DictClient, Workload, format_duration, \
-    run_client_sweep, run_keyspace_sweep, run_pipeline_sweep, \
-    run_repeated_workload, run_value_size_sweep, run_workload
+    run_client_sweep, run_keyspace_sweep, run_mix_sweep, \
+    run_pipeline_sweep, run_repeated_workload, run_value_size_sweep, \
+    run_workload
 from .workload import MIX_PRESETS, _parse_duration, _parse_mix, \
-    load_workload_file
+    _parse_mix_sweep, load_workload_file
 from .compare import compare_results, format_verdict, load_baseline, \
     load_history_baseline
 from .history import DEFAULT_HISTORY_FILE, export_history, \
@@ -378,7 +385,7 @@ _WORKLOAD_FLAGS = (
     "--key-prefix", "--value-size", "--mix", "--pipeline",
     "--distribution", "--zipf-skew", "--hot-keys", "--seed",
     "--timeout", "--repeat", "--sweep-keyspace", "--sweep-clients",
-    "--sweep-value-size", "--sweep-pipeline",
+    "--sweep-value-size", "--sweep-pipeline", "--sweep-mix",
 )
 
 
@@ -484,6 +491,11 @@ def build_parser():
                         help="re-run the same workload once per "
                         "pipeline depth, e.g. 1,5,10, and report "
                         "ops/sec and p99 per depth")
+    parser.add_argument("--sweep-mix", default=None,
+                        metavar="RATIOS",
+                        help="re-run the same workload once per "
+                        "read:write ratio, e.g. 100:0,90:10,50:50, "
+                        "and report ops/sec and p99 per ratio")
     parser.add_argument("--repeat", type=int, default=1, metavar="N",
                         help="run the benchmark N times and report the "
                         "median ops/sec and p99 over the N runs "
@@ -823,6 +835,8 @@ def main(argv=None):
                        if args.sweep_value_size else [])
         pipeline_depths = (_parse_pipeline_sweep(args.sweep_pipeline)
                            if args.sweep_pipeline else [])
+        mix_ratios = (_parse_mix_sweep(args.sweep_mix)
+                      if args.sweep_mix else [])
         if args.workload:
             # The file declares the workload: every key it sets
             # replaces the command-line default, and every key it
@@ -848,6 +862,8 @@ def main(argv=None):
                 value_sizes = config["sweep_value_size"]
             if "sweep_pipeline" in config:
                 pipeline_depths = config["sweep_pipeline"]
+            if "sweep_mix" in config:
+                mix_ratios = config["sweep_mix"]
             for key in ("ops", "clients", "keys", "key_prefix",
                         "value_size", "pipeline", "distribution",
                         "zipf_skew", "hot_keys", "seed", "timeout",
@@ -942,6 +958,7 @@ def main(argv=None):
             sweep_clients=client_counts,
             sweep_value_size=value_sizes,
             sweep_pipeline=pipeline_depths,
+            sweep_mix=mix_ratios,
             repeat=args.repeat,
             slo_p99_ms=slo_p99_ms,
             slo_error_rate_pct=slo_error_rate,
@@ -1102,6 +1119,34 @@ def main(argv=None):
                   f"{len(pipeline_depths)} depths (backend "
                   "unreachable)", file=sys.stderr)
 
+    def _run_mix_sweep(factory, result):
+        """Re-run the workload once per swept read:write ratio and
+        attach the per-ratio summaries to ``result``.
+
+        With ``--repeat`` above 1 each ratio runs that many times
+        and the per-ratio ops/sec and p99 are the medians over the
+        runs (see :func:`kvbench.bench.run_mix_sweep`).
+        Prints one line per ratio. A sweep that stops early (the
+        backend went away mid-sweep) keeps the ratios that completed
+        and says so on stderr instead of failing the whole run —
+        the main result already landed.
+        """
+        if not mix_ratios:
+            return
+        result.mix_sweep = run_mix_sweep(
+            factory, workload, mix_ratios, args.repeat)
+        for entry in result.mix_sweep:
+            print(f"  mix sweep {entry['mix']} read:write: "
+                  f"{entry['ops_per_sec']:,.0f} ops/sec, "
+                  f"p99 {entry['p99_ms']:.3f} ms"
+                  + (f" (median of {args.repeat} runs)"
+                     if args.repeat > 1 else ""))
+        if len(result.mix_sweep) < len(mix_ratios):
+            print(f"kvbench: mix sweep on {result.name} stopped "
+                  f"after {len(result.mix_sweep)} of "
+                  f"{len(mix_ratios)} ratios (backend unreachable)",
+                  file=sys.stderr)
+
     def server_factory():
         return RespClient(args.host, args.port, timeout=args.timeout,
                           username=args.username,
@@ -1155,6 +1200,7 @@ def main(argv=None):
     _run_client_sweep(server_factory, result)
     _run_value_size_sweep(server_factory, result)
     _run_pipeline_sweep(server_factory, result)
+    _run_mix_sweep(server_factory, result)
 
     for host, port in compare_targets:
         def compare_factory(host=host, port=port):
@@ -1180,6 +1226,7 @@ def main(argv=None):
         _run_client_sweep(compare_factory, compared)
         _run_value_size_sweep(compare_factory, compared)
         _run_pipeline_sweep(compare_factory, compared)
+        _run_mix_sweep(compare_factory, compared)
 
     if args.baseline:
         baseline = _run(DictClient, "baseline (dict)")
@@ -1192,6 +1239,7 @@ def main(argv=None):
         _run_client_sweep(DictClient, baseline)
         _run_value_size_sweep(DictClient, baseline)
         _run_pipeline_sweep(DictClient, baseline)
+        _run_mix_sweep(DictClient, baseline)
 
     comparison = None
     if baseline_doc is not None:

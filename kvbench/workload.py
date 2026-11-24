@@ -25,7 +25,8 @@ command-line default:
       "sweep_keyspace": [100, 1000],
       "sweep_clients": [1, 2, 4],
       "sweep_value_size": [32, 128],
-      "sweep_pipeline": [1, 5]
+      "sweep_pipeline": [1, 5],
+      "sweep_mix": ["100:0", "90:10", "50:50"]
     }
 
 ``mix`` takes the same forms as ``--mix`` (``SET:GET:INCR:DEL``
@@ -36,6 +37,9 @@ number is also accepted as JSON, so ``"duration": 10`` means 10
 seconds). ``ops`` and ``duration`` are mutually exclusive, like the
 flags. Sweep lists are JSON arrays of positive integers; they are
 sorted and deduplicated, like the comma-separated flags.
+``sweep_mix`` is a list of ``"READ:WRITE"`` ratio strings, parsed
+like the ``--sweep-mix`` flag (read-heaviest first, duplicates
+dropped).
 
 The loader validates the file before any benchmark runs: a missing
 file, invalid JSON, a non-object, an unknown key, a wrong type, or
@@ -102,6 +106,55 @@ def _parse_mix(text):
     return values[0], values[1], values[2], values[3], ""
 
 
+def _parse_mix_sweep(text):
+    """Parse a ``--sweep-mix`` value into a list of (read, write).
+
+    A comma-separated list of ``READ:WRITE`` ratios, e.g.
+    ``100:0,90:10,50:50,10:90`` -> [(100, 0), (90, 10), (50, 50),
+    (10, 90)]. Each ratio is a read:write split of the workload —
+    reads are GETs, writes are SETs, with no INCRs or DELs, the
+    same meaning as a two-part ``--mix`` — so a step at ``0:100``
+    is a write-only run and a step at ``100:0`` a read-only one.
+    Duplicates are dropped and the ratios are sorted read-heaviest
+    first (by read share, then by read weight), so ``50:50,100:0``
+    sweeps 100:0 then 50:50. Each part must be two non-negative
+    integers summing above 0: ``0:0`` sweeps nothing, and a
+    negative weight, a non-integer, a missing part or a preset
+    name is rejected.
+    """
+    if not text:
+        raise ValueError(
+            "sweep-mix must list read:write ratios, "
+            "e.g. 100:0,90:10,50:50,10:90")
+    ratios = []
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            raise ValueError(
+                "sweep-mix ratios must be comma-separated "
+                "READ:WRITE pairs, e.g. 100:0,90:10,50:50,10:90")
+        pieces = part.split(":")
+        if len(pieces) != 2:
+            raise ValueError(
+                "sweep-mix ratios must be READ:WRITE pairs, "
+                "e.g. 100:0,90:10,50:50,10:90")
+        try:
+            read, write = int(pieces[0]), int(pieces[1])
+        except ValueError as exc:
+            raise ValueError(
+                "sweep-mix ratios must be integers") from exc
+        if read < 0 or write < 0 or read + write <= 0:
+            raise ValueError(
+                "sweep-mix ratios must be non-negative and sum "
+                "above 0")
+        ratios.append((read, write))
+    # Read-heaviest first: a step's position in the sweep reads
+    # from read-only down to write-only.
+    return sorted(set(ratios),
+                  key=lambda ratio: (-ratio[0] / sum(ratio),
+                                     -ratio[0], -ratio[1]))
+
+
 def _parse_duration(text):
     """Parse a ``--duration`` value into seconds (float).
 
@@ -153,7 +206,8 @@ _SWEEP_KEYS = (
     "sweep_pipeline",
 )
 _KNOWN_KEYS = (
-    {"ops", "mix", "duration", "warmup", "distribution", "key_prefix"}
+    {"ops", "mix", "duration", "warmup", "distribution", "key_prefix",
+     "sweep_mix"}
     | {key for key, _ in _SCALAR_KEYS}
     | {key for key, _ in _NUMBER_KEYS}
     | set(_SWEEP_KEYS)
@@ -253,6 +307,32 @@ def _config_sweep(data, key, path):
     return sorted(set(value))
 
 
+def _config_mix_sweep(data, key, path):
+    """A mix-sweep config value as a list of (read, write) tuples.
+
+    Must be a JSON array of ``"READ:WRITE"`` ratio strings, parsed
+    like the ``--sweep-mix`` flag (read-heaviest first, duplicates
+    dropped); an empty array means no sweep, the same as leaving
+    the key out.
+    """
+    if key not in data or data[key] is None:
+        return None
+    value = data[key]
+    if not isinstance(value, list) or any(
+            not isinstance(item, str) for item in value):
+        _fail(path, f"{key} must be a list of READ:WRITE ratios, "
+                    "e.g. [\"100:0\", \"90:10\"]")
+    if not value:
+        # An empty array means no sweep, the same as leaving the
+        # key out — joining it would hand the parser an empty
+        # string, which it (rightly) rejects.
+        return []
+    try:
+        return _parse_mix_sweep(",".join(value))
+    except ValueError as exc:
+        _fail(path, f"{key}: {exc}")
+
+
 def load_workload_file(path):
     """Load a workload config file into normalized settings.
 
@@ -260,9 +340,11 @@ def load_workload_file(path):
     values parsed into the shapes the CLI uses: ``mix`` is the
     ``(set, get, incr, del, label)`` tuple :func:`_parse_mix`
     returns, ``duration`` and ``warmup`` are seconds as floats
-    under ``duration_s`` and ``warmup_s``, and each sweep is a
-    sorted list of distinct positive ints. A key the file does not
-    set is absent, so the caller keeps its default for it.
+    under ``duration_s`` and ``warmup_s``, each sweep is a sorted
+    list of distinct positive ints, and ``sweep_mix`` is a list of
+    ``(read, write)`` tuples (see :func:`_parse_mix_sweep`). A key
+    the file does not set is absent, so the caller keeps its
+    default for it.
 
     Raises ValueError naming the file when it is missing, is not
     valid JSON, is not an object, or holds an unknown key, a wrong
@@ -349,4 +431,7 @@ def load_workload_file(path):
         values = _config_sweep(data, key, path)
         if values is not None:
             settings[key] = values
+    mix_ratios = _config_mix_sweep(data, "sweep_mix", path)
+    if mix_ratios is not None:
+        settings["sweep_mix"] = mix_ratios
     return settings

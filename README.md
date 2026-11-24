@@ -85,6 +85,15 @@ C. Pure Python 3 standard library, no dependencies.
   depth, plus a per-operation latency histogram per depth, so a run
   shows how pipelining affects throughput — where batching more
   commands per round trip stops helping.
+  With `--sweep-mix 100:0,90:10,50:50,10:90` the same workload is
+  re-run once per read:write ratio, and the reports show ops/sec
+  and p99 per ratio, plus a per-operation latency histogram per
+  ratio, so a run shows how the read:write mix affects throughput
+  — where a store's writes start costing more than its reads.
+  Each ratio is a read:write split — reads are GETs, writes are
+  SETs, with no INCRs or DELs, the same meaning as a two-part
+  `--mix` — so `100:0` is a read-only run and `0:100` a
+  write-only one, and the ratios run read-heaviest first.
   When the tail is high the reports attribute it: slow ops (at or
   above the overall p99) are broken down by operation type, by
   client, by hot vs cold keys, and by second, and the finding
@@ -202,6 +211,11 @@ python -m kvbench.cli --ops 20000 --clients 4 \
 # 10 commands per round trip, with ops/sec and p99 per depth
 python -m kvbench.cli --ops 20000 --clients 4 \
     --sweep-pipeline 1,5,10
+
+# sweep the read:write mix: the same workload re-run at 100:0,
+# 90:10, 50:50 and 10:90 read:write, with ops/sec and p99 per ratio
+python -m kvbench.cli --ops 20000 --clients 4 \
+    --sweep-mix 100:0,90:10,50:50,10:90
 
 # record the run in the history file, then look at the ops/sec
 # trend over time (default file: ~/.kvbench/history.jsonl)
@@ -375,6 +389,11 @@ ops/sec and p99 per size in both reports),
 `--sweep-pipeline` (comma-separated pipeline depths, e.g.
 `1,5,10`: re-run the same workload once per depth and report
 ops/sec and p99 per depth in both reports),
+`--sweep-mix` (comma-separated read:write ratios, e.g.
+`100:0,90:10,50:50,10:90`: re-run the same workload once per
+ratio — reads are GETs, writes are SETs, no INCRs or DELs — and
+report ops/sec and p99 per ratio in both reports, read-heaviest
+first),
 `--output` (default report.md), `--json`
 (default: same name as `--output` with a `.json` extension),
 `--csv` (write a per-second throughput CSV alongside the reports:
@@ -492,7 +511,8 @@ default:
   "sweep_keyspace": [100, 1000],
   "sweep_clients": [1, 2, 4],
   "sweep_value_size": [32, 128],
-  "sweep_pipeline": [1, 5]
+  "sweep_pipeline": [1, 5],
+  "sweep_mix": ["100:0", "90:10"]
 }
 ```
 
@@ -502,7 +522,9 @@ a `SET:GET:INCR` triple, a `READ:WRITE` ratio, or a preset name);
 (`10s`, `2m`, or a bare number of seconds — a JSON number is
 seconds directly, so `"duration": 10` means 10 seconds); the
 sweeps are JSON arrays of positive integers, sorted and
-deduplicated like the comma-separated flags. `ops` and `duration`
+deduplicated like the comma-separated flags. `sweep_mix` is a list
+of `"READ:WRITE"` ratio strings, parsed like the `--sweep-mix`
+flag (read-heaviest first, duplicates dropped). `ops` and `duration`
 are mutually exclusive, like the flags.
 
 A config file and command-line workload flags conflict: passing
@@ -570,7 +592,7 @@ SET) leaves that op out of its own table.
 
 A sweep run recorded with `--history` also records each sweep
 step — one ops/sec and p99 per keyspace size, client count, value
-size and pipeline depth — and below the per-op sections each backend gets one
+size, pipeline depth and read:write ratio — and below the per-op sections each backend gets one
 trend section per step that ran, with the same table, delta,
 sparkline and first-to-last change as the overall chart: a
 keyspace step's ops/sec at 100 keys is only ever compared with
@@ -918,6 +940,19 @@ under `pipeline_sweep`, with the per-op buckets per step under
 `histograms_by_op`, and the workload section carries the swept
 depths under `sweep_pipeline`.
 
+With `--sweep-mix` the report has a Mix sweep section right below
+the Pipeline sweep (or the Value size sweep, the Client sweep, the
+Keyspace sweep, or the results table, when there is no pipeline
+sweep): one table per backend with a row per swept ratio — mix as
+a read:write ratio, ops, ops/sec, mean and p99 — so the effect of
+the read:write mix on throughput reads at a glance: where a
+store's writes start costing more than its reads. Each swept ratio
+also gets its own per-operation latency histogram block under the
+table. The JSON report carries the same rows per result under
+`mix_sweep`, with the per-op buckets per step under
+`histograms_by_op`, and the workload section carries the swept
+ratios under `sweep_mix`.
+
 With `--repeat N` and any sweep, each sweep step runs N times and
 its table row shows the median ops/sec and p99 over the runs, with
 a per-step repeat block below the table listing each run's ops/sec
@@ -1016,9 +1051,23 @@ make test
 
 ## Roadmap
 
+- `--sweep-mix` mode: a sweep mode that varies the read:write
+  mix across steps — `--sweep-mix 100:0,90:10,50:50,10:90`
+  re-runs the same workload once per ratio, like the existing
+  sweeps vary key count, client count, value size and pipeline
+  depth — recording per-step ops/sec and p99 in both reports,
+  with a per-step per-operation latency histogram block,
+  composing with `--repeat` (median per step, per-step repeat
+  block), and flowing through the run history and trend views
+  under `sweeps.mix`, so a mix step's ops/sec is only ever
+  compared with the same step in other runs. Each ratio is a
+  read:write split — reads are GETs, writes are SETs, no INCRs
+  or DELs — and the ratios run read-heaviest first. A run with
+  no mix sweep keeps the old shapes exactly, and runs recorded
+  before 0.40.0 carry no mix steps. Done in 0.40.0.
 - Workload config file (`--workload FILE`): declare the workload
   once in a JSON file (op mix, key count, value size, pipeline
-  depth, duration, warmup, seed, timeout, repeat and all four
+  depth, duration, warmup, seed, timeout, repeat and all five
   sweeps — every key optional, absent keys keep the command-line
   defaults) so a benchmark can be checked in and re-run exactly,
   with a config file and command-line workload flags conflicting

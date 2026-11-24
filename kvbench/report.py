@@ -56,6 +56,12 @@ def _workload_dict(workload):
         # Pipeline depths swept in this run, or null when no sweep.
         "sweep_pipeline": (list(workload.sweep_pipeline)
                            if workload.sweep_pipeline else None),
+        # Read:write ratios swept in this run, as "READ:WRITE"
+        # strings in sweep order (read-heaviest first), or null
+        # when no sweep.
+        "sweep_mix": ([f"{read}:{write}"
+                       for read, write in workload.sweep_mix]
+                      if workload.sweep_mix else None),
         # SLO gate thresholds for this run, or null when not set.
         "slo_p99_ms": workload.slo_p99_ms,
         "slo_error_rate_pct": workload.slo_error_rate_pct,
@@ -160,6 +166,14 @@ def _result_dict(result, top_n=5):
         # per-run values and spread under ``repeat``; [] when no
         # sweep ran.
         "pipeline_sweep": result.pipeline_sweep,
+        # Read:write mix sweep: one per-ratio summary per swept
+        # ratio (mix as a "READ:WRITE" string, ops, ops/sec, mean
+        # and p99, plus the per-op latency histograms of that run
+        # under ``histograms_by_op``); with ``--repeat`` above 1
+        # each ratio runs that many times and the entry carries the
+        # per-run values and spread under ``repeat``; [] when no
+        # sweep ran.
+        "mix_sweep": result.mix_sweep,
     }
     if result.repeat_runs:
         # Only a repeated run carries this: a single run's result
@@ -785,6 +799,40 @@ def _pipeline_sweep_lines(result):
     return lines
 
 
+def _mix_sweep_lines(result):
+    """Read:write mix sweep table for one result, or [] when no sweep ran.
+
+    The table is followed by a per-operation latency histogram
+    per swept ratio, so a ratio where one op type slows down shows
+    which op it is, not just that the p99 moved. When a step ran
+    ``--repeat`` more than once its table row shows the medians
+    over the runs, and a per-step repeat block shows the runs
+    behind them.
+    """
+    if not result.mix_sweep:
+        return []
+    lines = [
+        f"### Mix sweep — {result.name}",
+        "",
+        "| Mix (read:write) | Ops | Ops/sec | Mean (ms) | p99 (ms) |",
+        "| ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for entry in result.mix_sweep:
+        lines.append(
+            f"| {entry['mix']} | {entry['ops']} | "
+            f"{entry['ops_per_sec']:,.0f} | {entry['mean_ms']:.3f} | "
+            f"{entry['p99_ms']:.3f} |"
+        )
+    lines.append("")
+    lines += _sweep_repeat_lines(
+        lambda entry: f"mix {entry['mix']}",
+        result.mix_sweep)
+    lines += _sweep_per_op_histogram_lines(
+        lambda entry: f"mix {entry['mix']}",
+        result.mix_sweep)
+    return lines
+
+
 def _time_series_lines(result):
     """Per-second ops/latency table for one result, or [] when empty."""
     series = result.time_series
@@ -1068,6 +1116,21 @@ def render_markdown(results, workload, command_line, comparison=None,
         )
     else:
         pipeline_sweep_line = None
+    if workload.sweep_mix:
+        mix_sweep_line = (
+            "- Mix sweep: "
+            + ", ".join(f"{read}:{write}"
+                        for read, write in workload.sweep_mix)
+            + " read:write (the same workload re-run "
+            + (f"{workload.repeat} times"
+               if workload.repeat > 1 else "once")
+            + " per read:write ratio; per-ratio ops/sec and p99 are "
+            + ("the medians over the runs and are "
+               if workload.repeat > 1 else "")
+            + "in the Mix sweep section below)"
+        )
+    else:
+        mix_sweep_line = None
     if workload.repeat > 1:
         repeat_line = (
             f"- Repeat: {workload.repeat} runs (the same workload "
@@ -1125,6 +1188,8 @@ def render_markdown(results, workload, command_line, comparison=None,
         lines.append(value_sweep_line)
     if pipeline_sweep_line is not None:
         lines.append(pipeline_sweep_line)
+    if mix_sweep_line is not None:
+        lines.append(mix_sweep_line)
     if repeat_line is not None:
         lines.append(repeat_line)
     if workload_file_line is not None:
@@ -1167,6 +1232,11 @@ def render_markdown(results, workload, command_line, comparison=None,
         pipeline_sweep_lines += _pipeline_sweep_lines(result)
     if pipeline_sweep_lines:
         lines += ["", "## Pipeline sweep", ""] + pipeline_sweep_lines
+    mix_sweep_lines = []
+    for result in results:
+        mix_sweep_lines += _mix_sweep_lines(result)
+    if mix_sweep_lines:
+        lines += ["", "## Mix sweep", ""] + mix_sweep_lines
     repeat_lines = []
     for result in results:
         repeat_lines += _repeat_lines(result)
@@ -1321,6 +1391,18 @@ def render_markdown(results, workload, command_line, comparison=None,
             "histograms, so a depth where one op type slows down "
             "names the op. The JSON report carries the same buckets "
             "per sweep step under `pipeline_sweep[].histograms_by_op`."
+        )
+    if workload.sweep_mix:
+        lines.append(
+            "- The Mix sweep section re-runs the same workload once "
+            "per read:write ratio, so ops/sec and p99 per ratio show "
+            "how the read:write mix affects throughput — where a "
+            "store's writes start costing more than its reads; the "
+            "main results table above uses the base mix. Each swept "
+            "ratio also gets its own per-operation latency "
+            "histograms, so a ratio where one op type slows down "
+            "names the op. The JSON report carries the same buckets "
+            "per sweep step under `mix_sweep[].histograms_by_op`."
         )
     if workload.repeat > 1:
         lines.append(

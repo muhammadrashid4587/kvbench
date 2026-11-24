@@ -111,21 +111,22 @@ def _sweeps_record(result):
     """A run's sweep steps in trend shape, or {} when no sweep ran.
 
     One trimmed entry per step — the step value (``keys``,
-    ``clients``, ``value_size`` or ``pipeline``), ops, ops/sec,
-    mean and p99 —
+    ``clients``, ``value_size``, ``pipeline`` or ``mix``), ops,
+    ops/sec, mean and p99 —
     per sweep kind that ran, keyed ``keyspace`` / ``clients`` /
-    ``value_size`` / ``pipeline``. The per-op histograms and repeat detail stay
-    in the JSON report; the trend only needs ops/sec and p99 per
-    step, the same numbers the overall trend tracks per run, so a
-    sweep step's ops/sec at 100 keys is only ever compared with
-    the same step in other runs.
+    ``value_size`` / ``pipeline`` / ``mix``. The per-op histograms
+    and repeat detail stay in the JSON report; the trend only
+    needs ops/sec and p99 per step, the same numbers the overall
+    trend tracks per run, so a sweep step's ops/sec at 100 keys
+    is only ever compared with the same step in other runs.
     """
     sweeps = {}
     for kind, steps, step_key in (
             ("keyspace", result.sweep, "keys"),
             ("clients", result.client_sweep, "clients"),
             ("value_size", result.value_sweep, "value_size"),
-            ("pipeline", result.pipeline_sweep, "pipeline")):
+            ("pipeline", result.pipeline_sweep, "pipeline"),
+            ("mix", result.mix_sweep, "mix")):
         entries = [
             {step_key: step[step_key],
              "ops": step["ops"],
@@ -333,13 +334,17 @@ def _per_op_trend_lines(runs, window):
     return lines
 
 
-# (history key, step key, section label, step unit) for the four
+# (history key, step key, section label, step unit) for the five
 # sweep kinds, in the order the report renders their sections.
+# The mix kind's step value is a "READ:WRITE" string, not a number,
+# so the trend renders it as e.g. "90:10 read:write" instead of
+# "90,10 read:write".
 _SWEEP_KINDS = (
     ("keyspace", "keys", "Keyspace sweep", "keys"),
     ("clients", "clients", "Client sweep", "clients"),
     ("value_size", "value_size", "Value size sweep", "byte values"),
     ("pipeline", "pipeline", "Pipeline sweep", "commands"),
+    ("mix", "mix", "Mix sweep", "read:write"),
 )
 
 
@@ -362,7 +367,7 @@ def _sweep_trend_lines(runs, window):
     ``runs`` are all recorded runs of the backend (oldest first),
     ``window`` the most recent ones being rendered. Each sweep step
     that ran — one keyspace size, one client count, one value size,
-    one pipeline depth —
+    one pipeline depth, one read:write ratio —
     gets its own table: ops/sec, the change versus the previous run
     that recorded the same step, and p99, plus a sparkline and the
     first-to-last change. The table is the same shape as the
@@ -379,7 +384,7 @@ def _sweep_trend_lines(runs, window):
             for entry in window
             for step in (entry.get("sweeps") or {}).get(kind, [])
             if isinstance(step, dict)
-            and isinstance(step.get(step_key), (int, float))
+            and isinstance(step.get(step_key), (int, float, str))
         })
         for step_value in steps:
             # The delta is against the previous run that recorded
@@ -406,7 +411,13 @@ def _sweep_trend_lines(runs, window):
                                      (int, float))]
             if not values:
                 continue
-            step_label = f"{step_value:,} {unit}"
+            if isinstance(step_value, str):
+                # A mix ratio reads as "90:10 read:write", not
+                # "90:10, read:write" — a string step value has no
+                # thousands separator to apply.
+                step_label = f"{step_value} {unit}"
+            else:
+                step_label = f"{step_value:,} {unit}"
             lines.append(
                 f"#### {label} — {step_label} ops/sec trend")
             lines.append("")
@@ -456,10 +467,11 @@ def format_trend(entries, limit=20):
     the same chart per operation type (SET, GET, INCR, DEL) for the ops
     that ran, so each op's throughput trend reads on its own, and
     the same chart per sweep step (keyspace size, client count,
-    value size, pipeline depth) for the steps that ran, so a step's throughput
-    trend reads on its own too. A corrupt line never reaches here
-    — ``load_history`` already skips it — and a backend with a
-    single recorded run shows no delta, just its one value.
+    value size, pipeline depth, read:write ratio) for the steps
+    that ran, so a step's throughput trend reads on its own too. A
+    corrupt line never reaches here — ``load_history`` already
+    skips it — and a backend with a single recorded run shows no
+    delta, just its one value.
     """
     if not entries:
         return "No runs recorded yet. Re-run a benchmark with --history."
