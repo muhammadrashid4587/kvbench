@@ -111,6 +111,11 @@ class TestBuildRecord(unittest.TestCase):
              "mean_ms": 0.020, "p99_ms": 0.020,
              "histograms_by_op": {}},
         ]
+        result.pipeline_sweep = [
+            {"pipeline": 5, "ops": 1000, "ops_per_sec": 55000.0,
+             "mean_ms": 0.020, "p99_ms": 0.020,
+             "histograms_by_op": {}},
+        ]
         record = build_record(result, _make_workload(), "kvbench")
         self.assertEqual(record["sweeps"], {
             "keyspace": [
@@ -126,6 +131,11 @@ class TestBuildRecord(unittest.TestCase):
             "value_size": [
                 {"value_size": 128, "ops": 1000,
                  "ops_per_sec": 45000.0, "mean_ms": 0.020,
+                 "p99_ms": 0.020},
+            ],
+            "pipeline": [
+                {"pipeline": 5, "ops": 1000,
+                 "ops_per_sec": 55000.0, "mean_ms": 0.020,
                  "p99_ms": 0.020},
             ],
         })
@@ -408,7 +418,7 @@ class TestFormatTrend(unittest.TestCase):
 
 class TestSweepTrend(unittest.TestCase):
     def _sweep_result(self, ops_per_sec, keys=100, clients=None,
-                      value_size=None):
+                      value_size=None, pipeline=None):
         result = _make_result(ops_per_sec=ops_per_sec)
         if keys is not None:
             result.sweep = [{"keys": keys, "ops": 1000,
@@ -426,6 +436,12 @@ class TestSweepTrend(unittest.TestCase):
                                    "ops_per_sec": ops_per_sec,
                                    "mean_ms": 0.020, "p99_ms": 0.020,
                                    "histograms_by_op": {}}]
+        if pipeline is not None:
+            result.pipeline_sweep = [{"pipeline": pipeline,
+                                      "ops": 1000,
+                                      "ops_per_sec": ops_per_sec,
+                                      "mean_ms": 0.020, "p99_ms": 0.020,
+                                      "histograms_by_op": {}}]
         return result
 
     def test_sweep_recorded_then_trended_across_two_runs(self):
@@ -496,6 +512,31 @@ class TestSweepTrend(unittest.TestCase):
             "Client sweep — 4 clients first → last: 40,000 → "
             "50,000 ops/sec (+25.0%)", text)
 
+    def test_pipeline_sweep_step_trended_across_two_runs(self):
+        # A pipeline step recorded in one run and again in the
+        # next shows up in the trend with a delta and a
+        # first-to-last change, like the other sweep kinds.
+        workload = _make_workload()
+        entries = [
+            build_record(
+                self._sweep_result(40000.0, keys=None, pipeline=5),
+                workload, "kvbench"),
+            build_record(
+                self._sweep_result(50000.0, keys=None, pipeline=5),
+                workload, "kvbench"),
+        ]
+        text = format_trend(entries)
+        self.assertIn(
+            "#### Pipeline sweep — 5 commands ops/sec trend", text)
+        self.assertIn("| 40,000 | - | 0.020 |", text)
+        self.assertIn("| 50,000 | +25.0% | 0.020 |", text)
+        self.assertIn(
+            "Pipeline sweep — 5 commands trend (oldest → newest): ▁█",
+            text)
+        self.assertIn(
+            "Pipeline sweep — 5 commands first → last: 40,000 → "
+            "50,000 ops/sec (+25.0%)", text)
+
     def test_records_without_sweeps_render_no_sweep_sections(self):
         # History written before 0.37.0 has no "sweeps" key: the
         # overall trend still renders and nothing crashes.
@@ -513,6 +554,7 @@ class TestSweepTrend(unittest.TestCase):
         self.assertNotIn("Keyspace sweep —", text)
         self.assertNotIn("Client sweep —", text)
         self.assertNotIn("Value size sweep —", text)
+        self.assertNotIn("Pipeline sweep —", text)
 
 
 class TestWriteTrend(unittest.TestCase):

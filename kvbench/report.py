@@ -53,6 +53,9 @@ def _workload_dict(workload):
         # Value sizes (bytes) swept in this run, or null when no sweep.
         "sweep_value_size": (list(workload.sweep_value_size)
                              if workload.sweep_value_size else None),
+        # Pipeline depths swept in this run, or null when no sweep.
+        "sweep_pipeline": (list(workload.sweep_pipeline)
+                           if workload.sweep_pipeline else None),
         # SLO gate thresholds for this run, or null when not set.
         "slo_p99_ms": workload.slo_p99_ms,
         "slo_error_rate_pct": workload.slo_error_rate_pct,
@@ -138,6 +141,14 @@ def _result_dict(result, top_n=5):
         # per-run values and spread under ``repeat``; [] when no
         # sweep ran.
         "value_size_sweep": result.value_sweep,
+        # Pipeline-depth sweep: one per-depth summary per swept
+        # depth (pipeline in commands per round trip, ops, ops/sec,
+        # mean and p99, plus the per-op latency histograms of that
+        # run under ``histograms_by_op``); with ``--repeat`` above 1
+        # each depth runs that many times and the entry carries the
+        # per-run values and spread under ``repeat``; [] when no
+        # sweep ran.
+        "pipeline_sweep": result.pipeline_sweep,
     }
     if result.repeat_runs:
         # Only a repeated run carries this: a single run's result
@@ -729,6 +740,40 @@ def _value_size_sweep_lines(result):
     return lines
 
 
+def _pipeline_sweep_lines(result):
+    """Pipeline-depth sweep table for one result, or [] when no sweep ran.
+
+    The table is followed by a per-operation latency histogram
+    per swept depth, so a depth where one op type slows down shows
+    which op it is, not just that the p99 moved. When a step ran
+    ``--repeat`` more than once its table row shows the medians
+    over the runs, and a per-step repeat block shows the runs
+    behind them.
+    """
+    if not result.pipeline_sweep:
+        return []
+    lines = [
+        f"### Pipeline sweep — {result.name}",
+        "",
+        "| Pipeline depth | Ops | Ops/sec | Mean (ms) | p99 (ms) |",
+        "| ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for entry in result.pipeline_sweep:
+        lines.append(
+            f"| {entry['pipeline']} | {entry['ops']} | "
+            f"{entry['ops_per_sec']:,.0f} | {entry['mean_ms']:.3f} | "
+            f"{entry['p99_ms']:.3f} |"
+        )
+    lines.append("")
+    lines += _sweep_repeat_lines(
+        lambda entry: f"{entry['pipeline']} commands",
+        result.pipeline_sweep)
+    lines += _sweep_per_op_histogram_lines(
+        lambda entry: f"{entry['pipeline']} commands",
+        result.pipeline_sweep)
+    return lines
+
+
 def _time_series_lines(result):
     """Per-second ops/latency table for one result, or [] when empty."""
     series = result.time_series
@@ -998,6 +1043,20 @@ def render_markdown(results, workload, command_line, comparison=None,
         )
     else:
         value_sweep_line = None
+    if workload.sweep_pipeline:
+        pipeline_sweep_line = (
+            "- Pipeline sweep: "
+            + ", ".join(str(d) for d in workload.sweep_pipeline)
+            + " commands per round trip (the same workload re-run "
+            + (f"{workload.repeat} times"
+               if workload.repeat > 1 else "once")
+            + " per pipeline depth; per-depth ops/sec and p99 are "
+            + ("the medians over the runs and are "
+               if workload.repeat > 1 else "")
+            + "in the Pipeline sweep section below)"
+        )
+    else:
+        pipeline_sweep_line = None
     if workload.repeat > 1:
         repeat_line = (
             f"- Repeat: {workload.repeat} runs (the same workload "
@@ -1045,6 +1104,8 @@ def render_markdown(results, workload, command_line, comparison=None,
         lines.append(client_sweep_line)
     if value_sweep_line is not None:
         lines.append(value_sweep_line)
+    if pipeline_sweep_line is not None:
+        lines.append(pipeline_sweep_line)
     if repeat_line is not None:
         lines.append(repeat_line)
     if auth_line is not None:
@@ -1080,6 +1141,11 @@ def render_markdown(results, workload, command_line, comparison=None,
         value_sweep_lines += _value_size_sweep_lines(result)
     if value_sweep_lines:
         lines += ["", "## Value size sweep", ""] + value_sweep_lines
+    pipeline_sweep_lines = []
+    for result in results:
+        pipeline_sweep_lines += _pipeline_sweep_lines(result)
+    if pipeline_sweep_lines:
+        lines += ["", "## Pipeline sweep", ""] + pipeline_sweep_lines
     repeat_lines = []
     for result in results:
         repeat_lines += _repeat_lines(result)
@@ -1222,6 +1288,18 @@ def render_markdown(results, workload, command_line, comparison=None,
             "size where one op type slows down names the op. The JSON "
             "report carries the same buckets per sweep step under "
             "`value_size_sweep[].histograms_by_op`."
+        )
+    if workload.sweep_pipeline:
+        lines.append(
+            "- The Pipeline sweep section re-runs the same workload "
+            "once per pipeline depth, so ops/sec and p99 per depth "
+            "show how pipelining affects throughput — where batching "
+            "more commands per round trip stops helping; the main "
+            "results table above uses the base pipeline depth. Each "
+            "swept depth also gets its own per-operation latency "
+            "histograms, so a depth where one op type slows down "
+            "names the op. The JSON report carries the same buckets "
+            "per sweep step under `pipeline_sweep[].histograms_by_op`."
         )
     if workload.repeat > 1:
         lines.append(

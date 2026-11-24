@@ -667,6 +667,65 @@ class TestReport(unittest.TestCase):
         self.assertIsNone(parsed["workload"]["sweep_value_size"])
         self.assertEqual(parsed["results"][0]["value_size_sweep"], [])
 
+    def test_pipeline_sweep_in_markdown_and_json(self):
+        workload = Workload(ops=100, clients=2, keys=10, value_size=8,
+                            sweep_pipeline=[1, 5])
+        result = BenchmarkResult(
+            name="cinder", ops=100, elapsed_s=0.01, errors=0,
+            latencies_ns=[100_000] * 100,
+            pipeline_sweep=[
+                {"pipeline": 1, "ops": 100, "ops_per_sec": 8_000,
+                 "mean_ms": 0.12, "p99_ms": 0.15,
+                 "histograms_by_op": {
+                     "SET": [{"upper_ms": 0.1, "count": 60}],
+                     "GET": [{"upper_ms": 0.1, "count": 0},
+                             {"upper_ms": 0.25, "count": 40}],
+                 }},
+                {"pipeline": 5, "ops": 100, "ops_per_sec": 12_000,
+                 "mean_ms": 0.08, "p99_ms": 0.10,
+                 "histograms_by_op": {
+                     "SET": [{"upper_ms": 0.1, "count": 50}],
+                     "GET": [{"upper_ms": 0.1, "count": 0},
+                             {"upper_ms": 0.25, "count": 50}],
+                 }},
+            ],
+        )
+        text = render_markdown([result], workload, "kvbench")
+        self.assertIn("Pipeline sweep: 1, 5 commands", text)
+        self.assertIn("## Pipeline sweep", text)
+        self.assertIn("Pipeline sweep — cinder", text)
+        self.assertIn("| Pipeline depth | Ops | Ops/sec | Mean (ms) | "
+                      "p99 (ms) |", text)
+        self.assertIn("| 1 | 100 | 8,000 | 0.120 | 0.150 |", text)
+        self.assertIn("| 5 | 100 | 12,000 | 0.080 | 0.100 |", text)
+        self.assertIn("how pipelining affects throughput", text)
+        self.assertIn("#### 1 commands — per-op latency histogram",
+                      text)
+        self.assertIn("#### 5 commands — per-op latency histogram",
+                      text)
+        self.assertIn("SET (60 ops)", text)
+        self.assertIn("pipeline_sweep[].histograms_by_op", text)
+        parsed = json.loads(render_json([result], workload, "kvbench"))
+        self.assertEqual(parsed["workload"]["sweep_pipeline"], [1, 5])
+        sweep = parsed["results"][0]["pipeline_sweep"]
+        self.assertEqual(len(sweep), 2)
+        self.assertEqual(sweep[0]["pipeline"], 1)
+        self.assertAlmostEqual(sweep[0]["ops_per_sec"], 8_000)
+        self.assertAlmostEqual(sweep[0]["p99_ms"], 0.15)
+        self.assertEqual(sweep[0]["histograms_by_op"]["SET"],
+                         [{"upper_ms": 0.1, "count": 60}])
+        self.assertEqual(sweep[1]["pipeline"], 5)
+
+    def test_no_pipeline_sweep_omits_section(self):
+        workload = _workload()
+        text = render_markdown([_result()], workload, "kvbench")
+        self.assertNotIn("## Pipeline sweep", text)
+        self.assertNotIn("Pipeline sweep:", text)
+        self.assertNotIn("how pipelining affects throughput", text)
+        parsed = json.loads(render_json([_result()], workload, "kvbench"))
+        self.assertIsNone(parsed["workload"]["sweep_pipeline"])
+        self.assertEqual(parsed["results"][0]["pipeline_sweep"], [])
+
     def test_json_path_for(self):
         self.assertEqual(json_path_for("report.md", None), "report.json")
         self.assertEqual(json_path_for("out/run.md", None), "out/run.json")

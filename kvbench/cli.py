@@ -30,6 +30,11 @@ Usage:
     python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
         --ops 20000 --clients 4 \\
         --sweep-value-size 32,128,1024 --output report.md
+    # sweep the pipeline depth: the same workload re-run at 1, 5 and
+    # 10 commands per round trip, with ops/sec and p99 per depth
+    python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
+        --ops 20000 --clients 4 \\
+        --sweep-pipeline 1,5,10 --output report.md
     # record the run in the history file, then compare later runs
     # against it (ops/sec trend over time)
     python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
@@ -104,8 +109,8 @@ from datetime import datetime, timezone
 
 from . import __version__
 from .bench import DictClient, Workload, format_duration, \
-    run_client_sweep, run_keyspace_sweep, run_repeated_workload, \
-    run_value_size_sweep, run_workload
+    run_client_sweep, run_keyspace_sweep, run_pipeline_sweep, \
+    run_repeated_workload, run_value_size_sweep, run_workload
 from .compare import compare_results, format_verdict, load_baseline, \
     load_history_baseline
 from .history import DEFAULT_HISTORY_FILE, export_history, \
@@ -320,6 +325,34 @@ def _parse_value_size_sweep(text):
     return sorted(set(sizes))
 
 
+def _parse_pipeline_sweep(text):
+    """Parse a ``--sweep-pipeline`` value into a sorted list of
+    distinct positive ints, e.g. ``1,5,10`` -> [1, 5, 10].
+    Duplicates are dropped and the depths are sorted, so
+    ``10,1,10`` sweeps 1 then 10.
+    """
+    if not text:
+        raise ValueError(
+            "sweep-pipeline must list pipeline depths, "
+            "e.g. 1,5,10")
+    depths = []
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            raise ValueError(
+                "sweep-pipeline depths must be comma-separated "
+                "integers, e.g. 1,5,10")
+        try:
+            depth = int(part)
+        except ValueError as exc:
+            raise ValueError(
+                "sweep-pipeline depths must be integers") from exc
+        if depth <= 0:
+            raise ValueError("sweep-pipeline depths must be positive")
+        depths.append(depth)
+    return sorted(set(depths))
+
+
 def _parse_slo_op(text):
     """Parse a ``--slo-op`` value into (op, p99_ms, error_rate_pct).
 
@@ -486,6 +519,11 @@ def build_parser():
                         help="re-run the same workload once per "
                         "value size in bytes, e.g. 32,128,1024, and "
                         "report ops/sec and p99 per size")
+    parser.add_argument("--sweep-pipeline", default=None,
+                        metavar="DEPTHS",
+                        help="re-run the same workload once per "
+                        "pipeline depth, e.g. 1,5,10, and report "
+                        "ops/sec and p99 per depth")
     parser.add_argument("--repeat", type=int, default=1, metavar="N",
                         help="run the benchmark N times and report the "
                         "median ops/sec and p99 over the N runs "
@@ -800,6 +838,8 @@ def main(argv=None):
                          if args.sweep_clients else [])
         value_sizes = (_parse_value_size_sweep(args.sweep_value_size)
                        if args.sweep_value_size else [])
+        pipeline_depths = (_parse_pipeline_sweep(args.sweep_pipeline)
+                           if args.sweep_pipeline else [])
         if args.repeat < 1:
             raise ValueError(
                 "--repeat must be a positive integer")
@@ -887,6 +927,7 @@ def main(argv=None):
             sweep_keyspace=sweep_sizes,
             sweep_clients=client_counts,
             sweep_value_size=value_sizes,
+            sweep_pipeline=pipeline_depths,
             repeat=args.repeat,
             slo_p99_ms=slo_p99_ms,
             slo_error_rate_pct=slo_error_rate,
@@ -1018,6 +1059,34 @@ def main(argv=None):
                   f"{len(value_sizes)} sizes (backend unreachable)",
                   file=sys.stderr)
 
+    def _run_pipeline_sweep(factory, result):
+        """Re-run the workload once per swept pipeline depth and
+        attach the per-depth summaries to ``result``.
+
+        With ``--repeat`` above 1 each depth runs that many times
+        and the per-depth ops/sec and p99 are the medians over the
+        runs (see :func:`kvbench.bench.run_pipeline_sweep`).
+        Prints one line per depth. A sweep that stops early (the
+        backend went away mid-sweep) keeps the depths that completed
+        and says so on stderr instead of failing the whole run —
+        the main result already landed.
+        """
+        if not pipeline_depths:
+            return
+        result.pipeline_sweep = run_pipeline_sweep(
+            factory, workload, pipeline_depths, args.repeat)
+        for entry in result.pipeline_sweep:
+            print(f"  pipeline sweep {entry['pipeline']} commands: "
+                  f"{entry['ops_per_sec']:,.0f} ops/sec, "
+                  f"p99 {entry['p99_ms']:.3f} ms"
+                  + (f" (median of {args.repeat} runs)"
+                     if args.repeat > 1 else ""))
+        if len(result.pipeline_sweep) < len(pipeline_depths):
+            print(f"kvbench: pipeline sweep on {result.name} stopped "
+                  f"after {len(result.pipeline_sweep)} of "
+                  f"{len(pipeline_depths)} depths (backend "
+                  "unreachable)", file=sys.stderr)
+
     def server_factory():
         return RespClient(args.host, args.port, timeout=args.timeout,
                           username=args.username,
@@ -1070,6 +1139,7 @@ def main(argv=None):
     _run_sweep(server_factory, result)
     _run_client_sweep(server_factory, result)
     _run_value_size_sweep(server_factory, result)
+    _run_pipeline_sweep(server_factory, result)
 
     for host, port in compare_targets:
         def compare_factory(host=host, port=port):
@@ -1094,6 +1164,7 @@ def main(argv=None):
         _run_sweep(compare_factory, compared)
         _run_client_sweep(compare_factory, compared)
         _run_value_size_sweep(compare_factory, compared)
+        _run_pipeline_sweep(compare_factory, compared)
 
     if args.baseline:
         baseline = _run(DictClient, "baseline (dict)")
@@ -1105,6 +1176,7 @@ def main(argv=None):
         _run_sweep(DictClient, baseline)
         _run_client_sweep(DictClient, baseline)
         _run_value_size_sweep(DictClient, baseline)
+        _run_pipeline_sweep(DictClient, baseline)
 
     comparison = None
     if baseline_doc is not None:

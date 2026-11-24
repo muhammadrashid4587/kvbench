@@ -19,8 +19,8 @@ from contextlib import redirect_stdout
 from io import StringIO
 
 from kvbench.bench import (DictClient, Workload, run_client_sweep,
-                           run_keyspace_sweep, run_value_size_sweep,
-                           run_workload)
+                           run_keyspace_sweep, run_pipeline_sweep,
+                           run_value_size_sweep, run_workload)
 from kvbench.cli import main
 from kvbench.report import render_json, render_markdown
 
@@ -154,6 +154,40 @@ class TestRepeatedValueSizeSweep(unittest.TestCase):
             self.assertNotIn("repeat", entry)
 
 
+class TestRepeatedPipelineSweep(unittest.TestCase):
+    def test_each_step_runs_repeat_times_and_reports_medians(self):
+        workload = Workload(ops=200, clients=2, keys=10, value_size=8)
+        sweep = run_pipeline_sweep(DictClient, workload, [1, 5, 10],
+                                   repeat=3)
+        self.assertEqual([entry["pipeline"] for entry in sweep],
+                         [1, 5, 10])
+        for entry in sweep:
+            self.assertEqual(entry["ops"], 200)
+            _check_repeated_step(entry, 3)
+        # The base workload is untouched: the sweep copies it per depth.
+        self.assertEqual(workload.pipeline, 1)
+
+    def test_repeat_one_keeps_the_old_shape(self):
+        workload = Workload(ops=200, clients=2, keys=10, value_size=8)
+        sweep = run_pipeline_sweep(DictClient, workload, [1, 5],
+                                   repeat=1)
+        for entry in sweep:
+            self.assertNotIn("repeat", entry)
+            self.assertEqual(
+                set(entry),
+                {"pipeline", "ops", "ops_per_sec", "mean_ms", "p99_ms",
+                 "histograms_by_op"})
+
+    def test_sweep_stops_on_unreachable_backend(self):
+        def failing_factory():
+            raise ConnectionError("connection refused")
+
+        workload = Workload(ops=10, clients=1, keys=5)
+        sweep = run_pipeline_sweep(failing_factory, workload, [1, 5],
+                                   repeat=3)
+        self.assertEqual(sweep, [])
+
+
 class TestRepeatedSweepRendering(unittest.TestCase):
     def _result_with_repeated_sweeps(self):
         workload = Workload(ops=200, clients=2, repeat=3)
@@ -164,6 +198,8 @@ class TestRepeatedSweepRendering(unittest.TestCase):
                                                [1, 2], repeat=3)
         result.value_sweep = run_value_size_sweep(
             DictClient, workload, [8, 64], repeat=3)
+        result.pipeline_sweep = run_pipeline_sweep(
+            DictClient, workload, [1, 5], repeat=3)
         return result, workload
 
     def test_repeated_sweep_renders_in_markdown_and_json(self):
@@ -178,12 +214,14 @@ class TestRepeatedSweepRendering(unittest.TestCase):
         self.assertIn("#### 2 clients — repeat runs", text)
         self.assertIn("#### 8 byte values — repeat runs", text)
         self.assertIn("#### 64 byte values — repeat runs", text)
+        self.assertIn("#### 1 commands — repeat runs", text)
+        self.assertIn("#### 5 commands — repeat runs", text)
         self.assertIn("Median of 3 runs", text)
         self.assertIn("Spread: ops/sec", text)
         parsed = json.loads(render_json([result], workload, "kvbench"))
         doc = parsed["results"][0]
         for key in ("keyspace_sweep", "client_sweep",
-                    "value_size_sweep"):
+                    "value_size_sweep", "pipeline_sweep"):
             for entry in doc[key]:
                 self.assertEqual(len(entry["repeat"]["runs"]), 3)
                 self.assertEqual(
@@ -229,6 +267,7 @@ class TestRepeatedSweepCli(unittest.TestCase):
                         "--sweep-keyspace", "100,1000",
                         "--sweep-clients", "1,2",
                         "--sweep-value-size", "32,128",
+                        "--sweep-pipeline", "1,5",
                         "--repeat", "2",
                         "--output", output,
                     ])
@@ -240,13 +279,17 @@ class TestRepeatedSweepCli(unittest.TestCase):
                 self.assertIn("#### 1 clients — repeat runs", text)
                 self.assertIn("#### 32 byte values — repeat runs",
                               text)
+                self.assertIn("#### 1 commands — repeat runs", text)
+                self.assertIn("#### 5 commands — repeat runs", text)
                 with open(os.path.join(tmp, "report.json"),
                           encoding="utf-8") as f:
                     parsed = json.load(f)
                 self.assertEqual(parsed["workload"]["repeat"], 2)
+                self.assertEqual(parsed["workload"]["sweep_pipeline"],
+                                 [1, 5])
                 doc = parsed["results"][0]
                 for key in ("keyspace_sweep", "client_sweep",
-                            "value_size_sweep"):
+                            "value_size_sweep", "pipeline_sweep"):
                     self.assertEqual(len(doc[key]), 2)
                     for entry in doc[key]:
                         self.assertEqual(

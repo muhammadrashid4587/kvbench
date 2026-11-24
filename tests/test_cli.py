@@ -15,7 +15,8 @@ import unittest
 
 from kvbench.cli import MIX_PRESETS, _parse_client_sweep, _parse_duration, \
     _parse_host_port, _parse_keyspace_sweep, _parse_mix, \
-    _parse_value_size_sweep, _redact_command_line, build_parser, main
+    _parse_pipeline_sweep, _parse_value_size_sweep, \
+    _redact_command_line, build_parser, main
 
 
 class _FakeRespHandler(socketserver.StreamRequestHandler):
@@ -515,6 +516,79 @@ class TestValueSizeSweepRun(unittest.TestCase):
     def test_bad_value_size_sweep_rejected(self):
         for bad in ("bogus", "0", "32,abc", "32,,128"):
             code = main(["--sweep-value-size", bad, "--ops", "10"])
+            self.assertEqual(code, 2, msg=bad)
+
+
+class TestParsePipelineSweep(unittest.TestCase):
+    def test_comma_list(self):
+        self.assertEqual(_parse_pipeline_sweep("1,5,10"), [1, 5, 10])
+
+    def test_single_depth(self):
+        self.assertEqual(_parse_pipeline_sweep("5"), [5])
+
+    def test_sorted_and_deduped(self):
+        self.assertEqual(_parse_pipeline_sweep("10,1,10"), [1, 10])
+        self.assertEqual(_parse_pipeline_sweep(" 5 , 2 "),
+                         [2, 5])
+
+    def test_invalid(self):
+        for bad in ("", "0", "-5", "1,abc", "1,,5", "1.5",
+                    "1,0", ",5"):
+            with self.assertRaises(ValueError, msg=bad):
+                _parse_pipeline_sweep(bad)
+
+
+class TestPipelineSweepFlag(unittest.TestCase):
+    def test_defaults_no_sweep(self):
+        args = build_parser().parse_args([])
+        self.assertIsNone(args.sweep_pipeline)
+
+    def test_sweep_value_kept(self):
+        args = build_parser().parse_args(
+            ["--sweep-pipeline", "1,5"])
+        self.assertEqual(args.sweep_pipeline, "1,5")
+
+
+class TestPipelineSweepRun(unittest.TestCase):
+    def test_pipeline_sweep_run_reports_per_depth(self):
+        server = _start_server()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                output = os.path.join(tmp, "report.md")
+                code = main([
+                    "--host", "127.0.0.1",
+                    "--port", str(server.server_address[1]),
+                    "--ops", "200", "--clients", "2",
+                    "--sweep-pipeline", "1,5",
+                    "--output", output,
+                ])
+                self.assertEqual(code, 0)
+                with open(output, encoding="utf-8") as f:
+                    text = f.read()
+                self.assertIn("Pipeline sweep: 1, 5 commands", text)
+                self.assertIn("## Pipeline sweep", text)
+                self.assertIn("| 1 | 200 |", text)
+                self.assertIn("| 5 | 200 |", text)
+                self.assertIn("how pipelining affects throughput", text)
+                with open(os.path.join(tmp, "report.json"),
+                          encoding="utf-8") as f:
+                    parsed = json.load(f)
+                self.assertEqual(parsed["workload"]["sweep_pipeline"],
+                                 [1, 5])
+                sweep = parsed["results"][0]["pipeline_sweep"]
+                self.assertEqual(len(sweep), 2)
+                self.assertEqual(sweep[0]["pipeline"], 1)
+                self.assertEqual(sweep[0]["ops"], 200)
+                self.assertGreater(sweep[0]["ops_per_sec"], 0)
+                self.assertGreaterEqual(sweep[0]["p99_ms"], 0)
+                self.assertEqual(sweep[1]["pipeline"], 5)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_bad_pipeline_sweep_rejected(self):
+        for bad in ("bogus", "0", "1,abc", "1,,5"):
+            code = main(["--sweep-pipeline", bad, "--ops", "10"])
             self.assertEqual(code, 2, msg=bad)
 
 

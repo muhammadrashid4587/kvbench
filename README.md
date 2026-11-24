@@ -80,6 +80,11 @@ C. Pure Python 3 standard library, no dependencies.
   size, so a run shows how value size affects throughput — a store
   that copies values on every SET slows as values grow, while one
   that only moves pointers does not.
+  With `--sweep-pipeline 1,5,10` the same workload is re-run once
+  per pipeline depth, and the reports show ops/sec and p99 per
+  depth, plus a per-operation latency histogram per depth, so a run
+  shows how pipelining affects throughput — where batching more
+  commands per round trip stops helping.
   When the tail is high the reports attribute it: slow ops (at or
   above the overall p99) are broken down by operation type, by
   client, by hot vs cold keys, and by second, and the finding
@@ -187,6 +192,11 @@ python -m kvbench.cli --ops 20000 --sweep-clients 1,2,4,8
 # 1024 byte values, with ops/sec and p99 per size
 python -m kvbench.cli --ops 20000 --clients 4 \
     --sweep-value-size 32,128,1024
+
+# sweep the pipeline depth: the same workload re-run at 1, 5 and
+# 10 commands per round trip, with ops/sec and p99 per depth
+python -m kvbench.cli --ops 20000 --clients 4 \
+    --sweep-pipeline 1,5,10
 
 # record the run in the history file, then look at the ops/sec
 # trend over time (default file: ~/.kvbench/history.jsonl)
@@ -357,6 +367,9 @@ per count in both reports),
 `--sweep-value-size` (comma-separated value sizes in bytes, e.g.
 `32,128,1024`: re-run the same workload once per size and report
 ops/sec and p99 per size in both reports),
+`--sweep-pipeline` (comma-separated pipeline depths, e.g.
+`1,5,10`: re-run the same workload once per depth and report
+ops/sec and p99 per depth in both reports),
 `--output` (default report.md), `--json`
 (default: same name as `--output` with a `.json` extension),
 `--csv` (write a per-second throughput CSV alongside the reports:
@@ -483,8 +496,8 @@ sections; a run that never ran an op (a read-only mix has no
 SET) leaves that op out of its own table.
 
 A sweep run recorded with `--history` also records each sweep
-step — one ops/sec and p99 per keyspace size, client count and
-value size — and below the per-op sections each backend gets one
+step — one ops/sec and p99 per keyspace size, client count, value
+size and pipeline depth — and below the per-op sections each backend gets one
 trend section per step that ran, with the same table, delta,
 sparkline and first-to-last change as the overall chart: a
 keyspace step's ops/sec at 100 keys is only ever compared with
@@ -819,6 +832,19 @@ same rows per result under `value_size_sweep`, with the
 per-op buckets per step under `histograms_by_op`, and the
 workload section carries the swept sizes under `sweep_value_size`.
 
+With `--sweep-pipeline` the report has a Pipeline sweep section
+right below the Value size sweep (or the Client sweep, the
+Keyspace sweep, or the results table, when there is no value-size
+sweep): one table per backend with a row per swept depth —
+pipeline depth in commands per round trip, ops, ops/sec, mean and
+p99 — so the effect of pipelining on throughput reads at a glance:
+where batching more commands per round trip stops helping. Each
+swept depth also gets its own per-operation latency histogram block
+under the table. The JSON report carries the same rows per result
+under `pipeline_sweep`, with the per-op buckets per step under
+`histograms_by_op`, and the workload section carries the swept
+depths under `sweep_pipeline`.
+
 With `--repeat N` and any sweep, each sweep step runs N times and
 its table row shows the median ops/sec and p99 over the runs, with
 a per-step repeat block below the table listing each run's ops/sec
@@ -917,6 +943,17 @@ make test
 
 ## Roadmap
 
+- `--sweep-pipeline` mode: a sweep mode that varies the pipeline
+  depth across steps — `--sweep-pipeline 1,5,10` re-runs the same
+  workload once per depth, like the existing sweeps vary key count,
+  client count and value size — recording per-step ops/sec and p99
+  in both reports, with a per-step per-operation latency histogram
+  block, composing with `--repeat` (median per step, per-step
+  repeat block), and flowing through the run history and trend
+  views under `sweeps.pipeline`, so a pipeline step's ops/sec is
+  only ever compared with the same step in other runs. A run with
+  no pipeline sweep keeps the old shapes exactly, and runs
+  recorded before 0.38.0 carry no pipeline steps. Done in 0.38.0.
 - Sweep steps in the run history and trend views: a sweep run
   recorded with `--history` also records each sweep step — one
   ops/sec and p99 per keyspace size, client count and value size —

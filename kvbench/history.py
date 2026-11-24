@@ -19,8 +19,8 @@ worst runs per backend (and per operation) out of the same
 history, with the spread between them, so a backend whose
 throughput swings run to run reads at a glance. Since 0.37.0
 each record also carries its sweep steps — one ops/sec and p99
-per keyspace size, client count and value size — so the trend
-view tracks every sweep step on its own, and a step's
+per keyspace size, client count, value size and pipeline depth —
+so the trend view tracks every sweep step on its own, and a step's
 throughput is only ever compared with the same step in other
 runs.
 """
@@ -97,9 +97,10 @@ def _sweeps_record(result):
     """A run's sweep steps in trend shape, or {} when no sweep ran.
 
     One trimmed entry per step — the step value (``keys``,
-    ``clients`` or ``value_size``), ops, ops/sec, mean and p99 —
+    ``clients``, ``value_size`` or ``pipeline``), ops, ops/sec,
+    mean and p99 —
     per sweep kind that ran, keyed ``keyspace`` / ``clients`` /
-    ``value_size``. The per-op histograms and repeat detail stay
+    ``value_size`` / ``pipeline``. The per-op histograms and repeat detail stay
     in the JSON report; the trend only needs ops/sec and p99 per
     step, the same numbers the overall trend tracks per run, so a
     sweep step's ops/sec at 100 keys is only ever compared with
@@ -109,7 +110,8 @@ def _sweeps_record(result):
     for kind, steps, step_key in (
             ("keyspace", result.sweep, "keys"),
             ("clients", result.client_sweep, "clients"),
-            ("value_size", result.value_sweep, "value_size")):
+            ("value_size", result.value_sweep, "value_size"),
+            ("pipeline", result.pipeline_sweep, "pipeline")):
         entries = [
             {step_key: step[step_key],
              "ops": step["ops"],
@@ -317,12 +319,13 @@ def _per_op_trend_lines(runs, window):
     return lines
 
 
-# (history key, step key, section label, step unit) for the three
+# (history key, step key, section label, step unit) for the four
 # sweep kinds, in the order the report renders their sections.
 _SWEEP_KINDS = (
     ("keyspace", "keys", "Keyspace sweep", "keys"),
     ("clients", "clients", "Client sweep", "clients"),
     ("value_size", "value_size", "Value size sweep", "byte values"),
+    ("pipeline", "pipeline", "Pipeline sweep", "commands"),
 )
 
 
@@ -344,7 +347,8 @@ def _sweep_trend_lines(runs, window):
 
     ``runs`` are all recorded runs of the backend (oldest first),
     ``window`` the most recent ones being rendered. Each sweep step
-    that ran — one keyspace size, one client count, one value size —
+    that ran — one keyspace size, one client count, one value size,
+    one pipeline depth —
     gets its own table: ops/sec, the change versus the previous run
     that recorded the same step, and p99, plus a sparkline and the
     first-to-last change. The table is the same shape as the
@@ -438,7 +442,7 @@ def format_trend(entries, limit=20):
     the same chart per operation type (SET, GET, INCR, DEL) for the ops
     that ran, so each op's throughput trend reads on its own, and
     the same chart per sweep step (keyspace size, client count,
-    value size) for the steps that ran, so a step's throughput
+    value size, pipeline depth) for the steps that ran, so a step's throughput
     trend reads on its own too. A corrupt line never reaches here
     — ``load_history`` already skips it — and a backend with a
     single recorded run shows no delta, just its one value.

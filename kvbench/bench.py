@@ -124,6 +124,12 @@ class Workload:
     # copies values on every SET slows as values grow, while one
     # that only moves pointers does not. Empty means no sweep.
     sweep_value_size: list = field(default_factory=list)
+    # Pipeline depths for a sweep: when non-empty the same workload
+    # is re-run once per depth (see run_pipeline_sweep) and the
+    # per-depth ops/sec and p99 land in the reports, so a run shows
+    # how pipelining affects throughput — where batching more
+    # commands per round trip stops helping. Empty means no sweep.
+    sweep_pipeline: list = field(default_factory=list)
     # SLO gate thresholds: p99 latency cap in milliseconds and error
     # rate cap in percent of attempted ops. None means that side of
     # the gate is not set; the gate only applies when at least one
@@ -185,6 +191,10 @@ class Workload:
                for size in self.sweep_value_size):
             raise ValueError(
                 "sweep value sizes must be positive integers")
+        if any(not isinstance(depth, int) or depth <= 0
+               for depth in self.sweep_pipeline):
+            raise ValueError(
+                "sweep pipeline depths must be positive integers")
         if self.pipeline < 1:
             raise ValueError("pipeline depth must be at least 1")
         if self.slo_p99_ms is not None and self.slo_p99_ms < 0:
@@ -306,6 +316,17 @@ class BenchmarkResult:
     # ``repeat``. Empty when no sweep ran (``--sweep-value-size``
     # not given). Same shape as ``sweep``.
     value_sweep: list = field(default_factory=list)
+    # Pipeline-depth sweep results for this backend: one entry per
+    # swept depth, in ascending depth order, each with the depth
+    # (``pipeline`` in commands per round trip), the ops completed,
+    # and the ops/sec, mean and p99 latency of that run, plus the
+    # per-operation latency histograms of that run
+    # (``histograms_by_op``). With ``--repeat`` above 1 each depth
+    # runs that many times: the ops/sec and p99 are the medians
+    # over the runs and the entry carries the per-run values and
+    # the run-to-run spread under ``repeat``. Empty when no sweep
+    # ran (``--sweep-pipeline`` not given). Same shape as ``sweep``.
+    pipeline_sweep: list = field(default_factory=list)
     # Repeated-run detail (see run_repeated_workload): one summary
     # dict per run, in run order, each with the run index (``run``),
     # ops, elapsed, ops/sec, errors, mean/p50/p95/p99, the
@@ -1041,6 +1062,40 @@ def run_value_size_sweep(client_factory, workload, sizes, repeat=1):
             entry = _sweep_step(client_factory, swept,
                                 f"sweep ({size} byte values)",
                                 {"value_size": size}, repeat)
+        except (ConnectionError, OSError):
+            break
+        out.append(entry)
+    return out
+
+
+def run_pipeline_sweep(client_factory, workload, depths, repeat=1):
+    """Run the same workload once per pipeline depth in ``depths``.
+
+    Each run is a fresh copy of ``workload`` with ``pipeline``
+    replaced by that depth; everything else (ops, clients, keys,
+    mix, distribution, warmup, seed) is identical, so the
+    per-depth numbers isolate the effect of pipelining on
+    throughput — where batching more commands per round trip stops
+    helping. Returns a list of ``{"pipeline", "ops", "ops_per_sec",
+    "mean_ms", "p99_ms", "histograms_by_op"}`` dicts, in the order
+    ``depths`` was given — the per-op histograms are the same
+    log-spaced buckets per operation as the main run's
+    ``histograms_by_op``, so a slow op type's latency shape shows
+    per depth. With ``repeat`` above 1 each depth runs that many
+    times (see :func:`_sweep_step`): the reported ops/sec and p99
+    are the medians over the runs, and each entry carries the
+    per-run values and the run-to-run spread under ``repeat``. If
+    a run cannot reach the backend the sweep stops there and the
+    depths completed so far are returned — the caller reports the
+    shortfall.
+    """
+    out = []
+    for depth in depths:
+        swept = replace(workload, pipeline=depth)
+        try:
+            entry = _sweep_step(client_factory, swept,
+                                f"sweep (pipeline depth {depth})",
+                                {"pipeline": depth}, repeat)
         except (ConnectionError, OSError):
             break
         out.append(entry)
