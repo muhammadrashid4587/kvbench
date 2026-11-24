@@ -147,6 +147,13 @@ class Workload:
     # so the reports can say where the thresholds came from; the
     # thresholds themselves live in the fields above.
     slo_preset: str = None
+    # Path of the workload config file the workload was loaded from
+    # (``--workload``), or None when the workload came from the
+    # command line. Recorded so a report (and a history record) says
+    # where the workload was declared; the resolved values live in
+    # the fields above, so the run is reproducible from the record
+    # even without the file.
+    workload_file: str = None
     # How many times to run the benchmark (``--repeat``): 1 is the
     # old single-run behaviour. Above 1 the workload is run that
     # many times and the reported ops/sec and p99 are the medians

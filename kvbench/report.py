@@ -70,6 +70,17 @@ def _workload_dict(workload):
         # null when they were given on the command line.
         "slo_preset": workload.slo_preset,
     }
+    if workload.workload_file is not None:
+        # Only a run from a config file records it: a command-line
+        # run keeps the old workload shape exactly. The file is
+        # where the workload was declared; the resolved values are
+        # the fields above, so the run is reproducible from this
+        # record even without the file. It is deliberately not one
+        # of the compared keys (see kvbench.compare): two runs with
+        # the same resolved values are the same workload, whether
+        # one was declared in a file and the other on the command
+        # line.
+        doc["workload_file"] = workload.workload_file
     if workload.auth:
         # Only an authenticated run records it: a run without auth
         # keeps the old workload shape exactly, and the password
@@ -1074,6 +1085,14 @@ def render_markdown(results, workload, command_line, comparison=None,
         )
     else:
         auth_line = None
+    if workload.workload_file is not None:
+        workload_file_line = (
+            f"- Workload file: `{workload.workload_file}` (the "
+            "values below are the resolved config — re-run with "
+            "the same file to reproduce this workload)"
+        )
+    else:
+        workload_file_line = None
     lines = [
         "# kvbench report",
         "",
@@ -1108,6 +1127,8 @@ def render_markdown(results, workload, command_line, comparison=None,
         lines.append(pipeline_sweep_line)
     if repeat_line is not None:
         lines.append(repeat_line)
+    if workload_file_line is not None:
+        lines.append(workload_file_line)
     if auth_line is not None:
         lines.append(auth_line)
     lines += [

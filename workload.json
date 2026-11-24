@@ -1,0 +1,10 @@
+{
+  "ops": 20000,
+  "clients": 4,
+  "keys": 1000,
+  "value_size": 32,
+  "mix": "45:40:10:5",
+  "pipeline": 1,
+  "distribution": "uniform",
+  "seed": 1234
+}

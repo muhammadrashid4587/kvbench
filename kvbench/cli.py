@@ -87,6 +87,11 @@ Usage:
     python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
         --ops 20000 --clients 4 --slo-op SET:5,0.1 \\
         --slo-op GET:2,0.1
+    # workload from a JSON config file instead of the command line,
+    # so a benchmark can be checked in and re-run exactly — a config
+    # file and command-line workload flags conflict (exit 2)
+    python -m kvbench.cli --host 127.0.0.1 --port 6379 \\
+        --workload workload.json --output report.md
     # SLO preset file: the thresholds live in a JSON file instead
     # of on the command line, so CI can share one budget across
     # runs; CLI flags still override the preset values
@@ -111,6 +116,8 @@ from . import __version__
 from .bench import DictClient, Workload, format_duration, \
     run_client_sweep, run_keyspace_sweep, run_pipeline_sweep, \
     run_repeated_workload, run_value_size_sweep, run_workload
+from .workload import MIX_PRESETS, _parse_duration, _parse_mix, \
+    load_workload_file
 from .compare import compare_results, format_verdict, load_baseline, \
     load_history_baseline
 from .history import DEFAULT_HISTORY_FILE, export_history, \
@@ -161,85 +168,6 @@ def json_path_for(output_path, json_arg):
         return json_arg
     stem, ext = os.path.splitext(output_path)
     return stem + ".json" if ext else output_path + ".json"
-
-
-# Named read/write mix presets, as SET:GET:INCR:DEL weights. Reads are
-# GETs, writes are SETs plus a small INCR share so counters still get
-# exercised, and DELs are a small share of the writes — a cache
-# workload deletes far less often than it reads or writes. The
-# default 45:40:10:5 sits between balanced and write-heavy.
-# ``--mix read-heavy`` is the same shape as ``--mix 80:20``
-# (read:write), just with INCR and DEL kept in the mix.
-MIX_PRESETS = {
-    "read-heavy": (15, 75, 5, 5),
-    "balanced": (40, 45, 10, 5),
-    "write-heavy": (75, 15, 5, 5),
-}
-
-
-def _parse_mix(text):
-    """Parse a ``--mix`` value into (set, get, incr, del, label).
-
-    Accepts four forms:
-
-    - ``SET:GET:INCR:DEL`` weights, e.g. ``45:40:10:5`` (label is "").
-    - ``SET:GET:INCR`` weights, e.g. ``50:40:10`` — the old form,
-      DEL weight 0 (label is "").
-    - ``READ:WRITE`` ratio, e.g. ``80:20`` — reads are GETs, writes
-      are SETs, INCR and DEL weight 0 (label is "").
-    - a preset name: ``read-heavy``, ``balanced``, ``write-heavy``
-      (label is the preset name, so the report can name the mix).
-    """
-    if text in MIX_PRESETS:
-        set_w, get_w, incr_w, del_w = MIX_PRESETS[text]
-        return set_w, get_w, incr_w, del_w, text
-    parts = text.split(":")
-    if len(parts) not in (2, 3, 4):
-        raise ValueError(
-            "mix must be SET:GET:INCR:DEL, SET:GET:INCR, READ:WRITE, "
-            "or a preset (read-heavy, balanced, write-heavy)")
-    try:
-        values = [int(p) for p in parts]
-    except ValueError as exc:
-        raise ValueError("mix weights must be integers") from exc
-    if any(v < 0 for v in values) or sum(values) <= 0:
-        raise ValueError("mix weights must be non-negative and sum > 0")
-    if len(values) == 2:
-        # READ:WRITE — reads are GETs, writes are SETs, no INCRs
-        # or DELs.
-        read_w, write_w = values
-        return write_w, read_w, 0, 0, ""
-    if len(values) == 3:
-        # SET:GET:INCR — the old form, no DELs.
-        return values[0], values[1], values[2], 0, ""
-    return values[0], values[1], values[2], values[3], ""
-
-
-def _parse_duration(text):
-    """Parse a ``--duration`` value into seconds (float).
-
-    Accepts a bare number of seconds (``10``), seconds with an
-    ``s`` suffix (``10s``), or minutes with an ``m`` suffix
-    (``2m``); fractional values such as ``1.5s`` or ``0.5m`` are
-    allowed. The value must be positive.
-    """
-    if not text:
-        raise ValueError(
-            "duration must be a positive length of time, e.g. 10s or 2m")
-    suffix = text[-1].lower()
-    if suffix in ("s", "m"):
-        number, multiplier = text[:-1], 60.0 if suffix == "m" else 1.0
-    else:
-        number, multiplier = text, 1.0
-    try:
-        value = float(number) * multiplier
-    except ValueError as exc:
-        raise ValueError(
-            "duration must be a positive length of time, e.g. 10s or 2m"
-        ) from exc
-    if value <= 0:
-        raise ValueError("duration must be positive")
-    return value
 
 
 def _parse_keyspace_sweep(text):
@@ -439,6 +367,38 @@ def _parse_host_port(text):
     return host, port
 
 
+# Command-line flags that declare the workload: when ``--workload``
+# is given, any of these on the same command line conflicts with the
+# config file — the file declares the workload, so a flag that also
+# declares it would silently merge or override. Server, target,
+# output, comparison, SLO and history flags are not workload flags
+# and still combine with ``--workload``.
+_WORKLOAD_FLAGS = (
+    "--ops", "--duration", "--warmup", "--clients", "--keys",
+    "--key-prefix", "--value-size", "--mix", "--pipeline",
+    "--distribution", "--zipf-skew", "--hot-keys", "--seed",
+    "--timeout", "--repeat", "--sweep-keyspace", "--sweep-clients",
+    "--sweep-value-size", "--sweep-pipeline",
+)
+
+
+def _workload_conflicts(argv):
+    """Workload flags present in ``argv``, in first-seen order.
+
+    Matches ``--flag`` and ``--flag=value`` forms; a token that is a
+    flag's value (``--mix 45:40:10:5``) is not itself a flag, so
+    only tokens starting with ``--`` are considered.
+    """
+    found = []
+    for token in argv:
+        if not token.startswith("--"):
+            continue
+        name = token.split("=", 1)[0]
+        if name in _WORKLOAD_FLAGS and name not in found:
+            found.append(name)
+    return found
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="kvbench",
@@ -531,6 +491,13 @@ def build_parser():
                         "recorded in the JSON report (default 1: a "
                         "single run, unchanged behaviour)")
     parser.add_argument("--seed", type=int, default=1234)
+    parser.add_argument("--workload", default=None, metavar="FILE",
+                        help="load the workload from a JSON config file "
+                        "instead of the command line (ops, mix, keys, "
+                        "value size, pipeline, sweeps and more — see "
+                        "workload.json for the format); a config file "
+                        "and command-line workload flags conflict, so "
+                        "pass one or the other, not both")
     parser.add_argument("--baseline", action="store_true",
                         help="also run the in-process dict baseline")
     parser.add_argument("--compare", action="append", default=[],
@@ -688,6 +655,9 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    # The raw argv, for the --workload conflict check: the parsed
+    # args cannot tell a default from a flag passed explicitly.
+    argv_list = list(argv) if argv is not None else sys.argv
     history_path = args.history_file or DEFAULT_HISTORY_FILE
     if args.show_history:
         # History-only mode: no server is contacted, so this works
@@ -818,6 +788,19 @@ def main(argv=None):
         print(format_prune(summary, history_path))
         return 0
     try:
+        if args.workload:
+            # A config file and command-line workload flags
+            # conflict: the file declares the workload, so a flag
+            # that also declares it would silently merge. Fail
+            # fast (exit 2) instead of guessing which one wins.
+            conflicts = _workload_conflicts(argv_list)
+            if conflicts:
+                raise ValueError(
+                    f"--workload {args.workload} conflicts with "
+                    + ", ".join(conflicts) + ": the workload file "
+                    "declares the workload, so command-line "
+                    "workload flags are not allowed — move those "
+                    "settings into the file")
         if args.username is not None and args.password is None:
             raise ValueError(
                 "--username needs --password: AUTH takes a username "
@@ -840,6 +823,37 @@ def main(argv=None):
                        if args.sweep_value_size else [])
         pipeline_depths = (_parse_pipeline_sweep(args.sweep_pipeline)
                            if args.sweep_pipeline else [])
+        if args.workload:
+            # The file declares the workload: every key it sets
+            # replaces the command-line default, and every key it
+            # leaves out keeps it. The conflict check above
+            # guarantees no workload flag was also passed, so
+            # nothing here silently overrides the file. The checks
+            # below (repeat, ops/duration exclusivity) run on the
+            # merged values, so a bad file fails the same way a
+            # bad flag would.
+            config = load_workload_file(args.workload)
+            if "mix" in config:
+                (set_w, get_w, incr_w, del_w,
+                 mix_label) = config["mix"]
+            if "duration_s" in config:
+                duration_s = config["duration_s"]
+            if "warmup_s" in config:
+                warmup_s = config["warmup_s"]
+            if "sweep_keyspace" in config:
+                sweep_sizes = config["sweep_keyspace"]
+            if "sweep_clients" in config:
+                client_counts = config["sweep_clients"]
+            if "sweep_value_size" in config:
+                value_sizes = config["sweep_value_size"]
+            if "sweep_pipeline" in config:
+                pipeline_depths = config["sweep_pipeline"]
+            for key in ("ops", "clients", "keys", "key_prefix",
+                        "value_size", "pipeline", "distribution",
+                        "zipf_skew", "hot_keys", "seed", "timeout",
+                        "repeat"):
+                if key in config:
+                    setattr(args, key, config[key])
         if args.repeat < 1:
             raise ValueError(
                 "--repeat must be a positive integer")
@@ -933,6 +947,7 @@ def main(argv=None):
             slo_error_rate_pct=slo_error_rate,
             slo_per_op=slo_per_op,
             slo_preset=args.slo_preset,
+            workload_file=args.workload,
         )
     except ValueError as exc:
         print(f"kvbench: {exc}", file=sys.stderr)

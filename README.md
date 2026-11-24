@@ -166,6 +166,11 @@ python -m kvbench.cli --ops 20000 --clients 4 --pipeline 10
 # duration mode: run for 10 seconds instead of a fixed op count
 python -m kvbench.cli --duration 10s --clients 4
 
+# workload from a JSON config file, so the benchmark can be checked
+# in and re-run exactly — a config file and command-line workload
+# flags conflict, so pass one or the other, not both
+python -m kvbench.cli --host 127.0.0.1 --port 6379 --workload workload.json
+
 # compare two servers with the same workload, one report
 python -m kvbench.cli --host 127.0.0.1 --port 6379 \
     --compare 127.0.0.1:6380 --ops 20000 --clients 4
@@ -454,6 +459,74 @@ replaces the earlier one).
 `--slo-preset PATH` (load SLO thresholds from a JSON preset file
 instead of passing them on the command line — see the SLO gate
 section for the format; CLI flags override preset values).
+`--workload FILE` (load the workload from a JSON config file
+instead of the command line — see the Workload config file section
+for the format; a config file and command-line workload flags
+conflict, so pass one or the other, not both).
+
+## Workload config file
+
+With `--workload FILE` the workload comes from a JSON file instead
+of the command line, so a benchmark can be checked in and re-run
+exactly — the same file, the same workload, on any machine. Every
+key is optional; a key the file does not set keeps the command-line
+default:
+
+```json
+{
+  "ops": 20000,
+  "clients": 4,
+  "keys": 1000,
+  "key_prefix": "kvbench",
+  "value_size": 32,
+  "mix": "45:40:10:5",
+  "pipeline": 1,
+  "distribution": "uniform",
+  "zipf_skew": 1.0,
+  "hot_keys": 5,
+  "seed": 1234,
+  "timeout": 5.0,
+  "duration": "10s",
+  "warmup": "2s",
+  "repeat": 1,
+  "sweep_keyspace": [100, 1000],
+  "sweep_clients": [1, 2, 4],
+  "sweep_value_size": [32, 128],
+  "sweep_pipeline": [1, 5]
+}
+```
+
+`mix` takes the same forms as `--mix` (`SET:GET:INCR:DEL` weights,
+a `SET:GET:INCR` triple, a `READ:WRITE` ratio, or a preset name);
+`duration` and `warmup` take the same forms as `--duration`
+(`10s`, `2m`, or a bare number of seconds — a JSON number is
+seconds directly, so `"duration": 10` means 10 seconds); the
+sweeps are JSON arrays of positive integers, sorted and
+deduplicated like the comma-separated flags. `ops` and `duration`
+are mutually exclusive, like the flags.
+
+A config file and command-line workload flags conflict: passing
+`--workload` together with `--ops`, `--duration`, `--warmup`,
+`--clients`, `--keys`, `--key-prefix`, `--value-size`, `--mix`,
+`--pipeline`, `--distribution`, `--zipf-skew`, `--hot-keys`,
+`--seed`, `--timeout`, `--repeat`, or any `--sweep-*` flag fails
+the run with exit 2 instead of silently merging the two. Server,
+target, output, comparison, SLO and history flags are not workload
+flags and still combine with `--workload` (`--baseline`,
+`--compare`, `--history`, `--slo-preset` and the rest all work the
+same way). A missing, unreadable, invalid, or out-of-range config
+file also fails with exit 2 before any benchmark starts.
+
+Both reports record the workload the file declared: the JSON
+report carries the config path under `workload.workload_file`
+alongside the resolved values, the Markdown report names the file
+in its Workload section, and a run recorded with `--history`
+carries both in its history record — so a run is reproducible
+from its record even without the file. Two runs with the same
+resolved values are the same workload for `--compare-same-workload`,
+whether one was declared in a file and the other on the command
+line. The checked-in `workload.json` is an example file with the
+defaults.
 
 Every run writes a JSON report alongside the Markdown one, with the
 same workload settings and per-backend results (ops, ops/sec, elapsed,
@@ -943,6 +1016,21 @@ make test
 
 ## Roadmap
 
+- Workload config file (`--workload FILE`): declare the workload
+  once in a JSON file (op mix, key count, value size, pipeline
+  depth, duration, warmup, seed, timeout, repeat and all four
+  sweeps — every key optional, absent keys keep the command-line
+  defaults) so a benchmark can be checked in and re-run exactly,
+  with a config file and command-line workload flags conflicting
+  (exit 2) instead of silently merging, and the config path plus
+  the resolved values recorded in the JSON report
+  (`workload.workload_file`), the Markdown report's Workload
+  section, and the history record, so a run is reproducible from
+  its record. A run from a file and a run from the command line
+  with the same resolved values are the same workload for
+  `--compare-same-workload`. A run with no config file keeps the
+  old shapes exactly, and runs recorded before 0.39.0 carry no
+  `workload_file`. Done in 0.39.0.
 - `--sweep-pipeline` mode: a sweep mode that varies the pipeline
   depth across steps — `--sweep-pipeline 1,5,10` re-runs the same
   workload once per depth, like the existing sweeps vary key count,

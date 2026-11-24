@@ -72,7 +72,7 @@ def workload_matches(record_workload, reference_workload):
 
 
 def _workload_record(workload):
-    return {
+    record = {
         "ops": (None if workload.duration_s is not None
                 else workload.ops),
         "duration_s": workload.duration_s,
@@ -83,6 +83,13 @@ def _workload_record(workload):
             "set": workload.set_weight,
             "get": workload.get_weight,
             "incr": workload.incr_weight,
+            # "del" belongs here too: the recorded mix must match
+            # the JSON report's (_workload_dict), or
+            # --compare-same-workload never matches a recorded run
+            # — the two dicts differ on this key alone. Records
+            # written before 0.39.0 carry no "del" and still do not
+            # match; new ones do.
+            "del": workload.del_weight,
         },
         "mix_label": workload.mix_label or None,
         "seed": workload.seed,
@@ -91,6 +98,13 @@ def _workload_record(workload):
         "zipf_skew": (workload.zipf_skew
                       if workload.distribution == "zipfian" else None),
     }
+    if workload.workload_file is not None:
+        # Only a run from a config file records it: a command-line
+        # run keeps the old record shape exactly. The resolved
+        # values are the fields above, so the run is reproducible
+        # from this record even without the file.
+        record["workload_file"] = workload.workload_file
+    return record
 
 
 def _sweeps_record(result):
