@@ -411,7 +411,8 @@ committed or attached to a report; needs `--trend`),
 `--best-worst` (print a best-run vs worst-run comparison per
 backend from the recorded run history and exit, no benchmark is
 run — ops/sec and p99 for the best and worst runs, overall and
-per operation, with the percentage change between them),
+per operation, with the percentage change between them, plus
+each picked run's per-operation latency histograms),
 `--best-worst-out PATH` (with `--best-worst`, also write the
 comparison to a Markdown file; needs `--best-worst`),
 `--best-worst-json PATH` (with `--best-worst`, also write the
@@ -619,7 +620,16 @@ runs vary a lot, a narrow one says the backend is steady. Each
 backend also gets the same table per operation type (SET, GET,
 INCR, DEL) that ran, picked independently by that op's ops/sec, so a
 slow-write run that still won overall still shows up as the
-worst SET run. A backend with a single recorded run has that run
+worst SET run. Each picked run also carries its per-operation
+latency histograms — the best and worst runs' full per-op
+histogram blocks under the overall table, and each per-op
+pick's own histogram under that op's table — the same
+log-spaced buckets as the regular run's `histograms_by_op`,
+drawn with the same shared helper as the single-run report
+and the `--compare` output, so a p99 move names the op whose
+latency shape moved. History records carry the histograms
+since 0.43.0; runs recorded before that show a note instead of
+histogram blocks. A backend with a single recorded run has that run
 as both best and worst, with 0.0% deltas. With
 `--compare-same-workload` only runs whose workload matches the
 latest recorded run's are considered — the same
@@ -629,7 +639,9 @@ the header names the workload that was matched.
 `--best-worst-out PATH` writes the same comparison to a Markdown
 file (the exact text printed to stdout), and
 `--best-worst-json PATH` writes it as JSON (best and worst run
-per backend and per op, with ops/sec, p99 and the deltas), so a
+per backend and per op, with ops/sec, p99, the deltas, and the
+per-op histograms — `histograms_by_op` on the best and worst
+runs, `histogram` on each per-op pick), so a
 script can read the spread without parsing the table. Both need
 `--best-worst` (exit 2 otherwise), like `--trend-out` needs
 `--trend`.
@@ -1067,6 +1079,25 @@ make test
 
 ## Roadmap
 
+- Per-operation latency histograms in the `--best-worst`
+  output: each picked run carries the same log-spaced buckets
+  per operation that ran as the regular run's
+  `histograms_by_op` — the best and worst runs' full maps under
+  `best` / `worst` (`histograms_by_op`) in JSON and as
+  per-run histogram blocks under the overall table in Markdown,
+  plus each per-op pick's own buckets under
+  `per_op[OP].best` / `worst` (`histogram`) in JSON and as a
+  histogram block under that op's table in Markdown — reusing
+  the shared histogram-block helper so the best/worst view
+  cannot disagree with `--compare` or the single-run output,
+  so a p99 move names the op whose latency shape moved, not
+  just that the p99 moved. The histograms are recorded in the
+  history record (`histograms_by_op`) when a run is recorded
+  with `--history`; runs recorded before 0.43.0 carry none and
+  render a note instead of histogram blocks. The per-op
+  histogram validator is shared with the compare view, so both
+  views agree on what counts as a valid histogram. Done in
+  0.43.0.
 - Per-operation p99 / ops-sec deltas in the `--compare` output
   (`--compare-file` / `--compare-history`): each compared
   backend carries a per-op breakdown — one row per op that ran,

@@ -35,7 +35,7 @@ import json
 import os
 from datetime import datetime, timezone
 
-from .history import _WORKLOAD_KEYS, load_history
+from .history import _WORKLOAD_KEYS, _histograms_or_none, load_history
 
 
 def _parse_history_selector(selector):
@@ -216,32 +216,6 @@ def load_baseline(path):
         raise ValueError(
             f"compare file {path} holds no results to compare against")
     return doc
-
-
-def _histograms_or_none(value):
-    """A per-op histogram mapping, or None when it is not one.
-
-    A baseline JSON report written since 0.32.0 carries
-    ``histograms_by_op`` per result (op name to the same
-    log-spaced bucket list the single-run report uses); a history
-    baseline or an older report carries none, and a hand-made
-    file may carry something else entirely. Only a non-empty dict
-    of op name to bucket lists (each bucket a dict with
-    ``upper_ms`` and ``count``) passes through — anything else
-    reads as no baseline histograms, instead of crashing the
-    report on a shape it cannot draw.
-    """
-    if not isinstance(value, dict) or not value:
-        return None
-    for buckets in value.values():
-        if not isinstance(buckets, list):
-            return None
-        for bucket in buckets:
-            if (not isinstance(bucket, dict)
-                    or "upper_ms" not in bucket
-                    or "count" not in bucket):
-                return None
-    return value
 
 
 def _per_op_or_none(value):

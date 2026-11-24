@@ -17,7 +17,12 @@ SET, GET, INCR and DEL separately — a slow write no longer hides
 inside the overall ops/sec. ``--best-worst`` picks the best and
 worst runs per backend (and per operation) out of the same
 history, with the spread between them, so a backend whose
-throughput swings run to run reads at a glance. Since 0.37.0
+throughput swings run to run reads at a glance. Since 0.43.0
+each record also carries its per-operation latency histograms,
+so the best/worst view shows each picked run's latency shape —
+the best and worst runs' full per-op maps, and each per-op
+pick's own buckets — drawn with the same shared helper as the
+single-run report, so the views cannot disagree. Since 0.37.0
 each record also carries its sweep steps — one ops/sec and p99
 per keyspace size, client count, value size and pipeline depth —
 so the trend view tracks every sweep step on its own, and a step's
@@ -31,6 +36,7 @@ import tempfile
 from datetime import datetime, timezone
 
 from . import __version__
+from .report import _per_op_histogram_block
 
 DEFAULT_HISTORY_FILE = os.path.join(
     os.path.expanduser("~"), ".kvbench", "history.jsonl"
@@ -175,6 +181,15 @@ def build_record(result, workload, command_line):
             }
             for op, entry in result.per_op_summary.items()
         },
+        # Per-operation latency histograms — the same log-spaced
+        # buckets per operation that ran as the JSON report's
+        # ``histograms_by_op`` — so the best/worst view can show
+        # each picked run's latency shape, not just its p99.
+        # Records written before 0.43.0 carry no
+        # "histograms_by_op" key at all, and the best/worst view
+        # renders no histogram blocks for those runs instead of
+        # failing.
+        "histograms_by_op": result.per_op_histograms,
         "workload": _workload_record(workload),
     }
     # Sweep steps, so the trend view can track each step over
@@ -542,22 +557,72 @@ def write_trend(path, entries, limit=20):
     return text
 
 
-def _run_numbers(entry):
+def _histogram_or_none(buckets):
+    """One op's latency histogram bucket list, or None.
+
+    A bucket list is the same log-spaced buckets
+    :func:`kvbench.stats.histogram` produces (each bucket a dict
+    with ``upper_ms`` and ``count``). A record that carries
+    something else — a hand-edited history file, say — reads as
+    no histogram, instead of crashing the best/worst view on a
+    shape it cannot draw.
+    """
+    if not isinstance(buckets, list) or not buckets:
+        return None
+    for bucket in buckets:
+        if (not isinstance(bucket, dict)
+                or "upper_ms" not in bucket
+                or "count" not in bucket):
+            return None
+    return buckets
+
+
+def _histograms_or_none(value):
+    """A per-op histogram mapping, or None when it is not one.
+
+    A history record written since 0.43.0 carries
+    ``histograms_by_op`` (op name to the same log-spaced bucket
+    list the single-run report uses); an older record carries
+    none, and a hand-made file may carry something else entirely.
+    Only a non-empty dict of op name to valid bucket lists passes
+    through — anything else reads as no histograms, instead of
+    crashing the best/worst view on a shape it cannot draw. The
+    compare view validates baseline histograms the same way, so
+    it imports this helper rather than keeping a second copy.
+    """
+    if not isinstance(value, dict) or not value:
+        return None
+    cleaned = {}
+    for op, buckets in value.items():
+        valid = _histogram_or_none(buckets)
+        if valid is None:
+            return None
+        cleaned[op] = valid
+    return cleaned
+
+
+def _run_numbers(entry, histograms=None):
     """A run's headline numbers as a small dict, or None.
 
     The timestamp is kept for the table; a run with no numeric
     ops/sec cannot be ranked, so it is skipped instead of
-    crashing the comparison.
+    crashing the comparison. ``histograms`` is the run's
+    per-operation latency histograms (op name to bucket list),
+    carried only when the run has them — the best/worst tables
+    show the picked runs' latency shapes alongside their p99.
     """
     ops_sec = entry.get("ops_per_sec")
     if not isinstance(ops_sec, (int, float)):
         return None
     p99 = entry.get("p99_ms")
-    return {
+    numbers = {
         "timestamp": entry.get("timestamp", "")[:19].replace("T", " "),
         "ops_per_sec": ops_sec,
         "p99_ms": p99 if isinstance(p99, (int, float)) else None,
     }
+    if histograms is not None:
+        numbers["histograms_by_op"] = histograms
+    return numbers
 
 
 def _delta_pct(best, worst):
@@ -603,7 +668,12 @@ def best_worst_comparison(entries, workload=None):
     narrow one says it is steady. The same pick is made per
     operation type (SET, GET, INCR, DEL) from the per-op data, so a
     slow-write run that still won overall still shows up as the
-    worst SET run. When ``workload`` is given (a workload dict
+    worst SET run. Each picked run also carries its per-operation
+    latency histograms — the best and worst runs' full
+    ``histograms_by_op`` maps, and each per-op pick's own
+    ``histogram`` bucket list — the same log-spaced buckets the
+    single-run report uses, so a p99 move names the op whose
+    latency shape moved. When ``workload`` is given (a workload dict
     in the shape of a history record's ``workload``), only runs
     whose workload matches it are considered — the same
     apples-to-apples rule ``--compare-same-workload`` uses, so a
@@ -611,7 +681,8 @@ def best_worst_comparison(entries, workload=None):
     full-size one. A backend with a single usable run has that
     run as both best and worst, with 0.0% deltas; runs recorded
     before 0.22.0 carry no ``per_op`` data and simply get no
-    per-op sections.
+    per-op sections, and runs recorded before 0.43.0 carry no
+    ``histograms_by_op`` data and simply carry no histograms.
 
     Returns a JSON-serializable dict with a ``backends`` list.
     """
@@ -623,7 +694,9 @@ def best_worst_comparison(entries, workload=None):
         by_backend.setdefault(entry.get("backend", "?"), []).append(entry)
     backends = []
     for backend, runs in by_backend.items():
-        usable = [(e, _run_numbers(e)) for e in runs]
+        usable = [(e, _run_numbers(
+            e, _histograms_or_none(e.get("histograms_by_op"))))
+            for e in runs]
         usable = [(e, n) for e, n in usable if n is not None]
         pair = _best_worst_pair(usable)
         if pair is None:
@@ -643,6 +716,14 @@ def best_worst_comparison(entries, workload=None):
                 # the table shows the run it came from.
                 numbers["timestamp"] = entry.get(
                     "timestamp", "")[:19].replace("T", " ")
+                # The op's histogram lives on the record, not on
+                # the per-op entry — the same buckets the overall
+                # run's map carries for this op, so the per-op
+                # pick's shape cannot disagree with the run's.
+                histograms = _histograms_or_none(
+                    entry.get("histograms_by_op"))
+                if histograms is not None and op in histograms:
+                    numbers["histogram"] = histograms[op]
                 op_runs.append((entry, numbers))
             op_pair = _best_worst_pair(op_runs)
             if op_pair is None:
@@ -725,11 +806,17 @@ def format_best_worst(entries, workload=None):
 
     One section per backend: a table with the best and worst
     runs' ops/sec and p99 and the percentage change between
-    them, then the same table per operation type that ran. When
-    ``workload`` is given, only runs matching it were compared,
-    and the header says which workload that was. An empty
-    history — or a filter that matches nothing — prints the
-    same "No runs recorded yet" message as ``--trend``.
+    them, then the per-operation latency histograms of the best
+    and worst runs, then the same table per operation type that
+    ran, each followed by that op's histograms for its own best
+    and worst runs — the per-op picks are independent of the
+    overall picks, so a slow-write run that still won overall
+    shows its own shape. When ``workload`` is given, only runs
+    matching it were compared, and the header says which workload
+    that was. An empty history — or a filter that matches nothing
+    — prints the same "No runs recorded yet" message as
+    ``--trend``. Runs recorded before 0.43.0 carry no per-op
+    histograms and render a note instead of histogram blocks.
     """
     comparison = best_worst_comparison(entries, workload=workload)
     if not comparison["backends"]:
@@ -752,6 +839,24 @@ def format_best_worst(entries, workload=None):
         sections.extend(_best_worst_lines(
             "Overall", backend["best"], backend["worst"],
             backend["ops_sec_delta_pct"], backend["p99_delta_pct"]))
+        # Per-operation latency histograms for the best and worst
+        # runs — the same shared histogram-block helper the
+        # single-run report and the compare view use, so the
+        # shapes cannot disagree. Runs recorded before 0.43.0
+        # carry no histograms, so those backends get a note
+        # instead of blocks.
+        sections.extend(_per_op_histogram_block(
+            "#### Per-op latency histogram — best run",
+            backend["best"].get("histograms_by_op")))
+        sections.extend(_per_op_histogram_block(
+            "#### Per-op latency histogram — worst run",
+            backend["worst"].get("histograms_by_op")))
+        if (not backend["best"].get("histograms_by_op")
+                and not backend["worst"].get("histograms_by_op")):
+            sections.append(
+                f"- {backend['backend']}: the history file carries "
+                "no per-op histograms, so no histograms are shown.")
+            sections.append("")
         for op in ("SET", "GET", "INCR", "DEL"):
             op_entry = backend["per_op"].get(op)
             if op_entry is None:
@@ -760,6 +865,18 @@ def format_best_worst(entries, workload=None):
                 f"{op}", op_entry["best"], op_entry["worst"],
                 op_entry["ops_sec_delta_pct"],
                 op_entry["p99_delta_pct"]))
+            # That op's histogram for its own best and worst
+            # runs — the per-op picks are independent of the
+            # overall picks, so their shapes live here, not in
+            # the overall blocks above.
+            for label, pick in (("best", op_entry["best"]),
+                                ("worst", op_entry["worst"])):
+                histogram = pick.get("histogram")
+                if histogram is None:
+                    continue
+                sections.extend(_per_op_histogram_block(
+                    f"#### {op} — latency histogram ({label} run)",
+                    {op: histogram}))
     return "\n".join(sections)
 
 
