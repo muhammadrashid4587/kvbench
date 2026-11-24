@@ -94,6 +94,51 @@ class TestReport(unittest.TestCase):
         hist = parsed["results"][0]["histogram"]
         self.assertEqual(hist, [{"upper_ms": 0.1, "count": 100}])
 
+    def test_per_op_histograms_in_json(self):
+        parsed = json.loads(render_json([_result_with_per_op()],
+                                        _workload(), "kvbench"))
+        per_op = parsed["results"][0]["histograms_by_op"]
+        # Same log-spaced buckets as the overall histogram, per op:
+        # SET at 0.1 ms, GET at 0.2 ms (<= 0.25 ms bucket). Leading
+        # empty buckets are kept, like the overall histogram.
+        self.assertEqual(per_op["SET"], [{"upper_ms": 0.1, "count": 60}])
+        self.assertEqual(per_op["GET"],
+                         [{"upper_ms": 0.1, "count": 0},
+                          {"upper_ms": 0.25, "count": 40}])
+        self.assertNotIn("INCR", per_op)  # never ran: left out
+        self.assertNotIn("DEL", per_op)
+        # The overall histogram is unchanged by the per-op split.
+        self.assertEqual(parsed["results"][0]["histogram"],
+                         [{"upper_ms": 0.1, "count": 60},
+                          {"upper_ms": 0.25, "count": 40}])
+
+    def test_per_op_histograms_in_markdown(self):
+        text = render_markdown([_result_with_per_op()], _workload(),
+                               "kvbench")
+        self.assertIn("## Per-operation latency histograms", text)
+        self.assertIn(
+            "Per-operation latency histogram — cinder (127.0.0.1:6379)",
+            text)
+        self.assertIn("SET (60 ops)", text)
+        self.assertIn("<= 0.1 ms: 60 (100.0%)", text)
+        self.assertIn("GET (40 ops)", text)
+        self.assertIn("<= 0.25 ms: 40 (100.0%)", text)
+        self.assertNotIn("INCR (", text)
+        self.assertIn("per operation", text)
+        self.assertIn("histograms_by_op", text)
+
+    def test_per_op_histograms_absent_without_split(self):
+        # Results built without per-op latencies (e.g. older callers)
+        # render no per-op histogram section and an empty split in
+        # JSON; the overall histogram is still there.
+        parsed = json.loads(render_json([_result()], _workload(),
+                                        "kvbench"))
+        self.assertEqual(parsed["results"][0]["histograms_by_op"], {})
+        self.assertEqual(parsed["results"][0]["histogram"],
+                         [{"upper_ms": 0.1, "count": 100}])
+        text = render_markdown([_result()], _workload(), "kvbench")
+        self.assertNotIn("## Per-operation latency histograms", text)
+
     def test_error_sample_listed(self):
         workload = Workload(ops=10, clients=1, keys=5)
         result = BenchmarkResult(

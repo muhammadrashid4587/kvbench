@@ -360,6 +360,24 @@ class BenchmarkResult:
     def histogram(self):
         return histogram(self.latencies_ns)
 
+    @property
+    def per_op_histograms(self):
+        """Per-operation latency histograms, in SET/GET/INCR/DEL order.
+
+        Each entry is the :func:`histogram` bucket list for that op's
+        latencies — the same log-spaced buckets as the overall
+        histogram — so a slow op type's latency shape shows
+        separately from the overall distribution. Ops with no
+        samples are left out, so a read-only mix reports GET alone.
+        """
+        out = {}
+        for op in ("SET", "GET", "INCR", "DEL"):
+            samples = self.latencies_by_op.get(op)
+            if not samples:
+                continue
+            out[op] = histogram(samples)
+        return out
+
     def hot_key_summary(self, top_n=5):
         """Latency stats for the ``top_n`` hottest keys, by access count.
 

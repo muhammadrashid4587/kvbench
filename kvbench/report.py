@@ -98,6 +98,12 @@ def _result_dict(result, top_n=5):
         # finding naming the dominant factor, if any.
         "tail": result.tail_report,
         "histogram": result.histogram,
+        # Per-operation latency histograms: op name ("SET", "GET",
+        # "INCR", "DEL") to the same log-spaced buckets as
+        # ``histogram``, so a slow op type's latency shape shows
+        # separately from the overall distribution. Ops that never
+        # ran are left out.
+        "histograms_by_op": result.per_op_histograms,
         "time_series": result.time_series,
         # Share of successful ops that hit the hottest 1% of keys
         # (~0.01 under uniform; much higher under zipfian).
@@ -221,27 +227,58 @@ def _row(result):
     )
 
 
-def _histogram_lines(result):
-    """Text-bar histogram lines for one result, or [] when empty."""
-    buckets = result.histogram
-    if not buckets:
-        return []
-    total = result.summary["count"]
-    lines = [f"### Latency histogram — {result.name}", ""]
+def _histogram_bucket_lines(buckets, total):
+    """Text-bar lines for one histogram's buckets.
+
+    Each line is the bucket label, count and share, with a bar scaled
+    to the largest bucket so the shape reads at a glance (capped at
+    40 characters so long runs stay readable).
+    """
+    lines = []
     for bucket in buckets:
         label = (
             "> 1000 ms"
             if bucket["upper_ms"] is None
             else f"<= {bucket['upper_ms']:g} ms"
         )
-        # Scale the bar to the largest bucket so the shape reads at a
-        # glance; cap the width so long runs stay readable.
         width = round(bucket["count"] / max(b["count"] for b in buckets) * 40)
         lines.append(
             f"- {label}: {bucket['count']} "
             f"({bucket['count'] / total * 100:.1f}%) {'#' * width}"
         )
+    return lines
+
+
+def _histogram_lines(result):
+    """Text-bar histogram lines for one result, or [] when empty."""
+    buckets = result.histogram
+    if not buckets:
+        return []
+    lines = [f"### Latency histogram — {result.name}", ""]
+    lines += _histogram_bucket_lines(buckets, result.summary["count"])
     lines.append("")
+    return lines
+
+
+def _per_op_histogram_lines(result):
+    """Per-operation text-bar histograms for one result, or [].
+
+    One bucket list per operation that ran, using the same
+    log-spaced buckets as the overall histogram, each scaled to its
+    own largest bucket — so a slow op type's shape shows separately
+    from the overall distribution instead of being swamped by the
+    fast ops.
+    """
+    per_op = result.per_op_histograms
+    if not per_op:
+        return []
+    lines = [f"### Per-operation latency histogram — {result.name}", ""]
+    for op, buckets in per_op.items():
+        total = sum(b["count"] for b in buckets)
+        lines.append(f"{op} ({total} ops)")
+        lines.append("")
+        lines += _histogram_bucket_lines(buckets, total)
+        lines.append("")
     return lines
 
 
@@ -826,6 +863,12 @@ def render_markdown(results, workload, command_line, comparison=None,
         hist_lines += _histogram_lines(result)
     if hist_lines:
         lines += ["", "## Latency histograms", ""] + hist_lines
+    per_op_hist_lines = []
+    for result in results:
+        per_op_hist_lines += _per_op_histogram_lines(result)
+    if per_op_hist_lines:
+        lines += ["", "## Per-operation latency histograms", ""] + \
+            per_op_hist_lines
     ts_lines = []
     for result in results:
         ts_lines += _time_series_lines(result)
@@ -847,6 +890,11 @@ def render_markdown(results, workload, command_line, comparison=None,
         "- The Per-operation stats section splits ops/sec and latency "
         "percentiles by operation (SET, GET, INCR, DEL), so a read-heavy "
         "mix shows whether reads or writes dominate the tail.",
+        "- The Per-operation latency histograms section draws the same "
+        "log-spaced buckets per operation, so a slow op type's latency "
+        "shape shows separately from the overall distribution instead "
+        "of being swamped by the fast ops. The JSON report carries the "
+        "same buckets per result under `histograms_by_op`.",
         "- The Tail-latency attribution section names the factor the "
         "slowest ops come from: one operation type, one client, hot "
         "or cold keys, or a single slow second. Slow ops are the ops "

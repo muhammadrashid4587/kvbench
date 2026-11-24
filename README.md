@@ -85,7 +85,8 @@ C. Pure Python 3 standard library, no dependencies.
   no single factor does, so a high p99 points at the cause instead
   of just the number.
 - Latency stats (`kvbench/stats.py`): ops/sec, mean, p50, p95, p99,
-  plus a log-spaced latency histogram and a per-second time series
+  plus a log-spaced latency histogram, overall and per operation,
+  and a per-second time series
   (ops, mean and max latency per second) to spot stalls.
 - A Markdown report writer (`kvbench/report.py`).
 - An SLO gate (`kvbench/slo.py`): `--slo-p99-ms` and
@@ -737,6 +738,14 @@ share of ops in each log-spaced bucket (`<= 0.1 ms`, `<= 0.25 ms`,
 anything slower), drawn as text bars. The JSON report carries the
 same buckets per result under `histogram`.
 
+Each backend also gets a per-operation latency histogram section:
+the same log-spaced buckets drawn separately for each operation
+that ran (SET, GET, INCR, DEL), each scaled to its own largest
+bucket, so a slow op type's latency shape shows separately from the
+overall distribution instead of being swamped by the fast ops. The
+JSON report carries the same buckets per result under
+`histograms_by_op`.
+
 With `--sweep-keyspace` the report has a Keyspace sweep section
 right below the results table: one table per backend with a row per
 swept size — keys, ops, ops/sec, mean and p99 — so the effect of
@@ -835,14 +844,23 @@ make test
 
 ## Roadmap
 
-- DEL op in the mix (`--mix 45:40:10:5` by default): DEL
+- Per-operation latency histograms: the same log-spaced buckets
+  as the overall histogram, drawn separately for each operation
+  that ran (SET, GET, INCR, DEL) in a Per-operation latency
+  histograms section in the Markdown report, with the same buckets
+  per result under `histograms_by_op` in JSON — so a slow op type's
+  latency shape shows separately from the overall distribution
+  instead of being swamped by the fast ops. The existing report
+  shape is unchanged: the overall `histogram` and per-op stats
+  table are exactly as before. Done in 0.32.0.
+- ~~DEL op in the mix (`--mix 45:40:10:5` by default): DEL
   deletes a key the workload SET earlier, sharing the SET/GET
   keyspace (`<prefix>:<rank>`, not the INCR counter keyspace),
   with per-op ops/sec and latency in both reports, in the history
   and trend views, in tail attribution, and as a per-op SLO target
   (`--slo-op DEL:5,0.1`); the old three-part `--mix` form
   (`50:40:10`) still works, with DEL weight 0, and the presets
-  carry a 5% DEL share. Done in 0.31.0.
+  carry a 5% DEL share.~~ Done in 0.31.0.
 - ~~Authentication (`--password` / `--username`): AUTH on connect
   for password-protected servers — `AUTH password`, or `AUTH
   username password` with `--username` (the Redis 6 ACL form) —
