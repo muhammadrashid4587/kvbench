@@ -578,15 +578,21 @@ chart, one section per backend: a table of the most recent runs
 (20 by default, `--history-limit N` to change it) with ops/sec,
 the change versus the previous run of that backend, and p99
 alongside, plus a sparkline of ops/sec over those runs (oldest to
-newest) and the first-to-last change. A backend with a single
+newest) and the first-to-last change in ops/sec and in p99 — a
+backend whose tail crept up reads at a glance even when its
+throughput moved the other way. A backend with a single
 recorded run shows its one value with no delta and a single
-block; an empty history prints the same "No runs recorded yet"
+block, and no first-to-last lines; an empty history prints the
+same "No runs recorded yet"
 message as `--show-history`. Below the overall chart each backend
 also gets a per-operation trend section — one table per op (SET,
 GET, INCR, DEL) that ran, with that op's ops/sec, its change versus
 the previous run that ran the same op, and its p99, plus its own
-sparkline and first-to-last change — so a SET regression reads
-at a glance even when GETs dominate the mix. Runs recorded
+sparkline and first-to-last change in ops/sec and in p99 — so a
+SET regression reads
+at a glance even when GETs dominate the mix, and a SET tail that
+crept up reads at a glance even when SET throughput moved the
+other way. Runs recorded
 before 0.22.0 carry no per-op data and simply show no per-op
 sections; a run that never ran an op (a read-only mix has no
 SET) leaves that op out of its own table. Each backend's trend
@@ -1120,6 +1126,18 @@ make test
 
 ## Roadmap
 
+- P99 first-to-last change in the overall and per-operation
+  `--trend` sections: the same p99 first-to-last line the
+  sweep-step sections gained in 0.47.0, now beside the ops/sec
+  one in the overall chart and in each per-op trend section —
+  the overall p99 and each op's p99 in the first and last runs
+  in the window and the percentage change between them — built
+  from the same recorded p99s the tables already show, through
+  one shared helper that formats the line for the overall,
+  per-op and sweep-step sections alike, so the views cannot
+  disagree. A backend with a single run in the window, or runs
+  whose recorded p99 is missing, show no p99 line. Done in
+  0.48.0.
 - P99 first-to-last change per sweep step in the `--trend`
   output: each sweep-step trend section gains a p99
   first-to-last line beside the ops/sec one — the step's p99

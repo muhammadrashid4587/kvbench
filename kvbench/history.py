@@ -297,6 +297,26 @@ def _sparkline(values):
         for v in values)
 
 
+def _p99_first_last_line(label, p99_values):
+    """A p99 first-to-last change line, or None.
+
+    ``label`` is the text before "first → last" — "p99" for the
+    overall trend, "SET p99" for a per-op section, "Keyspace sweep
+    — 100 keys p99" for a sweep step — and ``p99_values`` the
+    recorded p99s in window order (oldest first). Fewer than two
+    values means there is no change to report: a single run, or
+    runs whose recorded p99 is missing, show no line. One helper
+    formats the line for every trend section, so the overall,
+    per-op and sweep-step views cannot disagree.
+    """
+    if len(p99_values) < 2:
+        return None
+    first, last = p99_values[0], p99_values[-1]
+    change = (last - first) / first * 100 if first else 0.0
+    return (f"{label} first → last: {first:.3f} → {last:.3f} ms "
+            f"({change:+.1f}%)")
+
+
 def _per_op_trend_lines(runs, window):
     """Per-operation trend sections for one backend.
 
@@ -304,10 +324,10 @@ def _per_op_trend_lines(runs, window):
     ``window`` the most recent ones being rendered. Each operation
     type that ran gets its own table — ops/sec, the change versus
     the previous run of this backend that ran the same op, and p99
-    — plus a sparkline and the first-to-last change. Runs recorded
-    before 0.22.0 carry no ``per_op`` data and are skipped for
-    these sections; an op that never ran in the window gets no
-    section at all.
+    — plus a sparkline and the first-to-last change in ops/sec and
+    in p99. Runs recorded before 0.22.0 carry no ``per_op`` data
+    and are skipped for these sections; an op that never ran in
+    the window gets no section at all.
     """
     lines = []
     for op in ("SET", "GET", "INCR", "DEL"):
@@ -360,6 +380,22 @@ def _per_op_trend_lines(runs, window):
             lines.append(
                 f"{op} first → last: {first:,.0f} → {last:,.0f} "
                 f"ops/sec ({change:+.1f}%)")
+        # The p99 first-to-last change, alongside the ops/sec one:
+        # an op whose tail crept up reads at a glance even when
+        # its throughput moved the other way. A run that never
+        # ran the op, or one whose recorded p99 is missing, is
+        # skipped, like a run with no recorded ops/sec.
+        p99_values = []
+        for entry in window:
+            op_entry = (entry.get("per_op") or {}).get(op)
+            if op_entry is None:
+                continue
+            p99 = op_entry.get("p99_ms")
+            if isinstance(p99, (int, float)):
+                p99_values.append(p99)
+        line = _p99_first_last_line(f"{op} p99", p99_values)
+        if line is not None:
+            lines.append(line)
         lines.append("")
     return lines
 
@@ -496,14 +532,10 @@ def _sweep_trend_lines(runs, window):
                 p99 = step.get("p99_ms")
                 if isinstance(p99, (int, float)):
                     p99_values.append(p99)
-            if len(p99_values) >= 2:
-                first_p99, last_p99 = p99_values[0], p99_values[-1]
-                p99_change = ((last_p99 - first_p99) / first_p99 * 100
-                              if first_p99 else 0.0)
-                lines.append(
-                    f"{label} — {step_label} p99 first → last: "
-                    f"{first_p99:.3f} → {last_p99:.3f} ms "
-                    f"({p99_change:+.1f}%)")
+            line = _p99_first_last_line(
+                f"{label} — {step_label} p99", p99_values)
+            if line is not None:
+                lines.append(line)
             lines.append("")
     return lines
 
@@ -773,9 +805,11 @@ def format_trend(entries, limit=20):
     its own section: a table of its most recent ``limit`` runs with
     ops/sec, the change versus the previous run of that backend,
     and p99 alongside, plus a sparkline of ops/sec over those runs
-    (oldest to newest) and the first-to-last change, followed by
+    (oldest to newest) and the first-to-last change in ops/sec and
+    in p99, followed by
     the same chart per operation type (SET, GET, INCR, DEL) for the ops
-    that ran, so each op's throughput trend reads on its own, and
+    that ran, so each op's throughput trend reads on its own, with
+    a p99 first-to-last change per op beside the ops/sec one, and
     the same chart per sweep step (keyspace size, client count,
     value size, pipeline depth, read:write ratio) for the steps
     that ran, so a step's throughput trend reads on its own too,
@@ -837,6 +871,16 @@ def format_trend(entries, limit=20):
             sections.append(
                 f"First → last: {first:,.0f} → {last:,.0f} ops/sec "
                 f"({change:+.1f}%)")
+        # The p99 first-to-last change, alongside the ops/sec one:
+        # a backend whose tail crept up reads at a glance even
+        # when its throughput moved the other way. A run whose
+        # recorded p99 is missing is skipped, like a run with no
+        # recorded ops/sec.
+        p99_values = [e.get("p99_ms") for e in window
+                      if isinstance(e.get("p99_ms"), (int, float))]
+        line = _p99_first_last_line("p99", p99_values)
+        if line is not None:
+            sections.append(line)
         sections.append("")
         # Per-op trend, same shape as the overall chart, one section
         # per operation type that ran in this window.

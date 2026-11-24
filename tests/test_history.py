@@ -19,23 +19,25 @@ from kvbench.history import DEFAULT_HISTORY_FILE, \
 
 
 def _make_result(name="cinder (127.0.0.1:6379)", ops=1000,
-                 ops_per_sec=50000.0, latencies_by_op=None):
-    # 1000 samples of 20_000 ns each: mean/p50/p95/p99 all 0.020 ms.
+                 ops_per_sec=50000.0, latencies_by_op=None,
+                 latency_ns=20_000):
+    # 1000 samples of latency_ns each: mean/p50/p95/p99 all
+    # latency_ns / 1e6 ms (0.020 ms at the 20_000 ns default).
     return BenchmarkResult(
         name=name, ops=ops, elapsed_s=ops / ops_per_sec,
-        latencies_ns=[20_000] * ops,
+        latencies_ns=[latency_ns] * ops,
         latencies_by_op=latencies_by_op or {})
 
 
-def _make_mixed_result(ops_per_sec=50000.0):
+def _make_mixed_result(ops_per_sec=50000.0, latency_ns=20_000):
     # A 50:40:10 SET:GET:INCR mix, so per-op trends have three ops
-    # to track: SET 500 samples, GET 400, INCR 100, all 20_000 ns.
+    # to track: SET 500 samples, GET 400, INCR 100, all latency_ns.
     return _make_result(
         ops=1000, ops_per_sec=ops_per_sec,
         latencies_by_op={
-            "SET": [20_000] * 500,
-            "GET": [20_000] * 400,
-            "INCR": [20_000] * 100,
+            "SET": [latency_ns] * 500,
+            "GET": [latency_ns] * 400,
+            "INCR": [latency_ns] * 100,
         })
 
 
@@ -328,6 +330,50 @@ class TestFormatTrend(unittest.TestCase):
         self.assertIn(
             "First → last: 40,000 → 60,000 ops/sec (+50.0%)", text)
 
+    def test_overall_p99_first_to_last_change(self):
+        # A backend whose tail moved shows a p99 first-to-last
+        # change beside the ops/sec one, so a backend that got
+        # slower in the tail reads at a glance even when its
+        # throughput rose — here ops/sec is up 25% while p99 is
+        # up 50%.
+        workload = _make_workload()
+        entries = [
+            build_record(_make_result(ops_per_sec=40000.0,
+                                      latency_ns=20_000),
+                         workload, "kvbench"),
+            build_record(_make_result(ops_per_sec=50000.0,
+                                      latency_ns=30_000),
+                         workload, "kvbench"),
+        ]
+        text = format_trend(entries)
+        self.assertIn(
+            "First → last: 40,000 → 50,000 ops/sec (+25.0%)", text)
+        self.assertIn(
+            "p99 first → last: 0.020 → 0.030 ms (+50.0%)", text)
+
+    def test_overall_single_run_has_no_p99_first_to_last(self):
+        # One run has no first-to-last change to report, for p99
+        # just as for ops/sec.
+        text = format_trend(self._entries(rates=(50000.0,)))
+        self.assertNotIn("p99 first → last", text)
+
+    def test_overall_p99_missing_shows_no_p99_line(self):
+        # A run whose recorded p99 is missing contributes no p99
+        # value, so with both runs missing there is no p99 line
+        # — while the ops/sec first-to-last change still renders.
+        workload = _make_workload()
+        entries = [
+            build_record(_make_result(ops_per_sec=rate), workload,
+                         "kvbench")
+            for rate in (40000.0, 50000.0)
+        ]
+        for entry in entries:
+            del entry["p99_ms"]
+        text = format_trend(entries)
+        self.assertIn(
+            "First → last: 40,000 → 50,000 ops/sec (+25.0%)", text)
+        self.assertNotIn("p99 first → last", text)
+
     def test_each_backend_gets_its_own_section(self):
         workload = _make_workload()
         entries = [
@@ -410,6 +456,49 @@ class TestFormatTrend(unittest.TestCase):
         # The read-only run still appears in the GET section.
         self.assertIn("GET first → last: 16,000 → 20,000 ops/sec "
                       "(+25.0%)", text)
+
+    def test_per_op_p99_first_to_last_change(self):
+        # An op whose tail moved shows a p99 first-to-last change
+        # beside its ops/sec one, so a slow write reads at a
+        # glance even when the op's throughput rose — here every
+        # op's ops/sec is up 25% while its p99 is up 50%.
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(ops_per_sec=40000.0,
+                                            latency_ns=20_000),
+                         workload, "kvbench"),
+            build_record(_make_mixed_result(ops_per_sec=50000.0,
+                                            latency_ns=30_000),
+                         workload, "kvbench"),
+        ]
+        text = format_trend(entries)
+        self.assertIn(
+            "SET p99 first → last: 0.020 → 0.030 ms (+50.0%)", text)
+        self.assertIn(
+            "GET p99 first → last: 0.020 → 0.030 ms (+50.0%)", text)
+        self.assertIn(
+            "INCR p99 first → last: 0.020 → 0.030 ms (+50.0%)",
+            text)
+
+    def test_per_op_p99_missing_shows_no_per_op_p99_line(self):
+        # Per-op p99s missing from the record leave no per-op
+        # p99 line — while the overall p99 line still renders,
+        # since the overall p99 is recorded.
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(ops_per_sec=rate),
+                         workload, "kvbench")
+            for rate in (40000.0, 50000.0)
+        ]
+        for entry in entries:
+            for op_entry in entry["per_op"].values():
+                del op_entry["p99_ms"]
+        text = format_trend(entries)
+        self.assertIn(
+            "p99 first → last: 0.020 → 0.020 ms (+0.0%)", text)
+        self.assertNotIn("SET p99 first → last", text)
+        self.assertNotIn("GET p99 first → last", text)
+        self.assertNotIn("INCR p99 first → last", text)
 
     def test_records_without_per_op_render_no_per_op_sections(self):
         # History written before 0.22.0 has no "per_op" key: the
