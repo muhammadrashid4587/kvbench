@@ -13,7 +13,7 @@ from .distribution import ZipfianSampler
 
 
 def _workload_dict(workload):
-    return {
+    doc = {
         # In duration mode there is no fixed op target: ops is null
         # and the run length is under duration_s.
         "ops": None if workload.duration_s is not None else workload.ops,
@@ -61,10 +61,16 @@ def _workload_dict(workload):
         # null when they were given on the command line.
         "slo_preset": workload.slo_preset,
     }
+    if workload.repeat > 1:
+        # Only a repeated run records the repeat count: a single
+        # run's workload dict is unchanged, so old reports and
+        # --compare-same-workload keep matching.
+        doc["repeat"] = workload.repeat
+    return doc
 
 
 def _result_dict(result, top_n=5):
-    return {
+    doc = {
         "name": result.name,
         "ops": result.ops,
         "elapsed_s": result.elapsed_s,
@@ -95,6 +101,19 @@ def _result_dict(result, top_n=5):
         # (clients, ops, ops/sec, mean and p99); [] when no sweep ran.
         "client_sweep": result.client_sweep,
     }
+    if result.repeat_runs:
+        # Only a repeated run carries this: a single run's result
+        # dict is unchanged. ``runs`` is one summary per run (run
+        # index, ops, elapsed, ops/sec, errors, mean/p50/p95/p99,
+        # per-op ops/sec and p99); the top-level ops/sec, summary
+        # p99 and per-op figures are the medians over them.
+        doc["repeat"] = {
+            "runs": result.repeat_runs,
+            "median_ops_per_sec": result.median_ops_per_sec,
+            "median_p99_ms": result.median_p99_ms,
+            "median_per_op": result.median_per_op,
+        }
+    return doc
 
 
 def to_json_dict(results, workload, command_line, comparison=None,
@@ -351,6 +370,37 @@ def _sweep_lines(result):
             f"| {entry['keys']:,} | {entry['ops']} | "
             f"{entry['ops_per_sec']:,.0f} | {entry['mean_ms']:.3f} | "
             f"{entry['p99_ms']:.3f} |"
+        )
+    lines.append("")
+    return lines
+
+
+def _repeat_lines(result):
+    """Per-run table for a repeated result, or [] for a single run.
+
+    One row per run with its ops/sec and p99, so the spread behind
+    the reported medians is visible; the summary table above
+    already shows the medians themselves.
+    """
+    if not result.repeat_runs:
+        return []
+    lines = [
+        f"### Repeat runs — {result.name}",
+        "",
+        f"Median of {len(result.repeat_runs)} runs "
+        f"({result.median_ops_per_sec:,.0f} ops/sec, "
+        f"p99 {result.median_p99_ms:.3f} ms).",
+        "",
+        "| Run | Ops | Ops/sec | Mean (ms) | p50 (ms) | p95 (ms) | "
+        "p99 (ms) | Errors |",
+        "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for entry in result.repeat_runs:
+        lines.append(
+            f"| {entry['run']} | {entry['ops']} | "
+            f"{entry['ops_per_sec']:,.0f} | {entry['mean_ms']:.3f} | "
+            f"{entry['p50_ms']:.3f} | {entry['p95_ms']:.3f} | "
+            f"{entry['p99_ms']:.3f} | {entry['errors']} |"
         )
     lines.append("")
     return lines
@@ -623,6 +673,16 @@ def render_markdown(results, workload, command_line, comparison=None,
         )
     else:
         client_sweep_line = None
+    if workload.repeat > 1:
+        repeat_line = (
+            f"- Repeat: {workload.repeat} runs (the same workload "
+            "run that many times; the reported ops/sec and p99 are "
+            "the medians over the runs, per operation as well as "
+            "overall, and the per-run values are in the Repeat runs "
+            "section below)"
+        )
+    else:
+        repeat_line = None
     lines = [
         "# kvbench report",
         "",
@@ -650,6 +710,8 @@ def render_markdown(results, workload, command_line, comparison=None,
         lines.append(sweep_line)
     if client_sweep_line is not None:
         lines.append(client_sweep_line)
+    if repeat_line is not None:
+        lines.append(repeat_line)
     lines += [
         "",
         "## Results",
@@ -676,6 +738,11 @@ def render_markdown(results, workload, command_line, comparison=None,
         client_sweep_lines += _client_sweep_lines(result)
     if client_sweep_lines:
         lines += ["", "## Client sweep", ""] + client_sweep_lines
+    repeat_lines = []
+    for result in results:
+        repeat_lines += _repeat_lines(result)
+    if repeat_lines:
+        lines += ["", "## Repeat runs", ""] + repeat_lines
     per_op_lines = []
     for result in results:
         per_op_lines += _per_op_lines(result)
@@ -783,6 +850,18 @@ def render_markdown(results, workload, command_line, comparison=None,
             "how concurrency affects throughput — where adding "
             "clients stops helping and the server saturates; the main "
             "results table above uses the base client count."
+        )
+    if workload.repeat > 1:
+        lines.append(
+            "- With --repeat the workload ran "
+            f"{workload.repeat} times and the reported ops/sec and "
+            "p99 are the medians over the runs, per operation as "
+            "well as overall; the mean, p50, p95, histogram, tail "
+            "attribution and per-second series come from the run "
+            "whose ops/sec is the median, and the Repeat runs "
+            "section lists every run's ops/sec and p99. The JSON "
+            "report carries the same per-run values under "
+            "`results[].repeat.runs`."
         )
     if comparison is not None:
         baseline_desc = (

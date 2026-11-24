@@ -228,6 +228,12 @@ python -m kvbench.cli --ops 20000 --clients 4 --duration 10s \
 # before a reply counts as a timeout — or fail fast on a dead one
 python -m kvbench.cli --ops 20000 --clients 4 --timeout 30
 python -m kvbench.cli --ops 20000 --clients 4 --timeout 1
+
+# run the same benchmark 3 times and report the median ops/sec and
+# p99 over the 3 runs, so one noisy run does not set the numbers —
+# the per-run values land in the JSON report under
+# results[].repeat.runs
+python -m kvbench.cli --ops 20000 --clients 4 --repeat 3
 ```
 
 Pipelined latencies are the batch round-trip time divided by the batch
@@ -241,6 +247,10 @@ Options: `--host` (default 127.0.0.1), `--port` (default 6379),
 server connection — connect and read; raise it for a loaded or
 remote server, lower it to fail fast on a dead one; a non-positive
 value is rejected),
+`--repeat` (default 1, how many times to run the benchmark: above
+1 the reported ops/sec and p99 are the medians over the runs,
+per operation as well as overall, and the per-run values are
+recorded in the JSON report; a non-positive value is rejected),
 `--ops` (default 10000), `--duration` (e.g. `10s` or `2m`; a fixed
 wall-clock run instead of a fixed op count — mutually exclusive
 with `--ops`), `--clients` (default 4), `--keys` (default
@@ -760,6 +770,15 @@ make test
 
 ## Roadmap
 
+- ~~Repeat runs (`--repeat N`): run the benchmark N times and
+  report the median ops/sec and p99 over the N runs, per
+  operation as well as overall, with the per-run values recorded
+  in the JSON report (`results[].repeat.runs`) and a per-run
+  table in the Markdown report; the mean, p50, p95, histogram,
+  tail attribution and per-second series come from the run whose
+  ops/sec is the median. A single run keeps the old JSON shape
+  exactly (no `repeat` key), and a non-positive N fails (exit 2)
+  before any benchmark runs.~~ Done in 0.27.0.
 - ~~Configurable socket timeout (`--timeout SECONDS`): the
   connect and read timeout for the RESP connection, 5 s by
   default — raise it for a loaded or remote server, lower it to

@@ -18,6 +18,19 @@ def percentile(sorted_samples, p):
     return sorted_samples[max(0, min(index, len(sorted_samples) - 1))]
 
 
+def median(values):
+    """Median of a sequence: the middle value, or the mean of the
+    two middle values for an even count."""
+    if not values:
+        raise ValueError("median of empty data")
+    ordered = sorted(values)
+    n = len(ordered)
+    mid = n // 2
+    if n % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2
+
+
 def summarize(latencies_ns):
     """Summarize a list of latencies (ns) into a dict of ms figures."""
     if not latencies_ns:

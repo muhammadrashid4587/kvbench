@@ -17,7 +17,8 @@ import time
 from dataclasses import dataclass, field, replace
 
 from .distribution import ZipfianSampler
-from .stats import attribute_tail, histogram, summarize, time_series
+from .stats import attribute_tail, histogram, median, summarize, \
+    time_series
 
 
 def format_duration(seconds):
@@ -113,6 +114,13 @@ class Workload:
     # so the reports can say where the thresholds came from; the
     # thresholds themselves live in the fields above.
     slo_preset: str = None
+    # How many times to run the benchmark (``--repeat``): 1 is the
+    # old single-run behaviour. Above 1 the workload is run that
+    # many times and the reported ops/sec and p99 are the medians
+    # over the runs (see run_repeated_workload) — a median is
+    # steadier than one run when the machine is noisy. Each repeat
+    # is a full fresh run, warmup included.
+    repeat: int = 1
 
     def __post_init__(self):
         if self.clients <= 0 or self.keys <= 0:
@@ -136,6 +144,8 @@ class Workload:
             raise ValueError("hot_keys must be non-negative")
         if self.timeout_s <= 0:
             raise ValueError("timeout must be positive")
+        if not isinstance(self.repeat, int) or self.repeat < 1:
+            raise ValueError("repeat must be a positive integer")
         if any(not isinstance(size, int) or size <= 0
                for size in self.sweep_keyspace):
             raise ValueError("sweep keyspace sizes must be positive integers")
@@ -236,6 +246,24 @@ class BenchmarkResult:
     # p99 latency of that run. Empty when no sweep ran
     # (``--sweep-clients`` not given). Same shape as ``sweep``.
     client_sweep: list = field(default_factory=list)
+    # Repeated-run detail (see run_repeated_workload): one summary
+    # dict per run, in run order, each with the run index (``run``),
+    # ops, elapsed, ops/sec, errors, mean/p50/p95/p99 and the
+    # per-op ops/sec and p99. Empty for a single run — the JSON
+    # shape for a single run is unchanged.
+    repeat_runs: list = field(default_factory=list)
+    # Median ops/sec over the repeated runs, or None for a single
+    # run. When set, ``ops_per_sec`` reports this instead of
+    # ops / elapsed.
+    median_ops_per_sec: float = None
+    # Median p99 (ms) over the repeated runs, or None for a single
+    # run. When set, ``summary`` reports this as its p99.
+    median_p99_ms: float = None
+    # Median per-op figures over the repeated runs, or {} for a
+    # single run: op name to {"ops_per_sec", "p99_ms"}. An op that
+    # ran in no repeat is absent. When set, ``per_op_summary``
+    # reports these medians for the ops it covers.
+    median_per_op: dict = field(default_factory=dict)
 
     @property
     def hot_hit_rate(self):
@@ -245,11 +273,20 @@ class BenchmarkResult:
 
     @property
     def ops_per_sec(self):
+        if self.median_ops_per_sec is not None:
+            return self.median_ops_per_sec
         return self.ops / self.elapsed_s if self.elapsed_s > 0 else 0.0
 
     @property
     def summary(self):
-        return summarize(self.latencies_ns)
+        # The median p99 replaces the representative run's own p99:
+        # the reported p99 is the median over the repeated runs,
+        # while mean/p50/p95/min/max come from the representative
+        # (median) run's latencies.
+        summary = summarize(self.latencies_ns)
+        if self.median_p99_ms is not None:
+            summary["p99_ms"] = self.median_p99_ms
+        return summary
 
     @property
     def per_op_summary(self):
@@ -257,7 +294,9 @@ class BenchmarkResult:
 
         Each entry is the :func:`summarize` dict for that op plus its
         own ``ops_per_sec`` (count / elapsed). Ops with no samples are
-        left out, so a read-only mix reports GET alone.
+        left out, so a read-only mix reports GET alone. For a
+        repeated run the ops/sec and p99 of each op are the medians
+        over the repeats, like the overall figures.
         """
         out = {}
         for op in ("SET", "GET", "INCR"):
@@ -268,6 +307,10 @@ class BenchmarkResult:
             entry["ops_per_sec"] = (
                 len(samples) / self.elapsed_s if self.elapsed_s > 0 else 0.0
             )
+            medians = self.median_per_op.get(op)
+            if medians is not None:
+                entry["ops_per_sec"] = medians["ops_per_sec"]
+                entry["p99_ms"] = medians["p99_ms"]
             out[op] = entry
         return out
 
@@ -649,6 +692,77 @@ def run_workload(client_factory, workload, name):
         hot_ops=hot_ops,
         warmup_ops=warmup_ops,
     )
+
+
+def run_repeated_workload(client_factory, workload, name, repeat):
+    """Run the workload ``repeat`` times and report the medians.
+
+    Each run is a fresh :func:`run_workload` call — same workload,
+    same seed, so every run measures the same keys and op mix; only
+    the machine noise differs. Returns the run whose ops/sec is the
+    median (the lower middle for an even count) as the
+    representative result: its latencies back the mean, p50, p95,
+    histogram, per-op splits, tail attribution and time series, and
+    its sweep fields stay empty (sweeps run once, on the result —
+    see the CLI). The result's reported ops/sec and p99 are the
+    medians over all ``repeat`` runs, per operation as well as
+    overall, and ``repeat_runs`` carries one summary dict per run
+    (run index, ops, elapsed, ops/sec, errors, mean/p50/p95/p99,
+    per-op ops/sec and p99), so a report can show the spread. A
+    run that cannot reach the backend raises, like
+    :func:`run_workload` does — the repeat stops there instead of
+    reporting a median over partial runs.
+    """
+    if repeat < 1:
+        raise ValueError("repeat must be a positive integer")
+    runs = []
+    for _ in range(repeat):
+        runs.append(run_workload(client_factory, workload, name))
+    per_run = []
+    for index, run in enumerate(runs):
+        run_summary = run.summary
+        per_run.append({
+            "run": index + 1,
+            "ops": run.ops,
+            "elapsed_s": run.elapsed_s,
+            "ops_per_sec": run.ops_per_sec,
+            "errors": run.errors,
+            "mean_ms": run_summary["mean_ms"],
+            "p50_ms": run_summary["p50_ms"],
+            "p95_ms": run_summary["p95_ms"],
+            "p99_ms": run_summary["p99_ms"],
+            "per_op": {
+                op: {
+                    "ops": entry["count"],
+                    "ops_per_sec": entry["ops_per_sec"],
+                    "p99_ms": entry["p99_ms"],
+                }
+                for op, entry in run.per_op_summary.items()
+            },
+        })
+    # The representative run is the median by ops/sec; the reported
+    # ops/sec is the median over the runs (identical to the
+    # representative run's own ops/sec for an odd count).
+    by_ops = sorted(runs, key=lambda r: r.ops_per_sec)
+    representative = by_ops[(len(by_ops) - 1) // 2]
+    median_per_op = {}
+    for op in ("SET", "GET", "INCR"):
+        ops_values = [entry["per_op"][op]["ops_per_sec"]
+                      for entry in per_run if op in entry["per_op"]]
+        p99_values = [entry["per_op"][op]["p99_ms"]
+                      for entry in per_run if op in entry["per_op"]]
+        if ops_values:
+            median_per_op[op] = {
+                "ops_per_sec": median(ops_values),
+                "p99_ms": median(p99_values),
+            }
+    representative.repeat_runs = per_run
+    representative.median_ops_per_sec = median(
+        [entry["ops_per_sec"] for entry in per_run])
+    representative.median_p99_ms = median(
+        [entry["p99_ms"] for entry in per_run])
+    representative.median_per_op = median_per_op
+    return representative
 
 
 def run_keyspace_sweep(client_factory, workload, sizes):

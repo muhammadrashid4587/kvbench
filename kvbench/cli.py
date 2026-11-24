@@ -91,7 +91,8 @@ from datetime import datetime, timezone
 
 from . import __version__
 from .bench import DictClient, Workload, format_duration, \
-    run_client_sweep, run_keyspace_sweep, run_workload
+    run_client_sweep, run_keyspace_sweep, run_repeated_workload, \
+    run_workload
 from .compare import compare_results, format_verdict, load_baseline, \
     load_history_baseline
 from .history import DEFAULT_HISTORY_FILE, export_history, \
@@ -385,6 +386,12 @@ def build_parser():
                         help="re-run the same workload once per "
                         "client count, e.g. 1,2,4,8, and report "
                         "ops/sec and p99 per count")
+    parser.add_argument("--repeat", type=int, default=1, metavar="N",
+                        help="run the benchmark N times and report the "
+                        "median ops/sec and p99 over the N runs "
+                        "(per operation too); the per-run values are "
+                        "recorded in the JSON report (default 1: a "
+                        "single run, unchanged behaviour)")
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--baseline", action="store_true",
                         help="also run the in-process dict baseline")
@@ -683,6 +690,9 @@ def main(argv=None):
                        if args.sweep_keyspace else [])
         client_counts = (_parse_client_sweep(args.sweep_clients)
                          if args.sweep_clients else [])
+        if args.repeat < 1:
+            raise ValueError(
+                "--repeat must be a positive integer")
         if duration_s is not None and args.ops is not None:
             raise ValueError(
                 "--ops and --duration are mutually exclusive: "
@@ -763,6 +773,7 @@ def main(argv=None):
             hot_keys=args.hot_keys,
             sweep_keyspace=sweep_sizes,
             sweep_clients=client_counts,
+            repeat=args.repeat,
             slo_p99_ms=slo_p99_ms,
             slo_error_rate_pct=slo_error_rate,
             slo_per_op=slo_per_op,
@@ -852,6 +863,28 @@ def main(argv=None):
     def server_factory():
         return RespClient(args.host, args.port, timeout=args.timeout)
 
+    def _run(factory, name):
+        """Run the workload once, or --repeat times and report the
+        medians. In repeat mode one line per run prints first (its
+        ops/sec, p99 and errors), and the result the caller prints
+        afterwards carries the medians — see
+        :func:`kvbench.bench.run_repeated_workload`."""
+        if args.repeat > 1:
+            result = run_repeated_workload(factory, workload, name,
+                                           args.repeat)
+            for entry in result.repeat_runs:
+                print(f"  run {entry['run']}/{args.repeat}: "
+                      f"{entry['ops_per_sec']:,.0f} ops/sec, "
+                      f"p99 {entry['p99_ms']:.3f} ms, "
+                      f"errors {entry['errors']}")
+            return result
+        return run_workload(factory, workload, name)
+
+    # Appended to each summary line in repeat mode, so the printed
+    # ops/sec and p99 read as the medians they are.
+    median_note = (f", median of {args.repeat} runs"
+                   if args.repeat > 1 else "")
+
     scope = (f"{format_duration(duration_s)} duration"
              if duration_s is not None else f"{workload.ops} ops")
     if warmup_s:
@@ -860,8 +893,7 @@ def main(argv=None):
           f"{workload.clients} clients, pipeline depth "
           f"{workload.pipeline} against {args.host}:{args.port}")
     try:
-        result = run_workload(server_factory, workload,
-                              f"cinder ({args.host}:{args.port})")
+        result = _run(server_factory, f"cinder ({args.host}:{args.port})")
     except (ConnectionError, OSError) as exc:
         print(f"kvbench: cannot reach {args.host}:{args.port}: {exc}",
               file=sys.stderr)
@@ -870,7 +902,7 @@ def main(argv=None):
     print(f"  {result.name}: {result.ops_per_sec:,.0f} ops/sec, "
           f"p50 {result.summary['p50_ms']:.3f} ms, "
           f"p95 {result.summary['p95_ms']:.3f} ms, "
-          f"errors {result.errors}{_warmup_note(result)}")
+          f"errors {result.errors}{_warmup_note(result)}{median_note}")
     _run_sweep(server_factory, result)
     _run_client_sweep(server_factory, result)
 
@@ -881,8 +913,7 @@ def main(argv=None):
         print(f"kvbench {__version__}: same workload against "
               f"{host}:{port}")
         try:
-            compared = run_workload(compare_factory, workload,
-                                    f"compare ({host}:{port})")
+            compared = _run(compare_factory, f"compare ({host}:{port})")
         except (ConnectionError, OSError) as exc:
             print(f"kvbench: cannot reach {host}:{port}: {exc}",
                   file=sys.stderr)
@@ -891,17 +922,18 @@ def main(argv=None):
         print(f"  {compared.name}: {compared.ops_per_sec:,.0f} ops/sec, "
               f"p50 {compared.summary['p50_ms']:.3f} ms, "
               f"p95 {compared.summary['p95_ms']:.3f} ms, "
-              f"errors {compared.errors}{_warmup_note(compared)}")
+              f"errors {compared.errors}{_warmup_note(compared)}"
+              f"{median_note}")
         _run_sweep(compare_factory, compared)
         _run_client_sweep(compare_factory, compared)
 
     if args.baseline:
-        baseline = run_workload(DictClient, workload, "baseline (dict)")
+        baseline = _run(DictClient, "baseline (dict)")
         results.append(baseline)
         print(f"  {baseline.name}: {baseline.ops_per_sec:,.0f} ops/sec, "
               f"p50 {baseline.summary['p50_ms']:.3f} ms, "
               f"p95 {baseline.summary['p95_ms']:.3f} ms"
-              f"{_warmup_note(baseline)}")
+              f"{_warmup_note(baseline)}{median_note}")
         _run_sweep(DictClient, baseline)
         _run_client_sweep(DictClient, baseline)
 
