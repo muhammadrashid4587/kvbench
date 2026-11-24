@@ -589,7 +589,17 @@ sparkline and first-to-last change — so a SET regression reads
 at a glance even when GETs dominate the mix. Runs recorded
 before 0.22.0 carry no per-op data and simply show no per-op
 sections; a run that never ran an op (a read-only mix has no
-SET) leaves that op out of its own table.
+SET) leaves that op out of its own table. Each backend's trend
+also ends with the latest run's per-operation latency
+histograms — the same log-spaced buckets per operation that ran
+as the regular run's `histograms_by_op`, drawn with the same
+shared helper as the `--best-worst` output and the single-run
+report, so the views cannot disagree — so a p99 move in the
+trend names the op whose latency shape moved. History records
+carry the histograms since 0.43.0; a latest run recorded before
+that, one recorded with no per-op latencies, or one whose
+recorded histograms are malformed shows a note naming the
+reason instead of a histogram block.
 
 A sweep run recorded with `--history` also records each sweep
 step — one ops/sec and p99 per keyspace size, client count, value
@@ -1079,6 +1089,21 @@ make test
 
 ## Roadmap
 
+- Per-operation latency histograms in the `--trend` output:
+  each backend's trend ends with its latest run's per-operation
+  latency histograms — the same log-spaced buckets per operation
+  that ran as the regular run's `histograms_by_op`, drawn with
+  the shared histogram-block helper so the trend view cannot
+  disagree with `--best-worst`, `--compare` or the single-run
+  output — so a p99 move in the trend names the op whose
+  latency shape moved, not just that the p99 moved. The
+  histograms are recorded in the history record
+  (`histograms_by_op`) when a run is recorded with `--history`;
+  a latest run recorded before 0.43.0 carries none, one
+  recorded with no per-op latencies carries an empty mapping,
+  and a hand-made record may carry a malformed one — each
+  renders a note naming the reason instead of a histogram
+  block. Done in 0.44.0.
 - Per-operation latency histograms in the `--best-worst`
   output: each picked run carries the same log-spaced buckets
   per operation that ran as the regular run's

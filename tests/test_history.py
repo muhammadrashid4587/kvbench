@@ -429,6 +429,97 @@ class TestFormatTrend(unittest.TestCase):
         self.assertNotIn("#### GET ops/sec trend", text)
         self.assertNotIn("#### INCR ops/sec trend", text)
 
+    def test_trend_shows_latest_runs_per_op_histograms(self):
+        # Two mixed runs; the latest run's SET latencies are
+        # slower (200_000 ns lands in the 0.25 ms bucket, the
+        # first run's 20_000 ns in the 0.1 ms bucket), so only
+        # the latest run's shape can show.
+        workload = _make_workload()
+        first = _make_mixed_result(ops_per_sec=40000.0)
+        latest = _make_result(
+            ops=1000, ops_per_sec=50000.0,
+            latencies_by_op={
+                "SET": [200_000] * 500,
+                "GET": [20_000] * 400,
+                "INCR": [20_000] * 100,
+            })
+        entries = [
+            build_record(first, workload, "kvbench"),
+            build_record(latest, workload, "kvbench"),
+        ]
+        text = format_trend(entries)
+        timestamp = entries[-1]["timestamp"][:19].replace("T", " ")
+        self.assertIn(
+            "#### Per-op latency histogram — latest run "
+            f"({timestamp})",
+            text)
+        self.assertIn("SET (500 ops)", text)
+        self.assertIn("GET (400 ops)", text)
+        self.assertIn("INCR (100 ops)", text)
+        # The latest run's SET shape, not the first run's.
+        self.assertIn("- <= 0.25 ms: 500 (100.0%)", text)
+        self.assertNotIn("- <= 0.1 ms: 500 (100.0%)", text)
+        self.assertEqual(
+            text.count("#### Per-op latency histogram — latest run"),
+            1)
+
+    def test_trend_without_histograms_names_the_reason(self):
+        # A history record written before 0.43.0 carries no
+        # "histograms_by_op" key: the trend still renders, with
+        # a note saying why there is no histogram block.
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(), workload, "kvbench"),
+        ]
+        del entries[0]["histograms_by_op"]
+        text = format_trend(entries)
+        self.assertIn("recorded before 0.43.0", text)
+        self.assertNotIn("Per-op latency histogram — latest run",
+                         text)
+
+    def test_trend_with_no_per_op_latencies_names_the_reason(self):
+        # A run recorded with no per-op latencies carries an
+        # empty histograms mapping: a note, not a block.
+        workload = _make_workload()
+        entries = [
+            build_record(_make_result(), workload, "kvbench"),
+        ]
+        self.assertEqual(entries[0]["histograms_by_op"], {})
+        text = format_trend(entries)
+        self.assertIn("recorded no per-op latencies", text)
+        self.assertNotIn("Per-op latency histogram — latest run",
+                         text)
+
+    def test_trend_with_malformed_histograms_names_the_reason(self):
+        # A hand-made history file may carry a histograms
+        # mapping that is not op name to bucket list: a note
+        # naming that, instead of a crash.
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(), workload, "kvbench"),
+        ]
+        entries[0]["histograms_by_op"] = {"SET": {"upper_ms": 0.1}}
+        text = format_trend(entries)
+        self.assertIn("histograms are malformed", text)
+        self.assertNotIn("Per-op latency histogram — latest run",
+                         text)
+
+    def test_each_backend_gets_its_own_latest_histogram(self):
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(_make_result(
+                name="baseline (dict)", ops_per_sec=90000.0,
+                latencies_by_op={"GET": [20_000] * 1000}),
+                workload, "kvbench"),
+        ]
+        text = format_trend(entries)
+        self.assertEqual(
+            text.count("#### Per-op latency histogram — latest run"),
+            2)
+        self.assertIn("GET (1000 ops)", text)
+
     def test_corrupt_lines_never_reach_the_chart(self):
         # load_history skips the corrupt line; the trend renders
         # from the records that survived.

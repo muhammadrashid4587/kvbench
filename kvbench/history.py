@@ -22,7 +22,11 @@ each record also carries its per-operation latency histograms,
 so the best/worst view shows each picked run's latency shape —
 the best and worst runs' full per-op maps, and each per-op
 pick's own buckets — drawn with the same shared helper as the
-single-run report, so the views cannot disagree. Since 0.37.0
+single-run report, so the views cannot disagree. Since 0.44.0
+the trend view shows each backend's latest run's per-operation
+latency histograms too, drawn with the same shared helper, so
+a p99 move in the trend names the op whose latency shape moved.
+Since 0.37.0
 each record also carries its sweep steps — one ops/sec and p99
 per keyspace size, client count, value size and pipeline depth —
 so the trend view tracks every sweep step on its own, and a step's
@@ -471,6 +475,48 @@ def _sweep_trend_lines(runs, window):
     return lines
 
 
+def _trend_histogram_lines(entry):
+    """Per-op latency histogram block for one trend run, or a note.
+
+    ``entry`` is the backend's latest run in the trend window —
+    the last trend step — so the chart ends with where each
+    op's latency sits now, not just where throughput went. The
+    block is drawn with the same shared helper the best/worst
+    view and the single-run report use, so the views cannot
+    disagree. A run recorded before 0.43.0 carries no
+    ``histograms_by_op`` key at all; a run recorded with no
+    per-op latencies carries an empty mapping; a hand-made
+    history file may carry something else entirely — each
+    renders a note naming the reason instead of a block, so the
+    trend never crashes on a record shape it cannot draw.
+    """
+    timestamp = entry.get("timestamp", "")[:19].replace("T", " ")
+    histograms = entry.get("histograms_by_op")
+    if histograms is None:
+        return [
+            f"- {timestamp}: recorded before 0.43.0, so this run "
+            "carries no per-op histograms.",
+            "",
+        ]
+    cleaned = _histograms_or_none(histograms)
+    if cleaned is not None:
+        return _per_op_histogram_block(
+            "#### Per-op latency histogram — latest run "
+            f"({timestamp})",
+            cleaned)
+    if not histograms:
+        return [
+            f"- {timestamp}: this run recorded no per-op "
+            "latencies, so there are no histograms to show.",
+            "",
+        ]
+    return [
+        f"- {timestamp}: the recorded per-op histograms are "
+        "malformed, so no histograms are shown.",
+        "",
+    ]
+
+
 def format_trend(entries, limit=20):
     """Render an ops/sec-over-time trend chart per backend.
 
@@ -483,7 +529,13 @@ def format_trend(entries, limit=20):
     that ran, so each op's throughput trend reads on its own, and
     the same chart per sweep step (keyspace size, client count,
     value size, pipeline depth, read:write ratio) for the steps
-    that ran, so a step's throughput trend reads on its own too. A
+    that ran, so a step's throughput trend reads on its own too,
+    and the latest run's per-operation latency histograms, so a
+    p99 move in the trend names the op whose latency shape moved.
+    Runs recorded before 0.43.0 carry no per-op histograms and
+    render a note naming that instead of a histogram block, as
+    do runs recorded with no per-op latencies and records whose
+    histograms are malformed. A
     corrupt line never reaches here — ``load_history`` already
     skips it — and a backend with a single recorded run shows no
     delta, just its one value.
@@ -537,6 +589,10 @@ def format_trend(entries, limit=20):
         # Per-sweep-step trend, same shape again, one section per
         # sweep step that ran in this window.
         sections.extend(_sweep_trend_lines(runs, window))
+        # Per-op latency histograms for the backend's latest run
+        # in the window — the last trend step — so the chart ends
+        # with where each op's latency sits now.
+        sections.extend(_trend_histogram_lines(window[-1]))
     return "\n".join(sections)
 
 
