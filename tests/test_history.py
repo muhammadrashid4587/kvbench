@@ -1811,6 +1811,204 @@ class TestFormatBestWorst(unittest.TestCase):
                       format_best_worst(entries, workload=reference))
 
 
+class TestBestWorstSweepSteps(unittest.TestCase):
+    def _step_record(self, ops_per_sec, set_count=500,
+                     get_count=400, keys=100, clients=None,
+                     value_size=None, pipeline=None, mix=None,
+                     histograms="real", p99_ms=0.020):
+        # One recorded run whose sweep step(s) carry per-op
+        # histograms: SET set_count samples and GET get_count
+        # samples, all in the <= 0.1 ms bucket. ``histograms``
+        # picks the shape under test: "real" (valid bucket
+        # lists), "empty" (no per-op latencies), "malformed"
+        # (a bucket list that is not a list), or "missing" (no
+        # key at all — a run recorded before 0.49.0).
+        result = _make_result(ops_per_sec=ops_per_sec)
+        step = {"keys": keys, "ops": 1000,
+                "ops_per_sec": ops_per_sec,
+                "mean_ms": 0.020, "p99_ms": p99_ms}
+        if histograms == "real":
+            step["histograms_by_op"] = {
+                "SET": [{"upper_ms": 0.1, "count": set_count}],
+                "GET": [{"upper_ms": 0.1, "count": get_count}],
+            }
+        elif histograms == "empty":
+            step["histograms_by_op"] = {}
+        elif histograms == "malformed":
+            step["histograms_by_op"] = {"SET": {}}
+        result.sweep = [step]
+        if clients is not None:
+            client_step = dict(step)
+            client_step["clients"] = clients
+            del client_step["keys"]
+            result.client_sweep = [client_step]
+        if value_size is not None:
+            value_step = dict(step)
+            value_step["value_size"] = value_size
+            del value_step["keys"]
+            result.value_sweep = [value_step]
+        if pipeline is not None:
+            pipeline_step = dict(step)
+            pipeline_step["pipeline"] = pipeline
+            del pipeline_step["keys"]
+            result.pipeline_sweep = [pipeline_step]
+        if mix is not None:
+            mix_step = dict(step)
+            mix_step["mix"] = mix
+            del mix_step["keys"]
+            result.mix_sweep = [mix_step]
+        return build_record(result, _make_workload(), "kvbench")
+
+    def test_step_table_and_histogram_blocks(self):
+        # The core of the feature: each sweep-step section in
+        # --best-worst carries its own best-vs-worst table and
+        # the step's per-op histograms from its best and worst
+        # runs — the best run's shape (SET 300) under the best
+        # heading, the worst run's (SET 500) under the worst.
+        entries = [
+            self._step_record(40000.0, set_count=500),
+            self._step_record(60000.0, set_count=300),
+        ]
+        text = format_best_worst(entries)
+        self.assertIn("#### Keyspace sweep — 100 keys", text)
+        self.assertIn("| Ops/sec | 60,000 | 40,000 | +50.0% |", text)
+        self.assertIn(
+            "#### Keyspace sweep — 100 keys — per-op latency "
+            "histogram — best run", text)
+        self.assertIn(
+            "#### Keyspace sweep — 100 keys — per-op latency "
+            "histogram — worst run", text)
+        self.assertIn("SET (300 ops)", text)
+        self.assertIn("SET (500 ops)", text)
+        self.assertIn("GET (400 ops)", text)
+        self.assertIn("- <= 0.1 ms: 300 (100.0%)", text)
+
+    def test_step_pick_is_per_step_not_per_run(self):
+        # The step's best run is picked by the step's own
+        # ops/sec: here the run that won overall lost this step,
+        # so the step's best block shows the other run's shape.
+        entries = [
+            self._step_record(40000.0, set_count=500, p99_ms=0.020),
+            self._step_record(60000.0, set_count=300, p99_ms=0.020),
+        ]
+        # Flip the step rates: the first run's step is faster.
+        entries[0]["sweeps"]["keyspace"][0]["ops_per_sec"] = 70000.0
+        entries[1]["sweeps"]["keyspace"][0]["ops_per_sec"] = 50000.0
+        text = format_best_worst(entries)
+        self.assertIn("| Ops/sec | 70,000 | 50,000 | +40.0% |", text)
+        best_heading = (
+            "#### Keyspace sweep — 100 keys — per-op latency "
+            "histogram — best run")
+        best_block = text[text.index(best_heading):]
+        self.assertIn("SET (500 ops)", best_block)
+
+    def test_all_five_sweep_kinds_render(self):
+        entries = [
+            self._step_record(40000.0, keys=100, clients=4,
+                              value_size=128, pipeline=5,
+                              mix="90:10"),
+            self._step_record(50000.0, keys=100, clients=4,
+                              value_size=128, pipeline=5,
+                              mix="90:10"),
+        ]
+        text = format_best_worst(entries)
+        self.assertIn("#### Keyspace sweep — 100 keys", text)
+        self.assertIn("#### Client sweep — 4 clients", text)
+        self.assertIn(
+            "#### Value size sweep — 128 byte values", text)
+        self.assertIn("#### Pipeline sweep — 5 commands", text)
+        self.assertIn("#### Mix sweep — 90:10 read:write", text)
+        self.assertEqual(
+            text.count("#### Keyspace sweep — 100 keys\n"), 1)
+
+    def test_single_run_step_has_no_spread(self):
+        # One run of a step is both its best and its worst, with
+        # 0.0% deltas — and both blocks show that run's shape.
+        entries = [self._step_record(50000.0, set_count=500)]
+        text = format_best_worst(entries)
+        self.assertIn("#### Keyspace sweep — 100 keys", text)
+        self.assertIn("| Ops/sec | 50,000 | 50,000 | +0.0% |", text)
+        self.assertIn(
+            "#### Keyspace sweep — 100 keys — per-op latency "
+            "histogram — best run", text)
+        self.assertIn(
+            "#### Keyspace sweep — 100 keys — per-op latency "
+            "histogram — worst run", text)
+
+    def test_step_recorded_before_0_49_shows_note(self):
+        # A step with no histograms_by_op key was recorded before
+        # 0.49.0: each pick's section names that instead of a
+        # block.
+        entries = [self._step_record(40000.0, histograms="missing"),
+                   self._step_record(50000.0, histograms="missing")]
+        text = format_best_worst(entries)
+        self.assertIn(
+            "this step was recorded before 0.49.0, so it carries "
+            "no per-op histograms.", text)
+        self.assertNotIn(
+            "Keyspace sweep — 100 keys — per-op latency histogram",
+            text)
+
+    def test_step_with_no_per_op_latencies_shows_note(self):
+        entries = [self._step_record(40000.0, histograms="empty"),
+                   self._step_record(50000.0, histograms="empty")]
+        text = format_best_worst(entries)
+        self.assertIn(
+            "this step recorded no per-op latencies, so there are "
+            "no histograms to show.", text)
+        self.assertNotIn(
+            "Keyspace sweep — 100 keys — per-op latency histogram",
+            text)
+
+    def test_step_malformed_histograms_shows_note(self):
+        entries = [self._step_record(40000.0,
+                                     histograms="malformed"),
+                   self._step_record(50000.0,
+                                     histograms="malformed")]
+        text = format_best_worst(entries)
+        self.assertIn(
+            "the recorded per-op histograms for this step are "
+            "malformed, so no histograms are shown.", text)
+        self.assertNotIn(
+            "Keyspace sweep — 100 keys — per-op latency histogram",
+            text)
+
+    def test_records_without_sweeps_render_no_sweep_sections(self):
+        # History written before 0.37.0 has no "sweeps" key: the
+        # best/worst view renders no step sections at all.
+        workload = _make_workload()
+        entries = [
+            build_record(_make_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(_make_result(ops_per_sec=50000.0),
+                         workload, "kvbench"),
+        ]
+        for entry in entries:
+            self.assertNotIn("sweeps", entry)
+        text = format_best_worst(entries)
+        self.assertNotIn("sweep —", text)
+
+    def test_workload_filter_limits_sweep_sections(self):
+        # With --compare-same-workload only matching runs are
+        # compared: a step that ran only in a run with a
+        # different workload gets no section.
+        other = Workload(ops=1000, clients=8, keys=1000,
+                         value_size=32, set_weight=50, get_weight=40,
+                         incr_weight=10, seed=1234, pipeline=1)
+        entries = [
+            self._step_record(40000.0, keys=100),
+            self._step_record(50000.0, keys=100),
+        ]
+        foreign = self._step_record(60000.0, keys=200)
+        foreign["workload"] = build_record(
+            _make_result(), other, "kvbench")["workload"]
+        entries.append(foreign)
+        text = format_best_worst(entries,
+                                 workload=entries[0]["workload"])
+        self.assertIn("#### Keyspace sweep — 100 keys", text)
+        self.assertNotIn("#### Keyspace sweep — 200 keys", text)
+
+
 class TestWriteBestWorst(unittest.TestCase):
     def _entries(self, rates=(40000.0, 50000.0)):
         workload = _make_workload()

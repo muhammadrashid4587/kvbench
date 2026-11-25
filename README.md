@@ -681,7 +681,19 @@ as both best and worst, with 0.0% deltas and no histogram
 comparison, and a best or worst run recorded before 0.43.0,
 one recorded with no per-op latencies, or one whose recorded
 histograms are malformed renders a note naming the reason
-instead of a comparison table. With
+instead of a comparison table. Below the per-op sections each
+backend also gets one best-vs-worst section per sweep step that
+ran — the best and worst runs for that step by the step's own
+ops/sec, with the step's per-operation latency histograms from
+both runs, drawn with the same shared helper as the `--trend`
+view's per-step blocks, so the two views cannot disagree. The
+step's best and worst runs are picked independently of the
+overall pick, so a step that slowed down in the run that won
+overall still shows its own shape. A step recorded before
+0.49.0 carries no per-step histograms, a step recorded with no
+per-op latencies carries an empty mapping, and a step whose
+recorded histograms are malformed carries something else — each
+renders a note naming the reason instead of a block. With
 `--compare-same-workload` only runs whose workload matches the
 latest recorded run's are considered — the same
 apples-to-apples rule `--compare-history` uses, so a quick smoke
@@ -1134,6 +1146,22 @@ make test
 
 ## Roadmap
 
+- Per-sweep-step best-vs-worst sections in the `--best-worst`
+  output: each sweep step that ran gets its own best-vs-worst
+  section below the per-op sections — the best and worst runs
+  for that step by the step's own ops/sec, with the step's
+  per-op latency histograms from both runs, drawn with the same
+  shared histogram-block helper the `--trend` view's per-step
+  blocks use, so the two views cannot disagree and a p99 move
+  in a step names the op whose latency shape moved. The step's
+  best and worst runs are picked independently of the overall
+  pick, so a step that slowed down in the run that won overall
+  still shows its own shape. A step recorded in only one run
+  has that run as both best and worst, with 0.0% deltas; a step
+  recorded before 0.49.0, one recorded with no per-op
+  latencies, or one whose recorded histograms are malformed
+  renders a note naming the reason instead of a block. Done in
+  0.50.0.
 - Per-operation latency histograms per sweep step in the
   `--trend` output: each sweep-step trend section ends with
   the step's per-op histograms from the latest run that

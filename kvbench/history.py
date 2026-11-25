@@ -46,6 +46,11 @@ runs. Since 0.49.0 each recorded step also carries its
 per-operation latency histograms, so the trend view shows each
 step's latency shape — the same log-spaced buckets per operation
 as the main run's ``histograms_by_op`` — not just its p99.
+Since 0.50.0 the best/worst view shows the same per-step
+treatment — each sweep step's best and worst runs by the step's
+own ops/sec, with the step's per-op latency histograms from
+both runs — so a step's spread reads the same way in both
+views.
 """
 
 import json
@@ -439,6 +444,51 @@ def _sweep_step_entry(entry, kind, step_key, step_value):
     return None
 
 
+def _sweep_step_histogram_block(label, step_label, entry, step, pick):
+    """Per-op latency histogram block for one sweep step of one run, or a note.
+
+    ``pick`` names which run the step comes from — "latest" for
+    the trend view, "best" or "worst" for the best/worst view —
+    so the heading and the note name the run instead of leaving
+    two blocks (or two notes) for one step indistinguishable.
+    The block is drawn with the same shared helper the latest
+    run's block and the single-run report use, so the views
+    cannot disagree. A step recorded before 0.49.0 carries no
+    ``histograms_by_op`` key at all; a step recorded with no
+    per-op latencies carries an empty mapping; a hand-made
+    history file may carry something else entirely — each
+    renders a note naming the reason instead of a block, so the
+    views never crash on a record shape they cannot draw. The
+    returned lines carry no trailing blank line; the caller
+    adds the section separator.
+    """
+    timestamp = entry.get("timestamp", "")[:19].replace("T", " ")
+    heading = (f"#### {label} — {step_label} — per-op latency "
+               f"histogram — {pick} run ({timestamp})")
+    context = f"{label} — {step_label} ({pick} run, {timestamp})"
+    histograms = step.get("histograms_by_op")
+    if histograms is None:
+        return [
+            f"- {context}: this step was recorded before 0.49.0, "
+            "so it carries no per-op histograms.",
+        ]
+    cleaned = _histograms_or_none(histograms)
+    if cleaned is not None:
+        block = _per_op_histogram_block(heading, cleaned)
+        while block and block[-1] == "":
+            block.pop()
+        return block
+    if not histograms:
+        return [
+            f"- {context}: this step recorded no per-op "
+            "latencies, so there are no histograms to show.",
+        ]
+    return [
+        f"- {context}: the recorded per-op histograms for this "
+        "step are malformed, so no histograms are shown.",
+    ]
+
+
 def _sweep_step_histogram_lines(label, step_label, window, kind,
                                 step_key, step_value):
     """Per-op latency histogram block for one sweep step, or a note.
@@ -467,33 +517,8 @@ def _sweep_step_histogram_lines(label, step_label, window, kind,
             break
     if latest is None:
         return []
-    timestamp = latest.get("timestamp", "")[:19].replace("T", " ")
-    heading = (f"#### {label} — {step_label} — per-op latency "
-               f"histogram — latest run ({timestamp})")
-    histograms = latest_step.get("histograms_by_op")
-    if histograms is None:
-        return [
-            f"- {label} — {step_label} ({timestamp}): this step "
-            "was recorded before 0.49.0, so it carries no per-op "
-            "histograms.",
-        ]
-    cleaned = _histograms_or_none(histograms)
-    if cleaned is not None:
-        block = _per_op_histogram_block(heading, cleaned)
-        while block and block[-1] == "":
-            block.pop()
-        return block
-    if not histograms:
-        return [
-            f"- {label} — {step_label} ({timestamp}): this step "
-            "recorded no per-op latencies, so there are no "
-            "histograms to show.",
-        ]
-    return [
-        f"- {label} — {step_label} ({timestamp}): the recorded "
-        "per-op histograms for this step are malformed, so no "
-        "histograms are shown.",
-    ]
+    return _sweep_step_histogram_block(
+        label, step_label, latest, latest_step, "latest")
 
 
 def _sweep_trend_lines(runs, window):
@@ -1147,6 +1172,90 @@ def _best_worst_histogram_comparison(usable, best, worst):
     }
 
 
+def _best_worst_sweep_lines(runs):
+    """Per-sweep-step best-vs-worst sections for one backend.
+
+    ``runs`` are the backend's recorded runs (oldest first).
+    Each sweep step that ran — one keyspace size, one client
+    count, one value size, one pipeline depth, one read:write
+    ratio — gets its own best-vs-worst table: the best and worst
+    runs for that step by the step's own ops/sec, with the p99
+    for each and the percentage change between them — the same
+    table shape as the overall and per-op best/worst tables,
+    built from the same ``_best_worst_lines`` helper, so the
+    views cannot disagree — followed by the step's per-op
+    latency histograms from its best and worst runs, drawn with
+    the same shared helper the trend's per-step blocks use, so
+    a p99 move in a step names the op whose latency shape
+    moved. A step recorded in only one run has that run as both
+    best and worst, with 0.0% deltas; a step recorded before
+    0.49.0, one recorded with no per-op latencies, or one whose
+    recorded histograms are malformed renders a note naming the
+    reason instead of a block. A step that never ran gets no
+    section at all, and a step whose recorded ops/sec is not a
+    number is skipped instead of crashing the comparison.
+    """
+    lines = []
+    for kind, step_key, label, unit in _SWEEP_KINDS:
+        steps = sorted({
+            step.get(step_key)
+            for entry in runs
+            for step in (entry.get("sweeps") or {}).get(kind, [])
+            if isinstance(step, dict)
+            and isinstance(step.get(step_key), (int, float, str))
+        })
+        for step_value in steps:
+            if isinstance(step_value, str):
+                # A mix ratio reads as "90:10 read:write", not
+                # "90:10, read:write" — a string step value has no
+                # thousands separator to apply.
+                step_label = f"{step_value} {unit}"
+            else:
+                step_label = f"{step_value:,} {unit}"
+            pairs = []
+            for entry in runs:
+                step = _sweep_step_entry(entry, kind, step_key,
+                                         step_value)
+                if step is None:
+                    continue
+                numbers = _run_numbers(step)
+                if numbers is None:
+                    continue
+                # A step carries no timestamp of its own; the
+                # table shows the run it came from.
+                numbers["timestamp"] = entry.get(
+                    "timestamp", "")[:19].replace("T", " ")
+                pairs.append((entry, numbers))
+            pair = _best_worst_pair(pairs)
+            if pair is None:
+                continue
+            best, worst, ops_delta, p99_delta = pair
+            lines.extend(_best_worst_lines(
+                f"{label} — {step_label}", best, worst,
+                ops_delta, p99_delta))
+            best_entry = next(entry for entry, numbers in pairs
+                              if numbers is best)
+            worst_entry = next(entry for entry, numbers in pairs
+                               if numbers is worst)
+            # The step's per-op latency histograms from its best
+            # and worst runs — the same shared helper the
+            # trend's per-step blocks use, so a p99 move in the
+            # step names the op whose latency shape moved.
+            lines.extend(_sweep_step_histogram_block(
+                label, step_label, best_entry,
+                _sweep_step_entry(best_entry, kind, step_key,
+                                  step_value),
+                "best"))
+            lines.append("")
+            lines.extend(_sweep_step_histogram_block(
+                label, step_label, worst_entry,
+                _sweep_step_entry(worst_entry, kind, step_key,
+                                  step_value),
+                "worst"))
+            lines.append("")
+    return lines
+
+
 def best_worst_comparison(entries, workload=None):
     """Best-run vs worst-run comparison per backend.
 
@@ -1317,14 +1426,22 @@ def format_best_worst(entries, workload=None):
     type that ran, each followed by that op's histograms for its
     own best and worst runs — the per-op picks are independent of the
     overall picks, so a slow-write run that still won overall
-    shows its own shape. A backend with a single run, or runs
-    without usable histograms, gets a note naming the reason
-    instead of a comparison table. When ``workload`` is given, only runs
-    matching it were compared, and the header says which workload
-    that was. An empty history — or a filter that matches nothing
-    — prints the same "No runs recorded yet" message as
-    ``--trend``. Runs recorded before 0.43.0 carry no per-op
-    histograms and render a note instead of histogram blocks.
+    shows its own shape. Each sweep step that ran then gets its
+    own best-vs-worst section — the best and worst runs for that
+    step by the step's own ops/sec, with the step's per-op
+    latency histograms from both runs, drawn with the same
+    shared helper the trend's per-step blocks use, so a p99 move
+    in a step names the op whose latency shape moved. A backend
+    with a single run, or runs without usable histograms, gets a
+    note naming the reason instead of a comparison table. When
+    ``workload`` is given, only runs matching it were compared,
+    and the header says which workload that was. An empty history
+    — or a filter that matches nothing — prints the same "No runs
+    recorded yet" message as ``--trend``. Runs recorded before
+    0.43.0 carry no per-op histograms and render a note instead
+    of histogram blocks; a sweep step recorded before 0.49.0
+    carries no per-step histograms and renders a note instead
+    of a block.
     """
     comparison = best_worst_comparison(entries, workload=workload)
     if not comparison["backends"]:
@@ -1336,6 +1453,11 @@ def format_best_worst(entries, workload=None):
             "recorded run are compared "
             f"({_describe_workload(workload)}).")
         sections.append("")
+        entries = [e for e in entries
+                   if workload_matches(e.get("workload"), workload)]
+    by_backend = {}
+    for entry in entries:
+        by_backend.setdefault(entry.get("backend", "?"), []).append(entry)
     for backend in comparison["backends"]:
         sections.append(f"### {backend['backend']}")
         sections.append("")
@@ -1401,6 +1523,13 @@ def format_best_worst(entries, workload=None):
                 sections.extend(_per_op_histogram_block(
                     f"#### {op} — latency histogram ({label} run)",
                     {op: histogram}))
+        # Per-sweep-step best-vs-worst: each step that ran gets
+        # its own table and the step's per-op histograms from
+        # its best and worst runs — the same shared helper the
+        # trend's per-step blocks use — so a p99 move in a step
+        # names the op whose latency shape moved.
+        sections.extend(_best_worst_sweep_lines(
+            by_backend.get(backend["backend"], [])))
     return "\n".join(sections)
 
 
