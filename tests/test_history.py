@@ -110,64 +110,90 @@ class TestBuildRecord(unittest.TestCase):
 
     def test_record_carries_sweep_steps(self):
         # Only the numbers the trend needs are kept — ops, ops/sec,
-        # mean and p99 per step — not the per-op histograms or the
-        # repeat detail, which already live in the JSON report.
+        # mean and p99 per step, plus the step's per-operation
+        # latency histograms — not the repeat detail, which already
+        # lives in the JSON report.
+        step_histograms = {"SET": [{"upper_ms": 0.1, "count": 1000}]}
         result = _make_result()
         result.sweep = [
             {"keys": 100, "ops": 1000, "ops_per_sec": 40000.0,
              "mean_ms": 0.020, "p99_ms": 0.020,
-             "histograms_by_op": {"SET": {}}},
+             "histograms_by_op": step_histograms},
             {"keys": 1000, "ops": 1000, "ops_per_sec": 60000.0,
              "mean_ms": 0.020, "p99_ms": 0.020,
-             "histograms_by_op": {"SET": {}},
+             "histograms_by_op": step_histograms,
              "repeat": {"runs": [], "spread": {}}},
         ]
         result.client_sweep = [
             {"clients": 4, "ops": 1000, "ops_per_sec": 50000.0,
              "mean_ms": 0.020, "p99_ms": 0.020,
-             "histograms_by_op": {}},
+             "histograms_by_op": step_histograms},
         ]
         result.value_sweep = [
             {"value_size": 128, "ops": 1000, "ops_per_sec": 45000.0,
              "mean_ms": 0.020, "p99_ms": 0.020,
-             "histograms_by_op": {}},
+             "histograms_by_op": step_histograms},
         ]
         result.pipeline_sweep = [
             {"pipeline": 5, "ops": 1000, "ops_per_sec": 55000.0,
              "mean_ms": 0.020, "p99_ms": 0.020,
-             "histograms_by_op": {}},
+             "histograms_by_op": step_histograms},
         ]
         result.mix_sweep = [
             {"mix": "90:10", "ops": 1000, "ops_per_sec": 52000.0,
              "mean_ms": 0.020, "p99_ms": 0.020,
-             "histograms_by_op": {}},
+             "histograms_by_op": step_histograms},
+        ]
+        record = build_record(result, _make_workload(), "kvbench")
+        self.assertEqual(record["sweeps"], {
+            "keyspace": [
+                {"keys": 100, "ops": 1000, "ops_per_sec": 40000.0,
+                 "mean_ms": 0.020, "p99_ms": 0.020,
+                 "histograms_by_op": step_histograms},
+                {"keys": 1000, "ops": 1000, "ops_per_sec": 60000.0,
+                 "mean_ms": 0.020, "p99_ms": 0.020,
+                 "histograms_by_op": step_histograms},
+            ],
+            "clients": [
+                {"clients": 4, "ops": 1000, "ops_per_sec": 50000.0,
+                 "mean_ms": 0.020, "p99_ms": 0.020,
+                 "histograms_by_op": step_histograms},
+            ],
+            "value_size": [
+                {"value_size": 128, "ops": 1000,
+                 "ops_per_sec": 45000.0, "mean_ms": 0.020,
+                 "p99_ms": 0.020,
+                 "histograms_by_op": step_histograms},
+            ],
+            "pipeline": [
+                {"pipeline": 5, "ops": 1000,
+                 "ops_per_sec": 55000.0, "mean_ms": 0.020,
+                 "p99_ms": 0.020,
+                 "histograms_by_op": step_histograms},
+            ],
+            "mix": [
+                {"mix": "90:10", "ops": 1000,
+                 "ops_per_sec": 52000.0, "mean_ms": 0.020,
+                 "p99_ms": 0.020,
+                 "histograms_by_op": step_histograms},
+            ],
+        })
+
+    def test_record_sweep_step_without_histograms_key(self):
+        # A step that carries no histograms_by_op — a hand-built
+        # result, or a run recorded before 0.49.0 — records no
+        # key for it, so the trend can tell it apart from a step
+        # recorded with no per-op latencies.
+        result = _make_result()
+        result.sweep = [
+            {"keys": 100, "ops": 1000, "ops_per_sec": 40000.0,
+             "mean_ms": 0.020, "p99_ms": 0.020},
         ]
         record = build_record(result, _make_workload(), "kvbench")
         self.assertEqual(record["sweeps"], {
             "keyspace": [
                 {"keys": 100, "ops": 1000, "ops_per_sec": 40000.0,
                  "mean_ms": 0.020, "p99_ms": 0.020},
-                {"keys": 1000, "ops": 1000, "ops_per_sec": 60000.0,
-                 "mean_ms": 0.020, "p99_ms": 0.020},
-            ],
-            "clients": [
-                {"clients": 4, "ops": 1000, "ops_per_sec": 50000.0,
-                 "mean_ms": 0.020, "p99_ms": 0.020},
-            ],
-            "value_size": [
-                {"value_size": 128, "ops": 1000,
-                 "ops_per_sec": 45000.0, "mean_ms": 0.020,
-                 "p99_ms": 0.020},
-            ],
-            "pipeline": [
-                {"pipeline": 5, "ops": 1000,
-                 "ops_per_sec": 55000.0, "mean_ms": 0.020,
-                 "p99_ms": 0.020},
-            ],
-            "mix": [
-                {"mix": "90:10", "ops": 1000,
-                 "ops_per_sec": 52000.0, "mean_ms": 0.020,
-                 "p99_ms": 0.020},
             ],
         })
 
@@ -978,6 +1004,158 @@ class TestSweepTrend(unittest.TestCase):
         self.assertNotIn("Client sweep —", text)
         self.assertNotIn("Value size sweep —", text)
         self.assertNotIn("Pipeline sweep —", text)
+
+
+class TestSweepStepHistograms(unittest.TestCase):
+    def _step_record(self, ops_per_sec, set_count=500,
+                     get_count=400, keys=100, histograms="real"):
+        # One recorded run whose keyspace step carries per-op
+        # histograms: SET set_count samples and GET get_count
+        # samples, all in the <= 0.1 ms bucket. ``histograms``
+        # picks the shape under test: "real" (valid bucket
+        # lists), "empty" (no per-op latencies), "malformed"
+        # (a bucket list that is not a list), or "missing" (no
+        # key at all — a run recorded before 0.49.0).
+        result = _make_result(ops_per_sec=ops_per_sec)
+        step = {"keys": keys, "ops": 1000, "ops_per_sec": ops_per_sec,
+                "mean_ms": 0.020, "p99_ms": 0.020}
+        if histograms == "real":
+            step["histograms_by_op"] = {
+                "SET": [{"upper_ms": 0.1, "count": set_count}],
+                "GET": [{"upper_ms": 0.1, "count": get_count}],
+            }
+        elif histograms == "empty":
+            step["histograms_by_op"] = {}
+        elif histograms == "malformed":
+            step["histograms_by_op"] = {"SET": {}}
+        result.sweep = [step]
+        return build_record(result, _make_workload(), "kvbench")
+
+    def test_step_histogram_block_renders_latest_run(self):
+        # The core of the feature: each sweep-step section ends
+        # with the step's per-op histograms from the latest run
+        # that recorded it, drawn with the shared helper — the
+        # same log-spaced buckets as the single-run report.
+        entries = [
+            self._step_record(40000.0, set_count=500),
+            self._step_record(50000.0, set_count=300),
+        ]
+        text = format_trend(entries)
+        self.assertIn(
+            "#### Keyspace sweep — 100 keys — per-op latency "
+            "histogram — latest run", text)
+        self.assertIn("SET (300 ops)", text)
+        self.assertIn("GET (400 ops)", text)
+        self.assertIn("- <= 0.1 ms: 300 (100.0%)", text)
+        # The first run's shape is not drawn — only the latest
+        # run's is.
+        self.assertNotIn("SET (500 ops)", text)
+
+    def test_step_histogram_uses_last_run_that_recorded_it(self):
+        # A step that stopped running still shows the shape it
+        # last measured: the latest run recorded no sweep at all,
+        # so the block comes from the earlier run.
+        entries = [
+            self._step_record(40000.0, set_count=500),
+            build_record(_make_result(ops_per_sec=60000.0),
+                         _make_workload(), "kvbench"),
+        ]
+        text = format_trend(entries)
+        self.assertIn("SET (500 ops)", text)
+        self.assertIn(
+            "#### Keyspace sweep — 100 keys — per-op latency "
+            "histogram — latest run", text)
+
+    def test_step_recorded_before_0_49_shows_note(self):
+        # A step with no histograms_by_op key was recorded before
+        # 0.49.0: the section names that instead of a block.
+        entries = [self._step_record(40000.0, histograms="missing")]
+        text = format_trend(entries)
+        self.assertIn(
+            "Keyspace sweep — 100 keys (", text)
+        self.assertIn(
+            "this step was recorded before 0.49.0, so it carries "
+            "no per-op histograms.", text)
+        self.assertNotIn(
+            "Keyspace sweep — 100 keys — per-op latency histogram",
+            text)
+
+    def test_step_with_no_per_op_latencies_shows_note(self):
+        # A step recorded with an empty histograms mapping ran
+        # no per-op latencies: the section names that instead of
+        # a block.
+        entries = [self._step_record(40000.0, histograms="empty")]
+        text = format_trend(entries)
+        self.assertIn(
+            "this step recorded no per-op latencies, so there are "
+            "no histograms to show.", text)
+        self.assertNotIn(
+            "Keyspace sweep — 100 keys — per-op latency histogram",
+            text)
+
+    def test_step_malformed_histograms_shows_note(self):
+        # A hand-made history file may carry something that is
+        # not a per-op histogram mapping: the section names that
+        # instead of crashing or drawing a block.
+        entries = [self._step_record(40000.0,
+                                     histograms="malformed")]
+        text = format_trend(entries)
+        self.assertIn(
+            "the recorded per-op histograms for this step are "
+            "malformed, so no histograms are shown.", text)
+        self.assertNotIn(
+            "Keyspace sweep — 100 keys — per-op latency histogram",
+            text)
+
+    def test_each_step_gets_its_own_histogram_block(self):
+        # Two steps in the same run each get their own block, so
+        # a slow step's shape reads separately from a fast one's.
+        entries = [
+            build_record(self._two_step_result(), _make_workload(),
+                         "kvbench"),
+        ]
+        text = format_trend(entries)
+        self.assertIn(
+            "#### Keyspace sweep — 100 keys — per-op latency "
+            "histogram — latest run", text)
+        self.assertIn(
+            "#### Keyspace sweep — 1,000 keys — per-op latency "
+            "histogram — latest run", text)
+        self.assertIn("SET (500 ops)", text)
+        self.assertIn("SET (800 ops)", text)
+
+    def _two_step_result(self):
+        result = _make_result(ops_per_sec=40000.0)
+        result.sweep = [
+            {"keys": 100, "ops": 1000, "ops_per_sec": 40000.0,
+             "mean_ms": 0.020, "p99_ms": 0.020,
+             "histograms_by_op": {
+                 "SET": [{"upper_ms": 0.1, "count": 500}]}},
+            {"keys": 1000, "ops": 1000, "ops_per_sec": 60000.0,
+             "mean_ms": 0.020, "p99_ms": 0.020,
+             "histograms_by_op": {
+                 "SET": [{"upper_ms": 0.1, "count": 800}]}},
+        ]
+        return result
+
+    def test_step_histograms_survive_history_round_trip(self):
+        # The recorded JSON carries the per-step histograms, so a
+        # trend rendered from the file on disk — not just from
+        # in-memory records — shows the block.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "history.jsonl")
+            record_run(
+                path,
+                [self._two_step_result()],
+                _make_workload(), "kvbench")
+            with open(path, encoding="utf-8") as f:
+                stored = json.loads(f.readline())
+            self.assertEqual(
+                stored["sweeps"]["keyspace"][0]["histograms_by_op"],
+                {"SET": [{"upper_ms": 0.1, "count": 500}]})
+            text = format_trend(load_history(path))
+            self.assertIn("SET (500 ops)", text)
+            self.assertIn("SET (800 ops)", text)
 
 
 class TestWriteTrend(unittest.TestCase):

@@ -42,7 +42,10 @@ each record also carries its sweep steps — one ops/sec and p99
 per keyspace size, client count, value size and pipeline depth —
 so the trend view tracks every sweep step on its own, and a step's
 throughput is only ever compared with the same step in other
-runs.
+runs. Since 0.49.0 each recorded step also carries its
+per-operation latency histograms, so the trend view shows each
+step's latency shape — the same log-spaced buckets per operation
+as the main run's ``histograms_by_op`` — not just its p99.
 """
 
 import json
@@ -133,13 +136,20 @@ def _sweeps_record(result):
 
     One trimmed entry per step — the step value (``keys``,
     ``clients``, ``value_size``, ``pipeline`` or ``mix``), ops,
-    ops/sec, mean and p99 —
+    ops/sec, mean and p99, plus the step's per-operation latency
+    histograms (``histograms_by_op`` — the same log-spaced buckets
+    per operation as the main run's, so the trend view can show
+    each step's latency shape, not just its p99) —
     per sweep kind that ran, keyed ``keyspace`` / ``clients`` /
-    ``value_size`` / ``pipeline`` / ``mix``. The per-op histograms
-    and repeat detail stay in the JSON report; the trend only
-    needs ops/sec and p99 per step, the same numbers the overall
-    trend tracks per run, so a sweep step's ops/sec at 100 keys
-    is only ever compared with the same step in other runs.
+    ``value_size`` / ``pipeline`` / ``mix``. The repeat detail
+    stays in the JSON report; the trend only needs ops/sec, p99
+    and the per-op histograms per step, the same numbers the
+    overall trend tracks per run, so a sweep step's ops/sec at
+    100 keys is only ever compared with the same step in other
+    runs. A step that carries no ``histograms_by_op`` key — a
+    hand-built result, or a run recorded before 0.49.0 —
+    records none, and the trend renders a note naming that
+    instead of a histogram block.
     """
     sweeps = {}
     for kind, steps, step_key in (
@@ -148,14 +158,16 @@ def _sweeps_record(result):
             ("value_size", result.value_sweep, "value_size"),
             ("pipeline", result.pipeline_sweep, "pipeline"),
             ("mix", result.mix_sweep, "mix")):
-        entries = [
-            {step_key: step[step_key],
-             "ops": step["ops"],
-             "ops_per_sec": step["ops_per_sec"],
-             "mean_ms": step["mean_ms"],
-             "p99_ms": step["p99_ms"]}
-            for step in steps
-        ]
+        entries = []
+        for step in steps:
+            entry = {step_key: step[step_key],
+                     "ops": step["ops"],
+                     "ops_per_sec": step["ops_per_sec"],
+                     "mean_ms": step["mean_ms"],
+                     "p99_ms": step["p99_ms"]}
+            if "histograms_by_op" in step:
+                entry["histograms_by_op"] = step["histograms_by_op"]
+            entries.append(entry)
         if entries:
             sweeps[kind] = entries
     return sweeps
@@ -427,6 +439,63 @@ def _sweep_step_entry(entry, kind, step_key, step_value):
     return None
 
 
+def _sweep_step_histogram_lines(label, step_label, window, kind,
+                                step_key, step_value):
+    """Per-op latency histogram block for one sweep step, or a note.
+
+    ``window`` is the trend window (oldest first); the block shows
+    the latest run in it that recorded this step, so a step that
+    stopped running still shows the shape it last measured
+    instead of nothing. The block is drawn with the same shared
+    helper the latest run's block and the single-run report use,
+    so the views cannot disagree. A step recorded before 0.49.0
+    carries no ``histograms_by_op`` key at all; a step recorded
+    with no per-op latencies carries an empty mapping; a
+    hand-made history file may carry something else entirely —
+    each renders a note naming the reason instead of a block, so
+    the trend never crashes on a record shape it cannot draw.
+    The returned lines carry no trailing blank line; the caller
+    adds the section separator.
+    """
+    latest = None
+    latest_step = None
+    for entry in reversed(window):
+        step = _sweep_step_entry(entry, kind, step_key, step_value)
+        if step is not None:
+            latest = entry
+            latest_step = step
+            break
+    if latest is None:
+        return []
+    timestamp = latest.get("timestamp", "")[:19].replace("T", " ")
+    heading = (f"#### {label} — {step_label} — per-op latency "
+               f"histogram — latest run ({timestamp})")
+    histograms = latest_step.get("histograms_by_op")
+    if histograms is None:
+        return [
+            f"- {label} — {step_label} ({timestamp}): this step "
+            "was recorded before 0.49.0, so it carries no per-op "
+            "histograms.",
+        ]
+    cleaned = _histograms_or_none(histograms)
+    if cleaned is not None:
+        block = _per_op_histogram_block(heading, cleaned)
+        while block and block[-1] == "":
+            block.pop()
+        return block
+    if not histograms:
+        return [
+            f"- {label} — {step_label} ({timestamp}): this step "
+            "recorded no per-op latencies, so there are no "
+            "histograms to show.",
+        ]
+    return [
+        f"- {label} — {step_label} ({timestamp}): the recorded "
+        "per-op histograms for this step are malformed, so no "
+        "histograms are shown.",
+    ]
+
+
 def _sweep_trend_lines(runs, window):
     """Per-sweep-step trend sections for one backend.
 
@@ -441,7 +510,13 @@ def _sweep_trend_lines(runs, window):
     ``_ops_sec_delta`` and ``_sparkline`` helpers, so the views
     cannot disagree. Runs recorded before 0.37.0 carry no
     ``sweeps`` data and are skipped for these sections; a step
-    that never ran in the window gets no section at all.
+    that never ran in the window gets no section at all. Each
+    section also ends with the step's per-operation latency
+    histograms from the latest run that recorded it — drawn with
+    the same shared helper as the latest run's block, so a p99
+    move in a step names the op whose latency shape moved — or a
+    note naming why there are none (recorded before 0.49.0, no
+    per-op latencies, or malformed histograms).
     """
     lines = []
     for kind, step_key, label, unit in _SWEEP_KINDS:
@@ -536,6 +611,13 @@ def _sweep_trend_lines(runs, window):
                 f"{label} — {step_label} p99", p99_values)
             if line is not None:
                 lines.append(line)
+            # The step's per-op latency histograms from the latest
+            # run that recorded it — the same shared helper as
+            # the latest run's block — so a p99 move in the step
+            # names the op whose latency shape moved.
+            lines.extend(_sweep_step_histogram_lines(
+                label, step_label, window, kind, step_key,
+                step_value))
             lines.append("")
     return lines
 
@@ -815,6 +897,10 @@ def format_trend(entries, limit=20):
     that ran, so a step's throughput trend reads on its own too,
     with a p99 first-to-last change per step beside the ops/sec
     one, so a step whose tail crept up reads at a glance,
+    and each sweep-step section ends with that step's
+    per-operation latency histograms from the latest run that
+    recorded it — or a note naming why there are none — so a p99
+    move in a step names the op whose latency shape moved,
     and the latest run's per-operation latency histograms, so a
     p99 move in the trend names the op whose latency shape moved,
     plus a per-op histogram comparison between the first and

@@ -622,17 +622,25 @@ instead of a comparison.
 
 A sweep run recorded with `--history` also records each sweep
 step — one ops/sec and p99 per keyspace size, client count, value
-size, pipeline depth and read:write ratio — and below the per-op sections each backend gets one
+size, pipeline depth and read:write ratio, plus the step's
+per-operation latency histograms — and below the per-op sections each backend gets one
 trend section per step that ran, with the same table, delta,
 sparkline and first-to-last change as the overall chart, plus a
-p99 first-to-last change per step — a keyspace step's ops/sec at
+p99 first-to-last change per step, and the step's per-operation
+latency histograms from the latest run that recorded it, drawn
+with the same shared helper as the latest run's block — a keyspace step's ops/sec at
 100 keys is only ever compared with the same step in other runs,
 so a step that slows down reads at a glance even when the
 overall ops/sec moved the other way, and a step whose tail crept
-up reads at a glance even when its ops/sec moved the other way.
+up reads at a glance even when its ops/sec moved the other way,
+and a p99 move in a step names the op whose latency shape moved.
 Runs recorded before 0.37.0 carry no sweep data and simply show
 no sweep sections; a step that never ran in the window gets no
-section at all.
+section at all. A step recorded before 0.49.0 carries no
+per-op histograms, a step recorded with no per-op latencies
+carries an empty mapping, and a step whose recorded histograms
+are malformed carries something else — each renders a note
+naming the reason instead of a histogram block.
 
 With `--trend-out PATH` the same chart is also written to a
 Markdown file — the exact text printed to stdout — so the trend
@@ -1126,6 +1134,20 @@ make test
 
 ## Roadmap
 
+- Per-operation latency histograms per sweep step in the
+  `--trend` output: each sweep-step trend section ends with
+  the step's per-op histograms from the latest run that
+  recorded it — the same log-spaced buckets per operation as
+  the main run's `histograms_by_op`, drawn with the same
+  shared histogram-block helper as the latest run's block and
+  the single-run report, so the views cannot disagree — so a
+  p99 move in a step names the op whose latency shape moved.
+  The step's histograms are recorded in the history record
+  itself (JSON, under each step's `histograms_by_op`), and a
+  step recorded before 0.49.0, one recorded with no per-op
+  latencies, or one whose recorded histograms are malformed
+  renders a note naming the reason instead of a block. Done in
+  0.49.0.
 - P99 first-to-last change in the overall and per-operation
   `--trend` sections: the same p99 first-to-last line the
   sweep-step sections gained in 0.47.0, now beside the ops/sec
