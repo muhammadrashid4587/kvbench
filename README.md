@@ -360,9 +360,13 @@ python -m kvbench.cli --ops 20000 --clients 4 --repeat 3
 # as the step's own per-op blocks, so the shape move reads as
 # bars as well as numbers, with the same two maps under
 # fastest_histograms_by_op and slowest_histograms_by_op in the
-# step's repeat.histogram_comparison in JSON; a step whose runs
-# are not comparable renders a note naming the reason instead,
-# and no blocks
+# step's repeat.histogram_comparison in JSON — plus a per-op
+# fastest-vs-slowest comparison for each op that ran, under
+# repeat.histogram_comparison.per_op in JSON and as a section per
+# op in the per-step repeat block in Markdown, so a step where
+# one op's runs swing while the overall winner stays steady still
+# names the op; a step whose runs are not comparable renders a
+# note naming the reason instead, and no blocks
 python -m kvbench.cli --ops 20000 --clients 4 --repeat 3 \
     --sweep-keyspace 100,1000,10000
 
@@ -1251,6 +1255,15 @@ the reason instead of a table. The JSON report carries the same
 per-run values and spread under each step's `repeat` key (`runs`
 and `spread`, the same shapes as the main run's `repeat`), plus
 the comparison under each step's `repeat.histogram_comparison`.
+Each step's repeat block also carries a per-op fastest-vs-slowest
+comparison for each op that ran — the op's own fastest and
+slowest runs by that op's ops/sec, with the op's own histogram
+comparison table, so a step where one op's runs swing while the
+overall winner stays steady still names the op — under
+`repeat.histogram_comparison.per_op` in JSON, with the picked
+runs' bucket lists for the op under `fastest_histogram` and
+`slowest_histogram`; an op whose runs are not comparable renders
+a note naming the reason instead of a table.
 A sweep with `--repeat 1` keeps the old shape exactly — no
 `repeat` key on any step.
 
@@ -1478,7 +1491,13 @@ make test
   each sweep-step repeat block — each op's own fastest and
   slowest runs by that op's ops/sec, with its own histogram
   comparison table, so a step where one op's runs swing while
-  the overall winner stays steady still names the op.
+  the overall winner stays steady still names the op. Done in
+  0.69.0.
+  Next: the same per-op fastest-vs-slowest repeat-run
+  comparison in the main repeat section — each op's own fastest
+  and slowest runs by that op's ops/sec, with its own histogram
+  comparison table, so a repeat run where one op's runs swing
+  while the overall winner stays steady still names the op.
 - `--compare-file-json PATH`: with `--compare-file`, also
   write the comparison as a standalone JSON file — the exact
   dict `compare_results` returns (the same one the run's JSON
