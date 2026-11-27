@@ -689,11 +689,21 @@ both runs, drawn with the same shared helper as the `--trend`
 view's per-step blocks, so the two views cannot disagree. The
 step's best and worst runs are picked independently of the
 overall pick, so a step that slowed down in the run that won
-overall still shows its own shape. A step recorded before
+overall still shows its own shape. Each step's section ends
+with a per-op histogram comparison between its best and worst
+runs — each op's p50 and p99 in the two steps, the p99 change,
+and the bucket drift — built from the same shared rows as the
+overall comparison, so a p99 move in a step shows how each
+op's latency shape moved. A step record carries no per-op
+percentile fields, so the step's p50 and p99 are read off its
+histogram buckets (the upper edge of the bucket holding the
+percentile rank). A step recorded before
 0.49.0 carries no per-step histograms, a step recorded with no
 per-op latencies carries an empty mapping, and a step whose
 recorded histograms are malformed carries something else — each
-renders a note naming the reason instead of a block. With
+renders a note naming the reason instead of a block, and a step
+recorded in only one run renders a note instead of a
+comparison table. With
 `--compare-same-workload` only runs whose workload matches the
 latest recorded run's are considered — the same
 apples-to-apples rule `--compare-history` uses, so a quick smoke
@@ -712,7 +722,10 @@ none — plus one per-step sweep section per sweep step that ran
 under `sweeps`: the step's best and worst runs by the step's
 own ops/sec, the deltas, and the step's per-op histograms from
 both runs — `histograms_by_op` on the best and worst step
-picks — or `notes` naming why a pick has none, so a script
+picks — or `notes` naming why a pick has none — plus the
+step's per-op histogram comparison under `histogram_comparison`
+on each sweep entry, with `rows` carrying the same per-op
+numbers or `notes` naming why there is none, so a script
 reading the JSON sees what the Markdown table shows), so a
 script can read the spread without parsing the table. Both need
 `--best-worst` (exit 2 otherwise), like `--trend-out` needs
@@ -1151,6 +1164,26 @@ make test
 
 ## Roadmap
 
+- Per-sweep-step histogram comparisons in the `--best-worst`
+  output: each sweep step's section ends with a per-op table
+  comparing the step's best and worst runs — each op's p50 and
+  p99 in the two steps, the p99 change, and the bucket drift
+  (the largest single-bucket share move, in percentage points,
+  with the bucket it moved in) — built from the same shared
+  rows as the overall best-vs-worst comparison, so the views
+  cannot disagree, and the comparison lands under
+  `histogram_comparison` in each `--best-worst-json` sweep
+  entry (`rows` with the per-op numbers, or `notes` naming why
+  there is none), so a p99 move in a step shows how each op's
+  latency shape moved. A step record carries no per-op
+  percentile fields, so the step's p50 and p99 are read off its
+  histogram buckets (the upper edge of the bucket holding the
+  percentile rank), and the JSON flags that with
+  `percentiles_from_histograms`. A step recorded in only one
+  run has no comparison, and a step recorded before 0.49.0, one
+  recorded with no per-op latencies, or one whose recorded
+  histograms are malformed renders a note naming the reason
+  instead of a table. Done in 0.52.0.
 - Per-sweep-step best-vs-worst sections in the `--best-worst-json`
   output: each backend's `sweeps` list carries one entry per sweep
   step that ran — the step's best and worst runs by the step's own

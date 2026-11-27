@@ -54,7 +54,14 @@ views. Since 0.51.0 the ``--best-worst-json`` output carries
 the same per-step sections under each backend's ``sweeps`` —
 the step's best and worst runs, the deltas, and the step's
 per-op histograms from both runs — so a script reading the
-JSON sees what the Markdown table shows.
+JSON sees what the Markdown table shows. Since 0.52.0 each
+per-step section also carries the step's per-op histogram
+comparison between its best and worst runs — each op's p50/p99
+in the two steps, the p99 change, and the bucket drift — in
+both the Markdown and JSON views, built from the same shared
+rows, so the views cannot disagree; a step record carries no
+per-op percentile fields, so the step's p50/p99 are read off
+its histogram buckets.
 """
 
 import json
@@ -790,6 +797,34 @@ def _histogram_comparison_notes(first, last, first_label, last_label,
     return notes
 
 
+def _histogram_percentile(buckets, p):
+    """p-th percentile read off a histogram bucket list, or None.
+
+    ``buckets`` is one op's cleaned bucket list (each bucket a
+    dict with ``upper_ms`` and ``count``) and ``p`` a percentile
+    in (0, 100]. Nearest-rank, the same rule
+    :func:`kvbench.stats.percentile` uses on raw samples: the
+    percentile is the upper edge of the bucket holding the
+    rank-th sample (``ceil(p/100 * total)``), an upper bound on
+    the true percentile since every sample in the bucket sits at
+    or below that edge. Returns None when the list holds no
+    samples, or when the rank lands in the overflow bucket —
+    whose ``upper_ms`` is None, so there is no edge to report.
+    """
+    import math
+
+    total = sum(b["count"] for b in buckets)
+    if not total:
+        return None
+    rank = math.ceil(p / 100 * total)
+    cumulative = 0
+    for bucket in buckets:
+        cumulative += bucket["count"]
+        if cumulative >= rank:
+            return bucket["upper_ms"]
+    return None
+
+
 def _histogram_comparison_rows(first, last):
     """Per-op comparison rows between two runs' histograms.
 
@@ -808,18 +843,47 @@ def _histogram_comparison_rows(first, last):
     cannot disagree. Returns None when either run carries no
     usable histograms; callers check
     :func:`_histogram_comparison_notes` first, which names the
-    reason.
+    reason. The rows themselves come from the shared
+    :func:`_histogram_comparison_rows_from`, which the sweep-step
+    comparison uses too.
     """
     first_clean = _histograms_or_none(first.get("histograms_by_op"))
     last_clean = _histograms_or_none(last.get("histograms_by_op"))
     if first_clean is None or last_clean is None:
         return None
+    return _histogram_comparison_rows_from(
+        first_clean, last_clean,
+        first.get("per_op") or {}, last.get("per_op") or {})
+
+
+def _histogram_comparison_rows_from(first_clean, last_clean,
+                                    first_per_op, last_per_op):
+    """Per-op comparison rows from two cleaned histogram maps.
+
+    ``first_clean``/``last_clean`` are the two sides' cleaned
+    ``histograms_by_op`` maps (op name to bucket list), and
+    ``first_per_op``/``last_per_op`` their per-op percentile
+    maps (op name to a dict with ``p50_ms``/``p99_ms``) — the
+    run record's ``per_op`` for whole runs, or the percentiles
+    read off the step's own histogram buckets (see
+    :func:`_sweep_step_per_op`) for sweep steps, whose records
+    carry no per-op percentile fields. One row per op that ran
+    in either side, in the same shape
+    :func:`_histogram_comparison_rows` documents: each op's
+    p50/p99 on both sides, the p99 percentage change, and the
+    bucket drift via :func:`_bucket_drift`. An op that never
+    ran on one side shows None for that side, and the p99
+    change is None when either side has no p99 or the first
+    p99 is zero. The drift is None for an op that ran on only
+    one side. Both maps are already cleaned, so this never
+    returns None — callers check usability first.
+    """
     rows = []
     for op in ("SET", "GET", "INCR", "DEL"):
         if op not in first_clean and op not in last_clean:
             continue
-        first_op = (first.get("per_op") or {}).get(op) or {}
-        last_op = (last.get("per_op") or {}).get(op) or {}
+        first_op = first_per_op.get(op) or {}
+        last_op = last_per_op.get(op) or {}
         p50_first = first_op.get("p50_ms")
         p50_last = last_op.get("p50_ms")
         p99_first = first_op.get("p99_ms")
@@ -1200,6 +1264,92 @@ def _best_worst_histogram_comparison(usable, best, worst):
     }
 
 
+def _sweep_step_per_op(histograms):
+    """Per-op p50/p99 read off a sweep step's cleaned histograms.
+
+    ``histograms`` is the step's cleaned ``histograms_by_op``
+    map. A sweep step record carries no per-op percentile
+    fields — only the step's overall p99 and the per-op bucket
+    lists — so each op's p50 and p99 are read off its own
+    buckets with :func:`_histogram_percentile`: the upper edge
+    of the bucket holding the percentile rank, an upper bound on
+    the true percentile, or None when the rank lands in the
+    overflow bucket (no upper edge to report).
+    """
+    return {op: {"p50_ms": _histogram_percentile(buckets, 50),
+                 "p99_ms": _histogram_percentile(buckets, 99)}
+            for op, buckets in histograms.items()}
+
+
+def _best_worst_sweep_histogram_comparison(label, step_label,
+                                           best_entry, worst_entry,
+                                           best_step, worst_step):
+    """The best-vs-worst per-op histogram comparison for one sweep step.
+
+    ``best_step``/``worst_step`` are the step dicts from the
+    step's best and worst runs (see
+    :func:`_best_worst_sweep_pairs`); ``label``/``step_label``
+    name the step in the notes. Returns a JSON-serializable
+    dict with ``"from": "worst"`` and ``"to": "best"``: ``rows``
+    is the shared :func:`_histogram_comparison_rows_from` table
+    — each op's p50/p99 in the worst and best runs' steps, the
+    p99 change, and the bucket drift — with ``notes`` empty and
+    ``percentiles_from_histograms`` True, or ``rows`` is None
+    and ``notes`` names why there is no comparison: the step's
+    best and worst runs are the same run (a step recorded in
+    only one run), or one of the steps was recorded before
+    0.49.0, recorded no per-op latencies, or carries malformed
+    histograms. The Markdown and JSON views both build from
+    this one helper, so the two views cannot disagree. The
+    p50/p99 in the rows are read off the steps' histogram
+    buckets (see :func:`_sweep_step_per_op`), because a step
+    record carries no per-op percentile fields — the flag says
+    so, so a script reading the JSON does not mistake them for
+    the exact percentiles a whole run's ``per_op`` carries.
+    """
+    if best_entry is worst_entry:
+        return {
+            "from": "worst",
+            "to": "best",
+            "rows": None,
+            "notes": [f"The best and worst runs for {label} — "
+                      f"{step_label} are the same run, so there "
+                      "is no best-vs-worst histogram comparison "
+                      "for this step."],
+        }
+    notes = []
+    cleaned = {}
+    for pick, entry, step in (("best", best_entry, best_step),
+                              ("worst", worst_entry, worst_step)):
+        step_cleaned, reason = _sweep_step_histograms(step)
+        if step_cleaned is not None:
+            cleaned[pick] = step_cleaned
+            continue
+        timestamp = entry.get("timestamp", "")[:19].replace("T", " ")
+        notes.append(
+            f"{label} — {step_label} ({pick} run, {timestamp}): "
+            f"{_SWEEP_STEP_HISTOGRAM_REASONS[reason]} No "
+            "best-vs-worst histogram comparison is shown for "
+            "this step.")
+    if notes:
+        return {
+            "from": "worst",
+            "to": "best",
+            "rows": None,
+            "notes": notes,
+        }
+    return {
+        "from": "worst",
+        "to": "best",
+        "rows": _histogram_comparison_rows_from(
+            cleaned["worst"], cleaned["best"],
+            _sweep_step_per_op(cleaned["worst"]),
+            _sweep_step_per_op(cleaned["best"])),
+        "notes": [],
+        "percentiles_from_histograms": True,
+    }
+
+
 def _best_worst_sweep_pairs(runs):
     """Per-sweep-step best-vs-worst picks for one backend, as data.
 
@@ -1275,15 +1425,21 @@ def _best_worst_sweep_lines(runs):
     latency histograms from its best and worst runs, drawn with
     the same shared helper the trend's per-step blocks use, so
     a p99 move in a step names the op whose latency shape
-    moved. The picks come from the shared
+    moved — followed by the step's per-op histogram comparison
+    between its best and worst runs (each op's p50/p99 in the
+    two steps, the p99 change, and the bucket drift), built
+    from the same shared helper the JSON view uses, so the
+    views cannot disagree. The picks come from the shared
     ``_best_worst_sweep_pairs`` helper the JSON view uses too.
     A step recorded in only one run has that run as both
-    best and worst, with 0.0% deltas; a step recorded before
-    0.49.0, one recorded with no per-op latencies, or one whose
-    recorded histograms are malformed renders a note naming the
-    reason instead of a block. A step that never ran gets no
-    section at all, and a step whose recorded ops/sec is not a
-    number is skipped instead of crashing the comparison.
+    best and worst, with 0.0% deltas, and renders a note
+    naming that instead of a comparison table; a step recorded
+    before 0.49.0, one recorded with no per-op latencies, or
+    one whose recorded histograms are malformed renders a note
+    naming the reason instead of a block or a table. A step
+    that never ran gets no section at all, and a step whose
+    recorded ops/sec is not a number is skipped instead of
+    crashing the comparison.
     """
     lines = []
     for (kind, step_key, label, unit, step_value, step_label,
@@ -1292,22 +1448,39 @@ def _best_worst_sweep_lines(runs):
         lines.extend(_best_worst_lines(
             f"{label} — {step_label}", best, worst,
             ops_delta, p99_delta))
+        best_step = _sweep_step_entry(best_entry, kind, step_key,
+                                      step_value)
+        worst_step = _sweep_step_entry(worst_entry, kind, step_key,
+                                       step_value)
         # The step's per-op latency histograms from its best
         # and worst runs — the same shared helper the
         # trend's per-step blocks use, so a p99 move in the
         # step names the op whose latency shape moved.
         lines.extend(_sweep_step_histogram_block(
-            label, step_label, best_entry,
-            _sweep_step_entry(best_entry, kind, step_key,
-                              step_value),
-            "best"))
+            label, step_label, best_entry, best_step, "best"))
         lines.append("")
         lines.extend(_sweep_step_histogram_block(
-            label, step_label, worst_entry,
-            _sweep_step_entry(worst_entry, kind, step_key,
-                              step_value),
-            "worst"))
+            label, step_label, worst_entry, worst_step, "worst"))
         lines.append("")
+        # The step's per-op histogram comparison between its
+        # best and worst runs — the same table the overall
+        # best-vs-worst comparison renders, built from the same
+        # shared rows, so a p99 move in a step shows how each
+        # op's latency shape moved. A step with a single run,
+        # or steps without usable histograms, gets a note
+        # naming the reason instead of a table.
+        comparison = _best_worst_sweep_histogram_comparison(
+            label, step_label, best_entry, worst_entry,
+            best_step, worst_step)
+        if comparison["rows"] is not None:
+            lines.extend(_histogram_comparison_table_lines(
+                f"#### {label} — {step_label} — per-op histogram "
+                "comparison — best vs worst run",
+                "worst", "best", comparison["rows"]))
+        else:
+            for note in comparison["notes"]:
+                lines.append(f"- {note}")
+            lines.append("")
     return lines
 
 
@@ -1322,7 +1495,12 @@ def _best_worst_sweep_entries(runs):
     runs for that step by the step's own ops/sec with the
     percentage changes between them, and the step's per-op
     latency histograms from both runs under ``histograms_by_op``
-    on the best and worst numbers. A pick whose step carries no
+    on the best and worst numbers — plus the step's per-op
+    histogram comparison under ``histogram_comparison`` (each
+    op's p50/p99 in the worst and best runs' steps, the p99
+    change, and the bucket drift, or notes naming why there is
+    none — the same comparison the Markdown view renders, built
+    from the same shared helper). A pick whose step carries no
     drawable histograms contributes a note under ``notes``
     naming the reason instead — recorded before 0.49.0, no
     per-op latencies, or malformed histograms — the same reasons
@@ -1339,11 +1517,13 @@ def _best_worst_sweep_entries(runs):
         best_numbers = dict(best)
         worst_numbers = dict(worst)
         notes = []
-        for pick, numbers, entry in (
-                ("best", best_numbers, best_entry),
-                ("worst", worst_numbers, worst_entry)):
-            step = _sweep_step_entry(entry, kind, step_key,
-                                     step_value)
+        best_step = _sweep_step_entry(best_entry, kind, step_key,
+                                      step_value)
+        worst_step = _sweep_step_entry(worst_entry, kind, step_key,
+                                       step_value)
+        for pick, numbers, entry, step in (
+                ("best", best_numbers, best_entry, best_step),
+                ("worst", worst_numbers, worst_entry, worst_step)):
             cleaned, reason = _sweep_step_histograms(step)
             if cleaned is not None:
                 numbers["histograms_by_op"] = cleaned
@@ -1363,6 +1543,9 @@ def _best_worst_sweep_entries(runs):
             "worst": worst_numbers,
             "ops_sec_delta_pct": ops_delta,
             "p99_delta_pct": p99_delta,
+            "histogram_comparison": _best_worst_sweep_histogram_comparison(
+                label, step_label, best_entry, worst_entry,
+                best_step, worst_step),
             "notes": notes,
         })
     return entries
@@ -1398,9 +1581,13 @@ def best_worst_comparison(entries, workload=None):
     the step's best and worst runs by the step's own ops/sec,
     the percentage changes between them, and the step's per-op
     latency histograms from both runs (or notes naming why a
-    pick has none) — the same sections the Markdown view
-    renders, built from the same shared picks, so the JSON and
-    Markdown views cannot disagree. When ``workload`` is given (a
+    pick has none) — plus the step's per-op histogram
+    comparison under ``histogram_comparison`` (each op's p50/p99
+    in the worst and best runs' steps, the p99 change, and the
+    bucket drift, or notes naming why there is none) — the same
+    sections the Markdown view renders, built from the same
+    shared picks, so the JSON and Markdown views cannot
+    disagree. When ``workload`` is given (a
     workload dict in the shape of a history record's
     ``workload``), only runs whose workload matches it are
     considered — the same apples-to-apples rule
@@ -1551,7 +1738,10 @@ def format_best_worst(entries, workload=None):
     step by the step's own ops/sec, with the step's per-op
     latency histograms from both runs, drawn with the same
     shared helper the trend's per-step blocks use, so a p99 move
-    in a step names the op whose latency shape moved. A backend
+    in a step names the op whose latency shape moved — followed
+    by the step's per-op histogram comparison between its best
+    and worst runs, built from the same shared helper the JSON
+    view uses. A backend
     with a single run, or runs without usable histograms, gets a
     note naming the reason instead of a comparison table. When
     ``workload`` is given, only runs matching it were compared,
@@ -1678,9 +1868,10 @@ def write_best_worst_json(path, entries, workload=None):
     returns — so a script can read the spread without parsing
     the Markdown table. Each backend carries its per-step sweep
     sections under ``sweeps`` — one entry per step that ran,
-    with the step's best and worst runs, the deltas, and the
-    step's per-op histograms from both runs — the same sections
-    the Markdown view renders.
+    with the step's best and worst runs, the deltas, the step's
+    per-op histograms from both runs, and the step's per-op
+    histogram comparison between them — the same sections the
+    Markdown view renders.
     """
     comparison = best_worst_comparison(entries, workload=workload)
     directory = os.path.dirname(os.path.abspath(path))

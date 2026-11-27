@@ -1815,7 +1815,8 @@ class TestBestWorstSweepSteps(unittest.TestCase):
     def _step_record(self, ops_per_sec, set_count=500,
                      get_count=400, keys=100, clients=None,
                      value_size=None, pipeline=None, mix=None,
-                     histograms="real", p99_ms=0.020):
+                     histograms="real", p99_ms=0.020,
+                     set_buckets=None, get_buckets=None):
         # One recorded run whose sweep step(s) carry per-op
         # histograms: SET set_count samples and GET get_count
         # samples, all in the <= 0.1 ms bucket. ``histograms``
@@ -1823,14 +1824,19 @@ class TestBestWorstSweepSteps(unittest.TestCase):
         # lists), "empty" (no per-op latencies), "malformed"
         # (a bucket list that is not a list), or "missing" (no
         # key at all — a run recorded before 0.49.0).
+        # ``set_buckets``/``get_buckets`` replace the
+        # single-bucket lists with explicit ones, so a test can
+        # put the two runs' tails in different buckets.
         result = _make_result(ops_per_sec=ops_per_sec)
         step = {"keys": keys, "ops": 1000,
                 "ops_per_sec": ops_per_sec,
                 "mean_ms": 0.020, "p99_ms": p99_ms}
         if histograms == "real":
             step["histograms_by_op"] = {
-                "SET": [{"upper_ms": 0.1, "count": set_count}],
-                "GET": [{"upper_ms": 0.1, "count": get_count}],
+                "SET": set_buckets or [
+                    {"upper_ms": 0.1, "count": set_count}],
+                "GET": get_buckets or [
+                    {"upper_ms": 0.1, "count": get_count}],
             }
         elif histograms == "empty":
             step["histograms_by_op"] = {}
@@ -1882,6 +1888,134 @@ class TestBestWorstSweepSteps(unittest.TestCase):
         self.assertIn("SET (500 ops)", text)
         self.assertIn("GET (400 ops)", text)
         self.assertIn("- <= 0.1 ms: 300 (100.0%)", text)
+
+    def test_step_histogram_comparison_table(self):
+        # The core of the feature: each sweep-step section ends
+        # with a per-op histogram comparison between the step's
+        # best and worst runs — each op's p50/p99 in the two
+        # steps, the p99 change, and the bucket drift. The
+        # worst run's SET tail sits in the <= 0.25 ms bucket
+        # (p99 0.250) while the best run's stays in <= 0.1 ms
+        # (p99 0.100), so SET reads -60.0% with the <= 0.1 ms
+        # bucket up 20.0 pp; GET is identical in both runs.
+        entries = [
+            self._step_record(
+                40000.0,
+                set_buckets=[{"upper_ms": 0.1, "count": 400},
+                             {"upper_ms": 0.25, "count": 100}]),
+            self._step_record(
+                60000.0,
+                set_buckets=[{"upper_ms": 0.1, "count": 500}]),
+        ]
+        text = format_best_worst(entries)
+        self.assertIn(
+            "#### Keyspace sweep — 100 keys — per-op histogram "
+            "comparison — best vs worst run", text)
+        self.assertIn(
+            "| SET | 0.100 | 0.100 | 0.250 | 0.100 | -60.0% | "
+            "+20.0 pp (<= 0.1 ms) |", text)
+        self.assertIn(
+            "| GET | 0.100 | 0.100 | 0.100 | 0.100 | +0.0% | "
+            "+0.0 pp (<= 0.1 ms) |", text)
+
+    def test_step_histogram_comparison_single_run_has_note(self):
+        # One run of a step is both its best and its worst, so
+        # there is no comparison — a note names that instead of
+        # a table, while the step's own table still shows 0.0%
+        # deltas.
+        entries = [self._step_record(50000.0, set_count=500)]
+        text = format_best_worst(entries)
+        self.assertIn(
+            "The best and worst runs for Keyspace sweep — 100 "
+            "keys are the same run, so there is no best-vs-worst "
+            "histogram comparison for this step.", text)
+        self.assertNotIn(
+            "per-op histogram comparison — best vs worst run",
+            text)
+
+    def test_step_histogram_comparison_before_0_49_has_note(self):
+        # Steps with no histograms_by_op key were recorded
+        # before 0.49.0: each pick's comparison note names that
+        # instead of a table.
+        entries = [self._step_record(40000.0, histograms="missing"),
+                   self._step_record(50000.0, histograms="missing")]
+        text = format_best_worst(entries)
+        self.assertEqual(
+            text.count("No best-vs-worst histogram comparison is "
+                       "shown for this step."), 2)
+        self.assertNotIn(
+            "per-op histogram comparison — best vs worst run",
+            text)
+
+    def test_step_histogram_comparison_no_latencies_has_note(self):
+        entries = [self._step_record(40000.0, histograms="empty"),
+                   self._step_record(50000.0, histograms="empty")]
+        text = format_best_worst(entries)
+        self.assertEqual(
+            text.count("No best-vs-worst histogram comparison is "
+                       "shown for this step."), 2)
+        self.assertNotIn(
+            "per-op histogram comparison — best vs worst run",
+            text)
+
+    def test_step_histogram_comparison_malformed_has_note(self):
+        entries = [self._step_record(40000.0,
+                                     histograms="malformed"),
+                   self._step_record(50000.0,
+                                     histograms="malformed")]
+        text = format_best_worst(entries)
+        self.assertEqual(
+            text.count("No best-vs-worst histogram comparison is "
+                       "shown for this step."), 2)
+        self.assertNotIn(
+            "per-op histogram comparison — best vs worst run",
+            text)
+
+    def test_step_histogram_comparison_overflow_bucket_shows_dash(self):
+        # An op whose p50/p99 rank lands in the overflow bucket
+        # has no upper edge to report, so its percentiles read
+        # as "-" instead of a number — while the bucket drift
+        # still names the overflow move. The worst run's SET
+        # tail sits in <= 0.25 ms; the best run's spreads into
+        # the overflow bucket, so its p50/p99 are "-".
+        entries = [
+            self._step_record(
+                40000.0,
+                set_buckets=[{"upper_ms": 0.1, "count": 80},
+                             {"upper_ms": 0.25, "count": 20}]),
+            self._step_record(
+                60000.0,
+                set_buckets=[{"upper_ms": 0.1, "count": 10},
+                             {"upper_ms": 0.25, "count": 10},
+                             {"upper_ms": None, "count": 80}]),
+        ]
+        text = format_best_worst(entries)
+        self.assertIn(
+            "| SET | 0.100 | - | 0.250 | - | - | "
+            "+80.0 pp (> 1000 ms) |", text)
+
+    def test_all_five_sweep_kinds_render_histogram_comparison(self):
+        entries = [
+            self._step_record(40000.0, keys=100, clients=4,
+                              value_size=128, pipeline=5,
+                              mix="90:10"),
+            self._step_record(50000.0, keys=100, clients=4,
+                              value_size=128, pipeline=5,
+                              mix="90:10"),
+        ]
+        text = format_best_worst(entries)
+        for heading in (
+                "#### Keyspace sweep — 100 keys — per-op histogram "
+                "comparison — best vs worst run",
+                "#### Client sweep — 4 clients — per-op histogram "
+                "comparison — best vs worst run",
+                "#### Value size sweep — 128 byte values — per-op "
+                "histogram comparison — best vs worst run",
+                "#### Pipeline sweep — 5 commands — per-op "
+                "histogram comparison — best vs worst run",
+                "#### Mix sweep — 90:10 read:write — per-op "
+                "histogram comparison — best vs worst run"):
+            self.assertIn(heading, text)
 
     def test_step_pick_is_per_step_not_per_run(self):
         # The step's best run is picked by the step's own
@@ -2142,6 +2276,129 @@ class TestBestWorstSweepSteps(unittest.TestCase):
             "the recorded per-op histograms for this step are "
             "malformed, so no histograms are shown.",
             step["notes"][0])
+
+    def test_json_step_histogram_comparison(self):
+        # The core of the JSON side: each sweep entry carries
+        # the step's per-op histogram comparison under
+        # "histogram_comparison" — each op's p50/p99 in the
+        # worst and best runs' steps, the p99 change, and the
+        # bucket drift — the same numbers the Markdown table
+        # shows, so the two views cannot disagree. The rows flag
+        # that the step's p50/p99 are read off its histogram
+        # buckets, not from per-op percentile fields.
+        entries = [
+            self._step_record(
+                40000.0,
+                set_buckets=[{"upper_ms": 0.1, "count": 400},
+                             {"upper_ms": 0.25, "count": 100}]),
+            self._step_record(
+                60000.0,
+                set_buckets=[{"upper_ms": 0.1, "count": 500}]),
+        ]
+        step = best_worst_comparison(entries)["backends"][0][
+            "sweeps"][0]
+        comparison = step["histogram_comparison"]
+        self.assertEqual(comparison["from"], "worst")
+        self.assertEqual(comparison["to"], "best")
+        self.assertEqual(comparison["notes"], [])
+        self.assertTrue(comparison["percentiles_from_histograms"])
+        by_op = {row["op"]: row for row in comparison["rows"]}
+        self.assertEqual(by_op["SET"]["p50_from_ms"], 0.1)
+        self.assertEqual(by_op["SET"]["p50_to_ms"], 0.1)
+        self.assertEqual(by_op["SET"]["p99_from_ms"], 0.25)
+        self.assertEqual(by_op["SET"]["p99_to_ms"], 0.1)
+        self.assertAlmostEqual(by_op["SET"]["p99_change_pct"], -60.0)
+        self.assertAlmostEqual(by_op["SET"]["bucket_drift_pp"], 20.0)
+        self.assertEqual(by_op["SET"]["bucket_drift_bucket"],
+                         "<= 0.1 ms")
+        self.assertAlmostEqual(by_op["GET"]["p99_change_pct"], 0.0)
+        self.assertAlmostEqual(by_op["GET"]["bucket_drift_pp"], 0.0)
+        # The Markdown view renders the same row from the same
+        # shared helper.
+        self.assertIn(
+            "| SET | 0.100 | 0.100 | 0.250 | 0.100 | -60.0% | "
+            "+20.0 pp (<= 0.1 ms) |", format_best_worst(entries))
+
+    def test_json_step_histogram_comparison_single_run_has_note(self):
+        entries = [self._step_record(50000.0, set_count=500)]
+        comparison = best_worst_comparison(entries)["backends"][0][
+            "sweeps"][0]["histogram_comparison"]
+        self.assertIsNone(comparison["rows"])
+        self.assertEqual(len(comparison["notes"]), 1)
+        self.assertIn(
+            "are the same run, so there is no best-vs-worst "
+            "histogram comparison for this step.",
+            comparison["notes"][0])
+
+    def test_json_step_histogram_comparison_before_0_49_has_note(self):
+        entries = [self._step_record(40000.0, histograms="missing"),
+                   self._step_record(50000.0, histograms="missing")]
+        comparison = best_worst_comparison(entries)["backends"][0][
+            "sweeps"][0]["histogram_comparison"]
+        self.assertIsNone(comparison["rows"])
+        self.assertEqual(len(comparison["notes"]), 2)
+        self.assertIn("Keyspace sweep — 100 keys (best run",
+                      comparison["notes"][0])
+        self.assertIn(
+            "this step was recorded before 0.49.0, so it carries "
+            "no per-op histograms.", comparison["notes"][0])
+        self.assertIn(
+            "No best-vs-worst histogram comparison is shown for "
+            "this step.", comparison["notes"][0])
+        self.assertIn("Keyspace sweep — 100 keys (worst run",
+                      comparison["notes"][1])
+
+    def test_json_step_histogram_comparison_overflow_shows_none(self):
+        # A p50/p99 rank that lands in the overflow bucket has
+        # no upper edge to report, so the JSON carries None for
+        # that side — the same "-" the Markdown table shows.
+        entries = [
+            self._step_record(
+                40000.0,
+                set_buckets=[{"upper_ms": 0.1, "count": 80},
+                             {"upper_ms": 0.25, "count": 20}]),
+            self._step_record(
+                60000.0,
+                set_buckets=[{"upper_ms": 0.1, "count": 10},
+                             {"upper_ms": 0.25, "count": 10},
+                             {"upper_ms": None, "count": 80}]),
+        ]
+        comparison = best_worst_comparison(entries)["backends"][0][
+            "sweeps"][0]["histogram_comparison"]
+        by_op = {row["op"]: row for row in comparison["rows"]}
+        self.assertEqual(by_op["SET"]["p50_from_ms"], 0.1)
+        self.assertIsNone(by_op["SET"]["p50_to_ms"])
+        self.assertEqual(by_op["SET"]["p99_from_ms"], 0.25)
+        self.assertIsNone(by_op["SET"]["p99_to_ms"])
+        self.assertIsNone(by_op["SET"]["p99_change_pct"])
+        self.assertAlmostEqual(by_op["SET"]["bucket_drift_pp"], 80.0)
+        self.assertEqual(by_op["SET"]["bucket_drift_bucket"],
+                         "> 1000 ms")
+
+    def test_json_file_round_trip_carries_sweep_histogram_comparison(self):
+        entries = [
+            self._step_record(
+                40000.0,
+                set_buckets=[{"upper_ms": 0.1, "count": 400},
+                             {"upper_ms": 0.25, "count": 100}]),
+            self._step_record(
+                60000.0,
+                set_buckets=[{"upper_ms": 0.1, "count": 500}]),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "best-worst.json")
+            comparison = write_best_worst_json(path, entries)
+            with open(path, encoding="utf-8") as f:
+                parsed = json.load(f)
+            self.assertEqual(parsed, comparison)
+            step_comparison = parsed["backends"][0]["sweeps"][0][
+                "histogram_comparison"]
+            by_op = {row["op"]: row
+                     for row in step_comparison["rows"]}
+            self.assertAlmostEqual(
+                by_op["SET"]["p99_change_pct"], -60.0)
+            self.assertTrue(
+                step_comparison["percentiles_from_histograms"])
 
     def test_json_records_without_sweeps_have_empty_sweeps(self):
         # History written before 0.37.0 has no "sweeps" key: the
