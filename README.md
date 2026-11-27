@@ -667,8 +667,15 @@ in p99, the same table per operation type that ran under
 `per_op`, the latest run's per-operation latency histograms under
 `histograms_by_op` (or a note under `notes` naming why there are
 none), and the per-op histogram comparison between the first and
-last runs under `histogram_comparison` — plus one per-step sweep
-section per sweep step that ran in the window under `sweeps`:
+last runs under `histogram_comparison` — plus one per-step trend
+section per sweep step that ran in the window under
+`sweep_trends`: the step's runs table, sparkline and first-to-last
+change in ops/sec and in p99, and the step's per-op latency
+histograms from the latest run that recorded it (or a note under
+`notes` naming why there are none) — the same per-step trend
+sections the Markdown chart renders, built from the same shared
+helper, so a script reading the trend JSON sees what the chart
+shows for the same step — plus one per-step sweep section per sweep step that ran in the window under `sweeps`:
 the step's best and worst runs by the step's own ops/sec, the
 percentage changes between them, and the step's per-op latency
 histograms from both runs — or notes naming why a pick has none
@@ -1195,6 +1202,22 @@ make test
 
 ## Roadmap
 
+- Per-sweep-step trend sections in the `--trend-json` output:
+  each backend's `sweep_trends` list carries one entry per sweep
+  step that ran in the trend window — the step's runs table
+  (timestamp, ops/sec, the change versus the previous run that
+  recorded the same step, and p99), the sparkline, the
+  first-to-last change in ops/sec and in p99, and the step's
+  per-op latency histograms from the latest run that recorded
+  it — built from the same shared helper as the Markdown
+  `--trend` view's per-step sections, so the JSON and Markdown
+  views cannot disagree and a script reading the trend JSON
+  sees what the chart shows for the same step. A step recorded
+  before 0.49.0, one recorded with no per-op latencies, or one
+  whose recorded histograms are malformed contributes a note
+  naming the reason instead of a histogram map; a step with no
+  numeric ops/sec in the window gets no section at all. Done in
+  0.54.0.
 - Per-sweep-step sections in the `--trend-json` output: each
   backend's `sweeps` list carries one entry per sweep step that
   ran in the trend window — the step's best and worst runs by

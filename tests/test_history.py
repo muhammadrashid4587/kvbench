@@ -1579,6 +1579,172 @@ class TestTrendJson(unittest.TestCase):
             self.assertNotIn("sweeps", entry)
         backend = trend_comparison(entries)["backends"][0]
         self.assertEqual(backend["sweeps"], [])
+        self.assertEqual(backend["sweep_trends"], [])
+
+    def test_trend_json_carries_sweep_trend_sections(self):
+        # The other half of the per-step treatment: each
+        # backend's "sweep_trends" carries one entry per step
+        # that ran in the window, with the step's own runs
+        # table, sparkline and first-to-last change in ops/sec
+        # and in p99, and the step's per-op histograms from
+        # the latest run that recorded it — the same sections
+        # the Markdown --trend chart renders per step.
+        entries = [
+            self._step_record(40000.0, set_count=500),
+            self._step_record(60000.0, set_count=300),
+        ]
+        trends = trend_comparison(entries)["backends"][0][
+            "sweep_trends"]
+        self.assertEqual(len(trends), 1)
+        step = trends[0]
+        self.assertEqual(step["kind"], "keyspace")
+        self.assertEqual(step["label"], "Keyspace sweep")
+        self.assertEqual(step["step"], 100)
+        self.assertEqual(step["step_label"], "100 keys")
+        self.assertEqual(len(step["runs"]), 2)
+        self.assertEqual(step["runs"][0]["ops_per_sec"], 40000.0)
+        self.assertIsNone(step["runs"][0]["ops_sec_delta_pct"])
+        self.assertEqual(step["runs"][1]["ops_per_sec"], 60000.0)
+        self.assertAlmostEqual(
+            step["runs"][1]["ops_sec_delta_pct"], 50.0)
+        self.assertEqual(step["runs"][1]["p99_ms"], 0.020)
+        self.assertEqual(step["sparkline"], "▁█")
+        first_to_last = step["first_to_last"]
+        self.assertEqual(first_to_last["ops_per_sec"]["first"],
+                         40000.0)
+        self.assertEqual(first_to_last["ops_per_sec"]["last"],
+                         60000.0)
+        self.assertAlmostEqual(
+            first_to_last["ops_per_sec"]["delta_pct"], 50.0)
+        self.assertEqual(first_to_last["p99_ms"]["first"], 0.020)
+        self.assertEqual(first_to_last["p99_ms"]["last"], 0.020)
+        self.assertAlmostEqual(
+            first_to_last["p99_ms"]["delta_pct"], 0.0)
+        self.assertEqual(step["notes"], [])
+        self.assertEqual(step["histograms_by_op"]["SET"],
+                         [{"upper_ms": 0.1, "count": 300}])
+        self.assertEqual(step["histograms_by_op"]["GET"],
+                         [{"upper_ms": 0.1, "count": 400}])
+
+    def test_trend_json_sweep_trend_agrees_with_markdown(self):
+        # Both views build their per-step trend sections from
+        # the same shared helpers, so the JSON table, sparkline
+        # and first-to-last lines match the Markdown chart's
+        # numbers for the same step.
+        entries = [
+            self._step_record(40000.0, set_count=500),
+            self._step_record(60000.0, set_count=300),
+        ]
+        step = trend_comparison(entries)["backends"][0][
+            "sweep_trends"][0]
+        text = format_trend(entries)
+        self.assertIn("| 60,000 | +50.0% | 0.020 |", text)
+        self.assertIn(
+            "Keyspace sweep — 100 keys trend (oldest → newest): "
+            f"{step['sparkline']}", text)
+        self.assertIn(
+            "Keyspace sweep — 100 keys first → last: "
+            "40,000 → 60,000 ops/sec (+50.0%)", text)
+        self.assertIn(
+            "Keyspace sweep — 100 keys p99 first → last: "
+            "0.020 → 0.020 ms (+0.0%)", text)
+
+    def test_trend_json_sweep_trend_all_five_kinds(self):
+        entries = [
+            self._step_record(40000.0, keys=100, clients=4,
+                              value_size=128, pipeline=5,
+                              mix="90:10"),
+            self._step_record(50000.0, keys=100, clients=4,
+                              value_size=128, pipeline=5,
+                              mix="90:10"),
+        ]
+        trends = trend_comparison(entries)["backends"][0][
+            "sweep_trends"]
+        by_kind = {s["kind"]: s for s in trends}
+        self.assertEqual(
+            sorted(by_kind),
+            ["clients", "keyspace", "mix", "pipeline",
+             "value_size"])
+        self.assertEqual(by_kind["keyspace"]["step_label"],
+                         "100 keys")
+        self.assertEqual(by_kind["clients"]["step_label"],
+                         "4 clients")
+        self.assertEqual(by_kind["value_size"]["step_label"],
+                         "128 byte values")
+        self.assertEqual(by_kind["pipeline"]["step_label"],
+                         "5 commands")
+        self.assertEqual(by_kind["mix"]["step_label"],
+                         "90:10 read:write")
+        for step in trends:
+            self.assertEqual(len(step["runs"]), 2)
+            self.assertEqual(
+                step["first_to_last"]["ops_per_sec"]["first"],
+                40000.0)
+            self.assertEqual(
+                step["first_to_last"]["ops_per_sec"]["last"],
+                50000.0)
+            self.assertEqual(step["notes"], [])
+            self.assertIn("histograms_by_op", step)
+
+    def test_trend_json_sweep_trend_delta_scans_past_window(self):
+        # The delta is against the previous run that recorded
+        # the same step, scanning all runs — so a run outside
+        # the window still counts, the same rule the Markdown
+        # tables use: with limit 1 only the latest run is in
+        # the window, but its delta is against the run before.
+        entries = [
+            self._step_record(40000.0),
+            self._step_record(50000.0),
+            self._step_record(60000.0),
+        ]
+        step = trend_comparison(entries, limit=1)["backends"][0][
+            "sweep_trends"][0]
+        self.assertEqual(len(step["runs"]), 1)
+        self.assertAlmostEqual(
+            step["runs"][0]["ops_sec_delta_pct"], 20.0)
+        self.assertIsNone(
+            step["first_to_last"]["ops_per_sec"])
+        self.assertIsNone(step["first_to_last"]["p99_ms"])
+        self.assertEqual(step["sparkline"], "▅")
+
+    def test_trend_json_sweep_trend_step_recorded_before_0_49_has_note(self):
+        entries = [self._step_record(40000.0, histograms="missing"),
+                   self._step_record(50000.0, histograms="missing")]
+        step = trend_comparison(entries)["backends"][0][
+            "sweep_trends"][0]
+        self.assertNotIn("histograms_by_op", step)
+        self.assertEqual(len(step["notes"]), 1)
+        self.assertIn(
+            "Keyspace sweep — 100 keys (latest run,",
+            step["notes"][0])
+        self.assertIn(
+            "this step was recorded before 0.49.0, so it carries "
+            "no per-op histograms.", step["notes"][0])
+
+    def test_trend_json_sweep_trend_step_with_no_per_op_latencies_has_note(self):
+        entries = [self._step_record(40000.0, histograms="empty"),
+                   self._step_record(50000.0, histograms="empty")]
+        step = trend_comparison(entries)["backends"][0][
+            "sweep_trends"][0]
+        self.assertNotIn("histograms_by_op", step)
+        self.assertEqual(len(step["notes"]), 1)
+        self.assertIn(
+            "this step recorded no per-op latencies, so there are "
+            "no histograms to show.", step["notes"][0])
+
+    def test_trend_json_sweep_trend_step_malformed_histograms_has_note(self):
+        entries = [self._step_record(40000.0,
+                                     histograms="malformed"),
+                   self._step_record(50000.0,
+                                     histograms="malformed")]
+        step = trend_comparison(entries)["backends"][0][
+            "sweep_trends"][0]
+        self.assertNotIn("histograms_by_op", step)
+        self.assertEqual(len(step["notes"]), 1)
+        self.assertIn(
+            "the recorded per-op histograms for this step are "
+            "malformed, so no histograms are shown.",
+            step["notes"][0])
 
     def test_trend_json_sweeps_agree_with_best_worst_json(self):
         # Both views build their per-step sections from the same

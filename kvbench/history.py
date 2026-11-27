@@ -68,7 +68,13 @@ the per-op sections, the latest run's per-op histograms and the
 first-to-last histogram comparison — with the same per-sweep-step
 sections ``--best-worst-json`` carries, built from the same
 shared helper, so a script can read the trend without parsing
-the Markdown chart.
+the Markdown chart. Since 0.54.0 the trend JSON also carries
+each sweep step's own trend section — the step's runs table,
+sparkline and first-to-last change in ops/sec and in p99, and
+the step's per-op histograms from the latest run that recorded
+it — the same per-step trend sections the Markdown chart
+renders, built from the same shared helper, so the JSON and
+Markdown views cannot disagree.
 """
 
 import json
@@ -1276,6 +1282,92 @@ def _trend_section_data(runs, window, pick):
     }
 
 
+def _sweep_trend_entries(runs, window):
+    """Per-sweep-step trend sections for one backend, as data.
+
+    ``runs`` are all recorded runs of the backend (oldest
+    first), ``window`` the most recent ones being rendered.
+    One entry per sweep step that ran in the window — one
+    keyspace size, one client count, one value size, one
+    pipeline depth, one read:write ratio — with the step's
+    kind, label and raw value, the step label the Markdown
+    view renders, the step's runs table (timestamp, ops/sec,
+    the change versus the previous run that recorded the
+    same step, and p99), the sparkline and the first-to-last
+    change in ops/sec and in p99, plus the step's per-op
+    latency histograms from the latest run that recorded it
+    — or a note naming why there are none. The table is the
+    same shape as the overall and per-op trend sections,
+    built from the same :func:`_trend_section_data` helper
+    the Markdown view's :func:`_sweep_trend_lines` builds
+    its tables from, so a script reading the JSON sees what
+    the Markdown chart shows. Runs recorded before 0.37.0
+    carry no ``sweeps`` data and contribute no sections; a
+    step with no numeric ops/sec in the window gets no
+    section at all. A step recorded before 0.49.0, one
+    recorded with no per-op latencies, or one whose recorded
+    histograms are malformed contributes a note naming the
+    reason instead of a histogram map, built from the same
+    shared helper as the Markdown view's note.
+    """
+    entries = []
+    for kind, step_key, label, unit in _SWEEP_KINDS:
+        steps = sorted({
+            step.get(step_key)
+            for entry in window
+            for step in (entry.get("sweeps") or {}).get(kind, [])
+            if isinstance(step, dict)
+            and isinstance(step.get(step_key), (int, float, str))
+        })
+        for step_value in steps:
+            section = _trend_section_data(
+                runs, window,
+                lambda e, kind=kind, step_key=step_key,
+                step_value=step_value: _sweep_step_entry(
+                    e, kind, step_key, step_value))
+            values = [row["ops_per_sec"] for row in section["runs"]
+                      if row["ops_per_sec"] is not None]
+            if not values:
+                continue
+            if isinstance(step_value, str):
+                step_label = f"{step_value} {unit}"
+            else:
+                step_label = f"{step_value:,} {unit}"
+            notes = []
+            entry = {
+                "kind": kind,
+                "label": label,
+                "step": step_value,
+                "step_label": step_label,
+                "runs": section["runs"],
+                "sparkline": _sparkline(values),
+                "first_to_last": section["first_to_last"],
+                "notes": notes,
+            }
+            latest = None
+            latest_step = None
+            for run in reversed(window):
+                step = _sweep_step_entry(run, kind, step_key,
+                                         step_value)
+                if step is not None:
+                    latest = run
+                    latest_step = step
+                    break
+            if latest_step is not None:
+                cleaned, reason = _sweep_step_histograms(latest_step)
+                if cleaned is not None:
+                    entry["histograms_by_op"] = cleaned
+                else:
+                    timestamp = latest.get(
+                        "timestamp", "")[:19].replace("T", " ")
+                    notes.append(
+                        f"{label} — {step_label} (latest run, "
+                        f"{timestamp}): "
+                        f"{_SWEEP_STEP_HISTOGRAM_REASONS[reason]}")
+            entries.append(entry)
+    return entries
+
+
 def trend_comparison(entries, limit=20):
     """Ops/sec trend per backend, as JSON-serializable data.
 
@@ -1288,11 +1380,20 @@ def trend_comparison(entries, limit=20):
     latest run's per-operation latency histograms — or a note
     naming why there are none — and the per-op histogram
     comparison between the first and last runs in the window.
-    Each backend also carries a ``sweeps`` list — one entry per
-    sweep step that ran in the window, with the step's best and
-    worst runs by the step's own ops/sec, the percentage changes
-    between them, and the step's per-op latency histograms from
-    both runs, plus the step's per-op histogram comparison —
+    Each backend also carries a ``sweep_trends`` list — one
+    entry per sweep step that ran in the window, with the
+    step's runs table, sparkline and first-to-last change in
+    ops/sec and in p99, and the step's per-op latency
+    histograms from the latest run that recorded it — the
+    same per-step trend sections the Markdown view renders,
+    built from the same shared helper, so a script reading
+    the JSON sees what the chart shows. Each backend also
+    carries a ``sweeps`` list — one entry per sweep step
+    that ran in the window, with the step's best and worst
+    runs by the step's own ops/sec, the percentage changes
+    between them, and the step's per-op latency histograms
+    from both runs, plus the step's per-op histogram
+    comparison —
     the same per-step sections ``--best-worst-json`` carries,
     built from the same shared
     :func:`_best_worst_sweep_entries` helper, so a script
@@ -1333,6 +1434,7 @@ def trend_comparison(entries, limit=20):
             "first_to_last": overall["first_to_last"],
             "per_op": per_op,
             "sweeps": _best_worst_sweep_entries(window),
+            "sweep_trends": _sweep_trend_entries(runs, window),
             "histograms_by_op": histograms,
             "notes": notes,
             "histogram_comparison": _trend_histogram_comparison(
