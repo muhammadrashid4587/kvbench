@@ -5,8 +5,12 @@ kvbench run (the ``--json`` output) and compares this run's results
 against it, backend by backend, matched by name: ops/sec and p99
 side by side, with the percentage change and a verdict per backend,
 plus a per-operation breakdown — each op's p99 and ops/sec delta
-versus the baseline — and the per-operation latency histograms of
-both runs, so a p99 move names the op whose latency shape moved.
+versus the baseline — and a best/worst op section per backend —
+the op whose ops/sec rose most and the op whose p99 fell most,
+and the other end of each, with a note when a comparison has a
+single op or identical runs — and the per-operation latency
+histograms of both runs, so a p99 move names the op whose latency
+shape moved.
 ``--regression-threshold PCT`` turns the comparison into a gate:
 the run exits non-zero when any backend's ops/sec fell by more than
 PCT, or its p99 rose by more than PCT, versus the baseline file.
@@ -287,6 +291,85 @@ def _per_op_deltas(current_per_op, baseline_per_op):
     return deltas
 
 
+def _best_worst_per_op(per_op):
+    """Best and worst op of a comparison, by ops/sec and p99 delta.
+
+    ``per_op`` is the per-op delta rows :func:`_per_op_deltas`
+    returns. Best by ops/sec is the op whose ops/sec rose most
+    (highest ``ops_sec_delta_pct``); best by p99 is the op whose
+    p99 fell most (lowest ``p99_delta_pct``) — a lower tail is
+    better. Worst is the other end of each. Only ops the baseline
+    ran carry deltas, so the picks only cover those; ties keep
+    the earliest op in SET/GET/INCR/DEL order, so the pick is
+    stable. Each pick carries the op and both of its deltas, so
+    a script reading it sees the pick's full story.
+
+    Returns a JSON-serializable dict with ``best_by_ops_sec``,
+    ``worst_by_ops_sec``, ``best_by_p99`` and ``worst_by_p99``
+    — each a pick dict, or None when no op carries that delta —
+    and ``notes`` naming why a pick is missing or meaningless:
+    the baseline carries no per-op stats, only one op ran, the
+    two runs are identical, or an op never ran in the baseline.
+    """
+    ops_rows = [row for row in per_op
+                if row.get("ops_sec_delta_pct") is not None]
+    p99_rows = [row for row in per_op
+                if row.get("p99_delta_pct") is not None]
+
+    def _pick(row):
+        return {"op": row["op"],
+                "ops_sec_delta_pct": row["ops_sec_delta_pct"],
+                "p99_delta_pct": row["p99_delta_pct"]}
+
+    best_by_ops_sec = None
+    worst_by_ops_sec = None
+    if ops_rows:
+        best_by_ops_sec = _pick(max(
+            ops_rows, key=lambda row: row["ops_sec_delta_pct"]))
+        worst_by_ops_sec = _pick(min(
+            ops_rows, key=lambda row: row["ops_sec_delta_pct"]))
+    best_by_p99 = None
+    worst_by_p99 = None
+    if p99_rows:
+        best_by_p99 = _pick(min(
+            p99_rows, key=lambda row: row["p99_delta_pct"]))
+        worst_by_p99 = _pick(max(
+            p99_rows, key=lambda row: row["p99_delta_pct"]))
+    notes = []
+    if not ops_rows and not p99_rows:
+        notes.append(
+            "The baseline carries no per-operation stats, so "
+            "there is no best or worst op.")
+    else:
+        if (ops_rows and p99_rows
+                and all(row["ops_sec_delta_pct"] == 0.0
+                        for row in ops_rows)
+                and all(row["p99_delta_pct"] == 0.0
+                        for row in p99_rows)):
+            notes.append(
+                "The two runs are identical — every op's ops/sec "
+                "and p99 are unchanged, so the best and worst op "
+                "are the same.")
+        if len(per_op) == 1:
+            notes.append(
+                f"Only one op ran ({per_op[0]['op']}), so the best "
+                "and worst op are the same op.")
+        missing = [row["op"] for row in per_op
+                   if row["ops_sec_delta_pct"] is None
+                   and row["p99_delta_pct"] is None]
+        if missing:
+            notes.append(
+                f"{', '.join(missing)} never ran in the baseline "
+                "run, so it is not part of the best/worst picks.")
+    return {
+        "best_by_ops_sec": best_by_ops_sec,
+        "worst_by_ops_sec": worst_by_ops_sec,
+        "best_by_p99": best_by_p99,
+        "worst_by_p99": worst_by_p99,
+        "notes": notes,
+    }
+
+
 def _delta_pct(current, baseline):
     """Percentage change of ``current`` versus ``baseline``.
 
@@ -350,9 +433,15 @@ def compare_results(results, baseline_doc, current_workload,
     p99 and ops/sec deltas under ``per_op`` — one row per op
     that ran, with the current and baseline ops/sec and p99 and
     the percentage change of each, so a p99 move names the op
-    that moved, not just that the p99 moved — and the
-    per-operation latency histograms of both runs — the current
-    run's under
+    that moved, not just that the p99 moved — and a best/worst
+    op section under ``best_worst`` — the op whose ops/sec rose
+    most and the op whose p99 fell most, and the other end of
+    each, built by the shared :func:`_best_worst_per_op` helper
+    the Markdown view renders from too, so the two views cannot
+    disagree — with notes when a comparison has a single op or
+    identical runs, or the baseline carries no per-op stats.
+    Each entry also carries the per-operation latency histograms
+    of both runs — the current run's under
     ``histograms_by_op`` (the same log-spaced buckets as the
     single-run report's, from the same helper, so the comparison
     cannot disagree with it) and the baseline run's under
@@ -399,6 +488,9 @@ def compare_results(results, baseline_doc, current_workload,
             if (p99_delta is not None
                     and p99_delta > threshold_pct):
                 regression = True
+        per_op = _per_op_deltas(
+            result.per_op_summary,
+            _per_op_or_none(baseline.get("per_op")))
         entries.append({
             "name": result.name,
             "ops_per_sec": result.ops_per_sec,
@@ -411,9 +503,12 @@ def compare_results(results, baseline_doc, current_workload,
             "baseline_errors": baseline.get("errors"),
             "verdict": _verdict(ops_delta, p99_delta, regression),
             "regression": regression,
-            "per_op": _per_op_deltas(
-                result.per_op_summary,
-                _per_op_or_none(baseline.get("per_op"))),
+            "per_op": per_op,
+            # The best/worst picks are built from the entry's own
+            # per-op rows, so the section cannot disagree with the
+            # table just above it — and the Markdown view renders
+            # from this same dict.
+            "best_worst": _best_worst_per_op(per_op),
             "histograms_by_op": result.per_op_histograms,
             "baseline_histograms_by_op": _histograms_or_none(
                 baseline.get("histograms_by_op")),

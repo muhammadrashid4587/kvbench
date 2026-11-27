@@ -664,6 +664,102 @@ class TestCompareResults(unittest.TestCase):
             self.assertIsNone(row["ops_sec_delta_pct"])
             self.assertIsNone(row["p99_delta_pct"])
 
+    def test_entries_carry_best_worst(self):
+        # Same numbers as test_entries_carry_per_op_deltas: SET
+        # +25.0% ops/sec and -50.0% p99, GET +0.0% and +100.0% —
+        # so SET is best on both measures and GET worst on both.
+        comparison = compare_results(
+            [_result_with_ops()],
+            _baseline_doc(ops_per_sec=8_000, p99_ms=0.12,
+                          per_op=_baseline_per_op()),
+            _workload_dict(_workload()), "prev.json")
+        best_worst = comparison["entries"][0]["best_worst"]
+        self.assertEqual(best_worst["best_by_ops_sec"]["op"], "SET")
+        self.assertAlmostEqual(
+            best_worst["best_by_ops_sec"]["ops_sec_delta_pct"], 25.0)
+        self.assertEqual(best_worst["worst_by_ops_sec"]["op"], "GET")
+        self.assertAlmostEqual(
+            best_worst["worst_by_ops_sec"]["ops_sec_delta_pct"], 0.0)
+        self.assertEqual(best_worst["best_by_p99"]["op"], "SET")
+        self.assertAlmostEqual(
+            best_worst["best_by_p99"]["p99_delta_pct"], -50.0)
+        self.assertEqual(best_worst["worst_by_p99"]["op"], "GET")
+        self.assertAlmostEqual(
+            best_worst["worst_by_p99"]["p99_delta_pct"], 100.0)
+        self.assertEqual(best_worst["notes"], [])
+
+    def test_best_worst_single_op(self):
+        # Only SET ran: the best and worst op are the same op,
+        # and a note says so instead of a spread.
+        result = BenchmarkResult(
+            name="cinder (127.0.0.1:6379)",
+            ops=50, elapsed_s=0.01, errors=0,
+            latencies_ns=[100_000] * 50,
+            latencies_by_op={"SET": [100_000] * 50})
+        baseline_per_op = {"SET": {"count": 50, "ops_per_sec": 4_000,
+                                   "p99_ms": 0.2}}
+        comparison = compare_results(
+            [result], _baseline_doc(per_op=baseline_per_op),
+            _workload_dict(_workload()), "prev.json")
+        best_worst = comparison["entries"][0]["best_worst"]
+        for key in ("best_by_ops_sec", "worst_by_ops_sec",
+                    "best_by_p99", "worst_by_p99"):
+            self.assertEqual(best_worst[key]["op"], "SET")
+        self.assertEqual(best_worst["notes"], [
+            "Only one op ran (SET), so the best and worst op are "
+            "the same op."])
+
+    def test_best_worst_identical_runs(self):
+        # Every per-op delta is 0.0: the picks are the first op
+        # in order, and a note says the runs are identical.
+        identical_per_op = {
+            "SET": {"count": 50, "ops_per_sec": 5_000, "p99_ms": 0.1},
+            "GET": {"count": 50, "ops_per_sec": 5_000, "p99_ms": 0.2},
+        }
+        comparison = compare_results(
+            [_result_with_ops()],
+            _baseline_doc(per_op=identical_per_op),
+            _workload_dict(_workload()), "prev.json")
+        best_worst = comparison["entries"][0]["best_worst"]
+        for key in ("best_by_ops_sec", "worst_by_ops_sec",
+                    "best_by_p99", "worst_by_p99"):
+            self.assertEqual(best_worst[key]["op"], "SET")
+        self.assertEqual(best_worst["notes"], [
+            "The two runs are identical — every op's ops/sec "
+            "and p99 are unchanged, so the best and worst op "
+            "are the same."])
+
+    def test_best_worst_without_baseline_per_op(self):
+        # A baseline with no per-op stats has no best or worst
+        # op, and a note says why.
+        comparison = compare_results(
+            [_result_with_ops()], _baseline_doc(),
+            _workload_dict(_workload()), "prev.json")
+        best_worst = comparison["entries"][0]["best_worst"]
+        for key in ("best_by_ops_sec", "worst_by_ops_sec",
+                    "best_by_p99", "worst_by_p99"):
+            self.assertIsNone(best_worst[key])
+        self.assertEqual(best_worst["notes"], [
+            "The baseline carries no per-operation stats, so "
+            "there is no best or worst op."])
+
+    def test_best_worst_op_missing_from_baseline(self):
+        # The baseline ran SET only: the picks cover SET alone,
+        # and a note names GET as left out.
+        baseline_per_op = {"SET": {"count": 50, "ops_per_sec": 4_000,
+                                   "p99_ms": 0.2}}
+        comparison = compare_results(
+            [_result_with_ops()],
+            _baseline_doc(per_op=baseline_per_op),
+            _workload_dict(_workload()), "prev.json")
+        best_worst = comparison["entries"][0]["best_worst"]
+        for key in ("best_by_ops_sec", "worst_by_ops_sec",
+                    "best_by_p99", "worst_by_p99"):
+            self.assertEqual(best_worst[key]["op"], "SET")
+        self.assertEqual(best_worst["notes"], [
+            "GET never ran in the baseline run, so it is not "
+            "part of the best/worst picks."])
+
     def test_malformed_baseline_per_op_is_ignored(self):
         # A hand-made baseline file may carry anything: a shape
         # the comparison cannot read reads as no baseline per-op
@@ -944,6 +1040,68 @@ class TestComparisonInReports(unittest.TestCase):
         self.assertAlmostEqual(per_op[1]["ops_sec_delta_pct"], 0.0)
         self.assertAlmostEqual(per_op[1]["p99_delta_pct"], 100.0)
 
+    def test_markdown_best_worst_section(self):
+        comparison = compare_results(
+            [_result_with_ops()],
+            _baseline_doc(ops_per_sec=8_000, p99_ms=0.12,
+                          per_op=_baseline_per_op()),
+            _workload_dict(_workload()), "prev.json")
+        text = render_markdown([_result_with_ops()], _workload(),
+                               "kvbench", comparison)
+        # SET: +25.0% ops/sec, -50.0% p99; GET: +0.0%, +100.0% —
+        # so SET is best on both measures and GET worst on both.
+        self.assertIn(
+            "#### cinder (127.0.0.1:6379) — best/worst op vs "
+            "previous run", text)
+        self.assertIn("| Ops/sec Δ | SET (+25.0%) | GET (+0.0%) |", text)
+        self.assertIn("| p99 Δ | SET (-50.0%) | GET (+100.0%) |", text)
+
+    def test_markdown_best_worst_identical_runs_notes_it(self):
+        identical_per_op = {
+            "SET": {"count": 50, "ops_per_sec": 5_000, "p99_ms": 0.1},
+            "GET": {"count": 50, "ops_per_sec": 5_000, "p99_ms": 0.2},
+        }
+        comparison = compare_results(
+            [_result_with_ops()],
+            _baseline_doc(per_op=identical_per_op),
+            _workload_dict(_workload()), "prev.json")
+        text = render_markdown([_result_with_ops()], _workload(),
+                               "kvbench", comparison)
+        self.assertIn(
+            "#### cinder (127.0.0.1:6379) — best/worst op vs "
+            "previous run", text)
+        self.assertIn("The two runs are identical", text)
+
+    def test_markdown_best_worst_without_baseline_per_op_notes_it(self):
+        comparison = compare_results(
+            [_result_with_ops()], _baseline_doc(),
+            _workload_dict(_workload()), "prev.json")
+        text = render_markdown([_result_with_ops()], _workload(),
+                               "kvbench", comparison)
+        self.assertIn(
+            "#### cinder (127.0.0.1:6379) — best/worst op vs "
+            "previous run", text)
+        self.assertIn("there is no best or worst op", text)
+
+    def test_json_carries_best_worst(self):
+        parsed = json.loads(render_json(
+            [_result_with_ops()], _workload(), "kvbench",
+            compare_results(
+                [_result_with_ops()],
+                _baseline_doc(ops_per_sec=8_000, p99_ms=0.12,
+                              per_op=_baseline_per_op()),
+                _workload_dict(_workload()), "prev.json")))
+        best_worst = parsed["comparison"]["entries"][0]["best_worst"]
+        # The JSON carries the same picks the Markdown table
+        # renders, so the two views cannot disagree.
+        self.assertEqual(best_worst["best_by_ops_sec"]["op"], "SET")
+        self.assertAlmostEqual(
+            best_worst["best_by_ops_sec"]["ops_sec_delta_pct"], 25.0)
+        self.assertEqual(best_worst["worst_by_p99"]["op"], "GET")
+        self.assertAlmostEqual(
+            best_worst["worst_by_p99"]["p99_delta_pct"], 100.0)
+        self.assertEqual(best_worst["notes"], [])
+
     def test_json_carries_per_op_histograms(self):
         parsed = json.loads(render_json(
             [_result_with_ops()], _workload(), "kvbench",
@@ -1119,6 +1277,15 @@ class TestCompareFileCli(unittest.TestCase):
             self.assertEqual(exported, parsed["comparison"])
             self.assertEqual(exported["source"], "report")
             self.assertEqual(len(exported["entries"]), 1)
+            # The export carries the best/worst op section too,
+            # since it writes the same comparison dict.
+            best_worst = exported["entries"][0]["best_worst"]
+            self.assertEqual(
+                set(best_worst),
+                {"best_by_ops_sec", "worst_by_ops_sec",
+                 "best_by_p99", "worst_by_p99", "notes"})
+            self.assertIsNotNone(best_worst["best_by_ops_sec"])
+            self.assertIsNotNone(best_worst["worst_by_p99"])
 
     def test_compare_file_json_without_compare_file(self):
         code = main(self._argv(["--ops", "10",

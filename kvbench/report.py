@@ -853,6 +853,54 @@ def _time_series_lines(result):
     return lines
 
 
+def _best_worst_op_lines(name, best_worst):
+    """Best/worst op section for one compared backend, or [].
+
+    ``best_worst`` is the ``best_worst`` dict
+    :func:`kvbench.compare.compare_results` puts on each entry —
+    the op whose ops/sec rose most and the op whose p99 fell
+    most, and the other end of each — so the Markdown renders
+    from the same picks the JSON report carries, and the two
+    views cannot disagree. A comparison built before 0.58.0
+    carries no ``best_worst`` dict and renders nothing. A pick
+    with no delta for a measure shows n/a for that measure.
+    """
+    if not best_worst:
+        return []
+    lines = [
+        f"#### {name} — best/worst op vs previous run",
+        "",
+    ]
+    best_ops = best_worst.get("best_by_ops_sec")
+    worst_ops = best_worst.get("worst_by_ops_sec")
+    best_p99 = best_worst.get("best_by_p99")
+    worst_p99 = best_worst.get("worst_by_p99")
+    if (best_ops is not None or worst_ops is not None
+            or best_p99 is not None or worst_p99 is not None):
+        def _cell(pick, key):
+            if pick is None:
+                return "n/a"
+            delta = pick.get(key)
+            if delta is None:
+                return f"{pick['op']} (n/a)"
+            return f"{pick['op']} ({delta:+.1f}%)"
+
+        lines += [
+            "| | Best op | Worst op |",
+            "| --- | --- | --- |",
+            f"| Ops/sec Δ | {_cell(best_ops, 'ops_sec_delta_pct')} | "
+            f"{_cell(worst_ops, 'ops_sec_delta_pct')} |",
+            f"| p99 Δ | {_cell(best_p99, 'p99_delta_pct')} | "
+            f"{_cell(worst_p99, 'p99_delta_pct')} |",
+            "",
+        ]
+    for note in best_worst.get("notes") or []:
+        lines.append(f"- {note}")
+    if best_worst.get("notes"):
+        lines.append("")
+    return lines
+
+
 def _comparison_lines(comparison):
     """Side-by-side comparison section, or [] when no comparison.
 
@@ -860,7 +908,12 @@ def _comparison_lines(comparison):
     baseline ops/sec and p99 and the percentage change of each,
     plus a verdict line per backend. The table is followed by a
     per-operation p99 / ops-sec delta table per compared backend
-    — one row per op that ran — and then by a per-operation
+    — one row per op that ran — and a best/worst op section per
+    compared backend — the op whose ops/sec rose most and the
+    op whose p99 fell most, and the other end of each, with a
+    note when a comparison has a single op or identical runs —
+    both built from the same dicts the JSON report carries, so
+    the views cannot disagree — and then by a per-operation
     latency histogram per compared backend — the
     current run's and the baseline run's, drawn by the same
     shared helper as the single-run per-op histograms, so the
@@ -965,6 +1018,13 @@ def _comparison_lines(comparison):
                     "deltas are n/a."
                 )
                 lines.append("")
+            # Best/worst op vs the baseline: the op whose ops/sec
+            # rose most and the op whose p99 fell most, and the
+            # other end of each — rendered from the entry's own
+            # ``best_worst`` dict, the same one the JSON report
+            # carries, so the two views cannot disagree.
+            lines += _best_worst_op_lines(
+                entry["name"], entry.get("best_worst"))
         # Per-operation latency histograms per compared backend:
         # the current run's, and the baseline run's when it carries
         # them — a history baseline or a report written before

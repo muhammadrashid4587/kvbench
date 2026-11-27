@@ -855,7 +855,16 @@ backend also carries a per-operation p99 / ops-sec delta table —
 one row per op that ran, with the current and baseline ops/sec and
 p99 and the percentage change of each — under
 `comparison.entries[].per_op` in JSON, so a p99 move names the op
-that moved, not just that the p99 moved. A history baseline
+that moved, not just that the p99 moved. Each compared backend
+also carries a best/worst op section — the op whose ops/sec rose
+most and the op whose p99 fell most, and the other end of each —
+under `comparison.entries[].best_worst` in JSON and as a table
+under the per-op table in Markdown, built from the same per-op
+deltas, so the two views cannot disagree and the op that moved
+most reads at a glance. A comparison with a single op, or two
+identical runs, carries a note saying so instead of a spread, and
+a baseline that carries no per-op stats carries a note saying
+there is no best or worst op. A history baseline
 compares per op the same way when its record carries per-op stats
 (records since 0.22.0 do); a baseline that carries none still
 shows this run's per-op numbers with n/a deltas, and a note
@@ -1241,6 +1250,24 @@ make test
 
 ## Roadmap
 
+- Best/worst op section in the `--compare` output
+  (`--compare-file` / `--compare-history`): each compared
+  backend carries a best/worst op section — the op whose ops/sec
+  rose most and the op whose p99 fell most, and the other end of
+  each — under `comparison.entries[].best_worst` in JSON and as
+  a table under the per-op delta table in Markdown, built by one
+  shared helper in `compare.py` from the entry's own per-op
+  deltas, so the JSON and Markdown views cannot disagree and
+  the op that moved most reads at a glance; the
+  `--compare-file-json` export carries it too, since it writes
+  the same comparison dict. A comparison with a single op, or
+  two identical runs, carries a note saying so instead of a
+  spread, an op the baseline never ran is left out of the picks
+  with a note naming it, and a baseline that carries no per-op
+  stats carries a note saying there is no best or worst op.
+  Done in 0.58.0. Next: the best and worst ops' per-op latency
+  histograms from both runs, so the op that moved most also
+  shows how its latency shape moved.
 - `--compare-file-json PATH`: with `--compare-file`, also
   write the comparison as a standalone JSON file — the exact
   dict `compare_results` returns (the same one the run's JSON
