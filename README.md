@@ -336,7 +336,11 @@ python -m kvbench.cli --ops 20000 --clients 4 \
 # p99, p99 change and bucket drift) under
 # results[].repeat.histogram_comparison in JSON and in a section
 # in Markdown, so a noisy repeat run shows which op's latency
-# shape moved; a single repeat run renders a note naming the
+# shape moved — the comparison also carries the fastest and
+# slowest runs' per-op histograms under
+# fastest_histograms_by_op and slowest_histograms_by_op, the
+# same runs the Repeat runs section already draws a per-op
+# block for; a single repeat run renders a note naming the
 # reason instead of a comparison
 python -m kvbench.cli --ops 20000 --clients 4 --repeat 3
 
@@ -350,8 +354,15 @@ python -m kvbench.cli --ops 20000 --clients 4 --repeat 3
 # per-op table with p50, p99, p99 change and bucket drift) under
 # each step's repeat.histogram_comparison in JSON and in the
 # per-step repeat block in Markdown, so a noisy step shows which
-# op's latency shape moved; a step whose runs are not comparable
-# renders a note naming the reason instead
+# op's latency shape moved — plus the fastest and slowest runs'
+# per-op histogram blocks next to each step's comparison table,
+# the two runs' latency shapes drawn with the same shared helper
+# as the step's own per-op blocks, so the shape move reads as
+# bars as well as numbers, with the same two maps under
+# fastest_histograms_by_op and slowest_histograms_by_op in the
+# step's repeat.histogram_comparison in JSON; a step whose runs
+# are not comparable renders a note naming the reason instead,
+# and no blocks
 python -m kvbench.cli --ops 20000 --clients 4 --repeat 3 \
     --sweep-keyspace 100,1000,10000
 
@@ -1454,7 +1465,20 @@ make test
   next to each sweep-step repeat comparison table — the two
   runs' latency shapes drawn with the same shared helper as
   the step's own per-op blocks, so the shape move reads as
-  bars as well as numbers.
+  bars as well as numbers; the comparison also carries the two
+  runs' per-op histograms under `fastest_histograms_by_op`
+  and `slowest_histograms_by_op` in JSON, the same maps the
+  Markdown blocks draw, present exactly when the blocks show
+  — and the main repeat section's comparison carries them too,
+  since it shares the helper, though it draws no dedicated
+  blocks because it already draws every run's per-op block. A
+  step whose runs are not comparable renders a note naming the
+  reason instead, and no blocks. Done in 0.68.0.
+  Next: a per-op fastest-vs-slowest repeat-run comparison in
+  each sweep-step repeat block — each op's own fastest and
+  slowest runs by that op's ops/sec, with its own histogram
+  comparison table, so a step where one op's runs swing while
+  the overall winner stays steady still names the op.
 - `--compare-file-json PATH`: with `--compare-file`, also
   write the comparison as a standalone JSON file — the exact
   dict `compare_results` returns (the same one the run's JSON
