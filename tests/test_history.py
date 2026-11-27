@@ -1701,6 +1701,157 @@ class TestSweepStepTrendFirstRunHistogram(unittest.TestCase):
             [{"upper_ms": 0.1, "count": 400}])
 
 
+class TestPerOpTrendFirstRunHistogram(unittest.TestCase):
+    def _two_runs(self, first_set=500, last_set=300):
+        # The first run's SET shape is first_set samples at
+        # 20_000 ns (the <= 0.1 ms bucket), the last run's
+        # last_set samples at 200_000 ns (the <= 0.25 ms
+        # bucket) — the same op, different counts and buckets,
+        # so the first-run block and the latest-run block
+        # cannot be mistaken for each other. GET and INCR stay
+        # put in both runs.
+        workload = _make_workload()
+        first = _make_result(
+            ops=1000, ops_per_sec=40000.0,
+            latencies_by_op={
+                "SET": [20_000] * first_set,
+                "GET": [20_000] * 400,
+                "INCR": [20_000] * 100,
+            })
+        latest = _make_result(
+            ops=1000, ops_per_sec=50000.0,
+            latencies_by_op={
+                "SET": [200_000] * last_set,
+                "GET": [20_000] * 400,
+                "INCR": [20_000] * 100,
+            })
+        return [
+            build_record(first, workload, "kvbench"),
+            build_record(latest, workload, "kvbench"),
+        ]
+
+    def test_first_run_block_follows_comparison_table(self):
+        # The core of the feature: each per-op trend section
+        # ends with the first run's per-op histogram block for
+        # that op next to its comparison table — drawn with the
+        # same shared helper as the latest run's block, so that
+        # op's two shapes can be read side by side. The
+        # first-run block shows the first run's counts (SET 500
+        # ops), the latest-run block the last run's (SET 300
+        # ops), and the block sits after the comparison table.
+        text = format_trend(self._two_runs())
+        self.assertIn(
+            "#### SET per-op latency histogram — first run (",
+            text)
+        self.assertIn(
+            "#### GET per-op latency histogram — first run (",
+            text)
+        self.assertIn(
+            "#### INCR per-op latency histogram — first run (",
+            text)
+        self.assertIn("SET (500 ops)", text)
+        self.assertIn("SET (300 ops)", text)
+        self.assertLess(
+            text.index("#### SET histogram comparison — first vs "
+                       "last run"),
+            text.index("#### SET per-op latency histogram — "
+                       "first run"))
+
+    def test_first_run_histograms_in_trend_json(self):
+        # The trend JSON carries the same first run's
+        # histograms under first_histograms_by_op on each
+        # per_op section — the same shapes the Markdown chart
+        # draws, cleaned by the same shared helper, so a script
+        # reading the JSON sees what the chart shows.
+        entries = self._two_runs()
+        per_op = trend_comparison(entries)["backends"][0]["per_op"]
+        self.assertEqual(per_op["SET"]["first_histograms_by_op"], {
+            "SET": [{"upper_ms": 0.1, "count": 500}],
+        })
+        self.assertEqual(per_op["GET"]["first_histograms_by_op"], {
+            "GET": [{"upper_ms": 0.1, "count": 400}],
+        })
+        self.assertEqual(per_op["INCR"]["first_histograms_by_op"], {
+            "INCR": [{"upper_ms": 0.1, "count": 100}],
+        })
+
+    def test_single_run_has_no_first_run_block(self):
+        # One run in the window ran SET, so its first run is
+        # its latest run: the section carries no first-run
+        # block and the JSON carries no first-run field.
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(), workload, "kvbench"),
+        ]
+        text = format_trend(entries)
+        self.assertNotIn(
+            "#### SET per-op latency histogram — first run (",
+            text)
+        per_op = trend_comparison(entries)["backends"][0]["per_op"]
+        self.assertNotIn("first_histograms_by_op", per_op["SET"])
+
+    def test_before_0_43_has_no_first_run_block(self):
+        # The first run was recorded before 0.43.0 and carries
+        # no histograms_by_op key: the per-op sections name
+        # that instead of a comparison table, and carry no
+        # first-run block in either view.
+        entries = self._two_runs()
+        del entries[0]["histograms_by_op"]
+        text = format_trend(entries)
+        self.assertNotIn(
+            "#### SET per-op latency histogram — first run (",
+            text)
+        per_op = trend_comparison(entries)["backends"][0]["per_op"]
+        self.assertNotIn("first_histograms_by_op", per_op["SET"])
+
+    def test_first_run_is_first_run_that_ran_the_op(self):
+        # The middle run is read-only and never ran SET, so the
+        # first-run block shows the first run's shape — SET 500
+        # ops — not the middle run's, and the JSON carries the
+        # same first run's histograms.
+        workload = _make_workload()
+        entries = [
+            self._two_runs()[0],
+            build_record(_make_result(
+                ops_per_sec=45000.0,
+                latencies_by_op={"GET": [20_000] * 1000}),
+                workload, "kvbench"),
+            self._two_runs()[1],
+        ]
+        text = format_trend(entries)
+        self.assertIn("SET (500 ops)", text)
+        self.assertIn(
+            "#### SET per-op latency histogram — first run (",
+            text)
+        per_op = trend_comparison(entries)["backends"][0]["per_op"]
+        self.assertEqual(per_op["SET"]["first_histograms_by_op"], {
+            "SET": [{"upper_ms": 0.1, "count": 500}],
+        })
+
+    def test_op_missing_from_first_run_has_no_first_run_block(self):
+        # The first run ran SET — its per_op entry says so —
+        # but its recorded histograms carry no buckets for it:
+        # the comparison still renders (SET ran in the last
+        # run), but there is no first shape to draw, so the SET
+        # section carries no first-run block and no field,
+        # while GET — which both runs carry buckets for —
+        # still does.
+        entries = self._two_runs()
+        del entries[0]["histograms_by_op"]["SET"]
+        text = format_trend(entries)
+        self.assertNotIn(
+            "#### SET per-op latency histogram — first run (",
+            text)
+        self.assertIn(
+            "#### GET per-op latency histogram — first run (",
+            text)
+        per_op = trend_comparison(entries)["backends"][0]["per_op"]
+        self.assertNotIn("first_histograms_by_op", per_op["SET"])
+        self.assertEqual(per_op["GET"]["first_histograms_by_op"], {
+            "GET": [{"upper_ms": 0.1, "count": 400}],
+        })
+
+
 class TestWriteTrend(unittest.TestCase):
     def _entries(self, rates=(40000.0, 50000.0, 60000.0)):
         workload = _make_workload()

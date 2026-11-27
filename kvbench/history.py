@@ -94,7 +94,13 @@ comparison table — drawn with the same shared helper as the
 latest run's block, so the two shapes can be read side by
 side — and the trend JSON carries the same first run's
 histograms under ``first_histograms_by_op`` in each
-``sweep_trends`` entry.
+``sweep_trends`` entry. Since 0.64.0 each per-op trend
+section also carries the first run's per-op histogram block
+for that op next to its comparison table — drawn with the
+same shared helper as the latest run's block, so that op's
+two shapes can be read side by side — and the trend JSON
+carries the same first run's histograms under
+``first_histograms_by_op`` in each ``per_op`` section.
 """
 
 import json
@@ -391,9 +397,12 @@ def _per_op_trend_lines(runs, window):
     its p50/p99 in the first and last runs that ran it, the p99
     change and the bucket drift — built from the same shared rows
     the trend JSON carries for the op, so the chart and the JSON
-    cannot disagree. Runs recorded before 0.22.0 carry no
-    ``per_op`` data and are skipped for these sections; an op
-    that never ran in the window gets no section at all.
+    cannot disagree — followed by the first run's per-op histogram
+    block for that op, drawn with the same shared helper as the
+    latest run's block, so that op's two shapes can be read side
+    by side next to its comparison. Runs recorded before 0.22.0
+    carry no ``per_op`` data and are skipped for these sections;
+    an op that never ran in the window gets no section at all.
     """
     lines = []
     for op in ("SET", "GET", "INCR", "DEL"):
@@ -482,6 +491,26 @@ def _per_op_trend_lines(runs, window):
             lines.extend(_histogram_comparison_table_lines(
                 f"#### {op} histogram comparison — first vs last run",
                 "first", "last", comparison["rows"]))
+            # The first run's shape for this op, next to the
+            # comparison table — drawn with the same shared
+            # helper as the latest run's block, so the two
+            # shapes can be read side by side. The comparison
+            # rendered, so both runs carry usable histograms;
+            # the op may still be missing from the first run's
+            # map — it ran only in the last run — in which case
+            # there is no first shape to draw. The table's
+            # trailing blank line stays, so the block's heading
+            # does not run into the last table row.
+            first_entry = op_runs[0]
+            first_clean = _histograms_or_none(
+                first_entry.get("histograms_by_op"))
+            if first_clean is not None and op in first_clean:
+                first_ts = first_entry.get(
+                    "timestamp", "")[:19].replace("T", " ")
+                lines.extend(_per_op_histogram_block(
+                    f"#### {op} per-op latency histogram — "
+                    f"first run ({first_ts})",
+                    {op: first_clean[op]}))
         lines.append("")
     return lines
 
@@ -1234,6 +1263,9 @@ def format_trend(entries, limit=20):
     each per-op section ends with that op's first-to-last
     histogram comparison table — its p50/p99 shift and bucket
     drift, from the same shared rows the trend JSON carries —
+    and with the first run's per-op histogram block for that op
+    next to the comparison table, so that op's two shapes can be
+    read side by side,
     and the same chart per sweep step (keyspace size, client count,
     value size, pipeline depth, read:write ratio) for the steps
     that ran, so a step's throughput trend reads on its own too,
@@ -1597,6 +1629,13 @@ def trend_comparison(entries, limit=20):
     per-operation latency histograms — or a note
     naming why there are none — and the per-op histogram
     comparison between the first and last runs in the window.
+    Each per-op section also carries the first run's per-op
+    histograms for that op under ``first_histograms_by_op`` —
+    the same shapes the Markdown chart draws next to the
+    section's comparison table — present exactly when the
+    chart shows a first-run block for that op, so a section
+    whose op ran in only one run in the window, or whose
+    first run carries no buckets for the op, carries none.
     Each backend also carries a ``sweep_trends`` list — one
     entry per sweep step that ran in the window, with the
     step's runs table, sparkline and first-to-last change in
@@ -1656,6 +1695,24 @@ def trend_comparison(entries, limit=20):
                 section["histogram_comparison"] = \
                     _trend_per_op_histogram_comparison(
                         op_runs[0], op_runs[-1], op)
+                # The first run's histograms for this op, next to
+                # the comparison — the same shapes the Markdown
+                # chart draws side by side next to the section's
+                # comparison table, cleaned by the same shared
+                # helper, so a script reading the JSON sees what
+                # the chart shows. Only present when the
+                # comparison rendered and the first run that ran
+                # the op carries buckets for it — the field is
+                # absent exactly when the chart shows no
+                # first-run block for the op: the op ran in only
+                # one run in the window, or it ran only in the
+                # last run, so there is no first shape to show.
+                if section["histogram_comparison"]["rows"] is not None:
+                    first_clean = _histograms_or_none(
+                        op_runs[0].get("histograms_by_op"))
+                    if first_clean is not None and op in first_clean:
+                        section["first_histograms_by_op"] = {
+                            op: first_clean[op]}
                 per_op[op] = section
         latest = window[-1]
         timestamp = latest.get("timestamp", "")[:19].replace("T", " ")
@@ -1691,7 +1748,11 @@ def write_trend_json(path, entries, limit=20):
     comparison under ``histogram_comparison`` — each op's
     p50/p99 in the first and last runs that ran it, the p99
     change, and the bucket drift — built from the same shared
-    rows as the overall comparison. Each backend carries its per-step sweep
+    rows as the overall comparison — and the first run's
+    per-op histograms for that op under
+    ``first_histograms_by_op``, present exactly when the
+    Markdown chart shows a first-run block for the op.
+    Each backend carries its per-step sweep
     sections under ``sweeps`` — one entry per step that ran in
     the window, with the step's best and worst runs, the deltas,
     the step's per-op histograms from both runs, and the step's

@@ -628,7 +628,18 @@ crept up reads at a glance even when SET throughput moved the
 other way. Runs recorded
 before 0.22.0 carry no per-op data and simply show no per-op
 sections; a run that never ran an op (a read-only mix has no
-SET) leaves that op out of its own table. Each backend's trend
+SET) leaves that op out of its own table. Each per-op section
+ends with that op's first-to-last histogram comparison — that
+op's p50/p99 in the first and last runs that ran it, the p99
+change and the bucket drift — plus the first run's histogram
+block for that op, drawn with the same shared helper as the
+latest run's block, so that op's two shapes can be read side
+by side next to its comparison; a section whose op ran in
+only one run in the window, or whose first or last run that
+ran the op was recorded before 0.43.0, recorded no per-op
+latencies, or carries malformed histograms, renders a note
+naming the reason instead of a table, and no first-run block.
+Each backend's trend
 also ends with the latest run's per-operation latency
 histograms — the same log-spaced buckets per operation that ran
 as the regular run's `histograms_by_op`, drawn with the same
@@ -704,7 +715,10 @@ in p99, the same table per operation type that ran under
 first-to-last per-op histogram comparison under
 `histogram_comparison` (that op's p50/p99 in the first and
 last runs that ran it, the p99 change, and the bucket drift,
-or a note naming why there is none) — the latest run's
+or a note naming why there is none), and the first run's
+histograms for that op under `first_histograms_by_op`,
+present exactly when the Markdown chart shows a first-run
+block for the op — the latest run's
 per-operation latency histograms under
 `histograms_by_op` (or a note under `notes` naming why there are
 none), and the per-op histogram comparison between the first and
@@ -1360,11 +1374,30 @@ make test
   reading the JSON sees what the chart shows. A step recorded in
   only one run in the window carries no first-run block and no
   field — its first shape is the latest run's block just above.
-  Done in 0.63.0. Next: the first run's per-op histogram block in
-  each per-op trend section, drawn with the same shared helper as
-  the comparison table's rows, so that op's two shapes can be read
-  side by side next to its comparison, like each sweep-step
-  section's first-run block sits next to its own comparison.
+  Done in 0.63.0. Each per-op trend section also carries the
+  first run's per-op histogram block for that op next to its
+  comparison table — that op's buckets from the first run that
+  ran it, drawn with the same shared helper as the latest run's
+  block, so that op's two shapes can be read side by side next
+  to its comparison, like each sweep-step section's first-run
+  block sits next to its own comparison — and the trend JSON
+  carries the same first run's histograms under
+  `first_histograms_by_op` in each `per_op` section, present
+  exactly when the chart shows a first-run block for the op, so
+  a script reading the JSON sees what the chart shows. A
+  section whose op ran in only one run in the window carries no
+  first-run block and no field — its first shape is the latest
+  run's block — and a first or last run recorded before 0.43.0,
+  with no per-op latencies, or with malformed histograms
+  renders a note naming the reason instead of a comparison,
+  and no first-run block; an op that ran only in the last run
+  still compares, but carries no first shape to draw. Done in
+  0.64.0. Next: a per-op histogram comparison table in each
+  per-op best/worst section — that op's p50/p99 in its best and
+  worst runs, the p99 change and the bucket drift, rendered
+  from the same shared rows the best/worst JSON carries for the
+  op, so a reader of the comparison sees the per-op numbers
+  without parsing JSON and the two views cannot disagree.
 - `--compare-file-json PATH`: with `--compare-file`, also
   write the comparison as a standalone JSON file — the exact
   dict `compare_results` returns (the same one the run's JSON
