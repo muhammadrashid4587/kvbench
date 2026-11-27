@@ -251,7 +251,8 @@ python -m kvbench.cli --trend --trend-out trend.md
 
 # same trend chart, written as JSON as well, so a script can
 # read the trend — the runs, the sparkline, the first-to-last
-# change, the per-op sections and the per-step sweep sections —
+# change, the per-op sections (each with its own first-to-last
+# histogram comparison) and the per-step sweep sections —
 # without parsing the Markdown chart
 python -m kvbench.cli --trend --trend-json trend.json
 
@@ -664,7 +665,12 @@ With `--trend-json PATH` the same trend is also written as JSON
 window (timestamp, ops/sec, the change versus the previous run,
 and p99), the sparkline, the first-to-last change in ops/sec and
 in p99, the same table per operation type that ran under
-`per_op`, the latest run's per-operation latency histograms under
+`per_op` — each op's section also carrying its own
+first-to-last per-op histogram comparison under
+`histogram_comparison` (that op's p50/p99 in the first and
+last runs that ran it, the p99 change, and the bucket drift,
+or a note naming why there is none) — the latest run's
+per-operation latency histograms under
 `histograms_by_op` (or a note under `notes` naming why there are
 none), and the per-op histogram comparison between the first and
 last runs under `histogram_comparison` — plus one per-step trend
@@ -1202,6 +1208,22 @@ make test
 
 ## Roadmap
 
+- Per-operation histogram comparisons in the `--trend-json`
+  per-op sections: each op's section carries its own
+  first-to-last comparison under `histogram_comparison` — that
+  op's p50 and p99 in the first and last runs that ran it, the
+  p99 change, and the bucket drift (the largest single-bucket
+  share move, in percentage points, with the bucket it moved
+  in) — built from the same shared rows as the overall
+  first-to-last comparison, so the per-op numbers agree with
+  the overall table's row for that op and a script reading the
+  trend JSON sees how each op's latency shape moved without
+  parsing the Markdown chart. A section whose op ran in only
+  one run in the window, or whose first or last run that ran
+  the op was recorded before 0.43.0, recorded no per-op
+  latencies, or carries malformed histograms, carries a note
+  naming the reason instead of rows. The Markdown per-op
+  trend sections carry no comparison table. Done in 0.55.0.
 - Per-sweep-step trend sections in the `--trend-json` output:
   each backend's `sweep_trends` list carries one entry per sweep
   step that ran in the trend window — the step's runs table

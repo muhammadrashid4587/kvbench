@@ -74,7 +74,13 @@ sparkline and first-to-last change in ops/sec and in p99, and
 the step's per-op histograms from the latest run that recorded
 it — the same per-step trend sections the Markdown chart
 renders, built from the same shared helper, so the JSON and
-Markdown views cannot disagree.
+Markdown views cannot disagree. Since 0.55.0 each per-op
+section in the trend JSON also carries its own first-to-last
+per-op histogram comparison — that op's p50/p99 in the first
+and last runs that ran it, the p99 change, and the bucket
+drift — built from the same shared rows as the overall
+first-to-last comparison, so the per-op numbers agree with the
+overall table's row for that op.
 """
 
 import json
@@ -1023,6 +1029,65 @@ def _trend_histogram_comparison(first, last):
     }
 
 
+def _trend_per_op_histogram_comparison(first, last, op):
+    """The first-to-last histogram comparison for one op, as data.
+
+    ``first``/``last`` are the first and last runs in the trend
+    window that ran ``op``. Returns a JSON-serializable dict with
+    ``"from": "first"`` and ``"to": "last"``: ``rows`` is the
+    shared :func:`_histogram_comparison_rows` table filtered to
+    ``op`` — that op's p50/p99 in the first and last runs, the
+    p99 change, and the bucket drift — with ``notes`` empty, or
+    ``rows`` is None and ``notes`` names why there is no
+    comparison: the same run is both first and last (only one
+    run in the window ran the op), one of them was recorded
+    before 0.43.0, recorded no per-op latencies, or carries
+    malformed histograms, or the op's buckets are missing from
+    both sides' recorded histograms. The Markdown per-op trend
+    sections carry no comparison table, so this lives in the
+    ``--trend-json`` view only — but it is built from the same
+    shared rows as the overall first-to-last comparison, so a
+    script reading the JSON sees the same numbers the overall
+    table shows for that op.
+    """
+    if first is last:
+        return {
+            "from": "first",
+            "to": "last",
+            "rows": None,
+            "notes": [f"Only one run in the trend window ran {op}, "
+                      "so there is no first-to-last histogram "
+                      f"comparison for {op}."],
+        }
+    notes = _histogram_comparison_notes(
+        first, last, "first", "last", "first-to-last")
+    if notes:
+        return {
+            "from": "first",
+            "to": "last",
+            "rows": None,
+            "notes": notes,
+        }
+    rows = [row for row in _histogram_comparison_rows(first, last)
+            if row["op"] == op]
+    if not rows:
+        return {
+            "from": "first",
+            "to": "last",
+            "rows": None,
+            "notes": [f"Neither the first nor the last run's "
+                      "recorded histograms carry buckets for "
+                      f"{op}, so there is no first-to-last "
+                      f"histogram comparison for {op}."],
+        }
+    return {
+        "from": "first",
+        "to": "last",
+        "rows": rows,
+        "notes": [],
+    }
+
+
 def _trend_histogram_comparison_lines(first, last):
     """Per-op histogram comparison between the trend's first and last runs.
 
@@ -1376,8 +1441,10 @@ def trend_comparison(entries, limit=20):
     most recent ``limit`` runs with ops/sec, the change versus
     the previous run, and p99, plus the sparkline and the
     first-to-last change in ops/sec and in p99, the same table
-    per operation type (SET, GET, INCR, DEL) that ran, the
-    latest run's per-operation latency histograms — or a note
+    per operation type (SET, GET, INCR, DEL) that ran — each
+    with its own first-to-last per-op histogram comparison
+    under ``histogram_comparison`` — the latest run's
+    per-operation latency histograms — or a note
     naming why there are none — and the per-op histogram
     comparison between the first and last runs in the window.
     Each backend also carries a ``sweep_trends`` list — one
@@ -1419,6 +1486,19 @@ def trend_comparison(entries, limit=20):
                 runs, window,
                 lambda e, op=op: (e.get("per_op") or {}).get(op))
             if section["runs"]:
+                # The comparison runs between the first and last
+                # runs in the window that ran this op — not
+                # necessarily the window's first and last runs,
+                # when a run in between never ran the op — built
+                # from the same shared rows as the overall
+                # first-to-last comparison, so the per-op numbers
+                # agree with the overall table's row for the op.
+                op_runs = [entry for entry in window
+                           if (entry.get("per_op") or {}).get(op)
+                           is not None]
+                section["histogram_comparison"] = \
+                    _trend_per_op_histogram_comparison(
+                        op_runs[0], op_runs[-1], op)
                 per_op[op] = section
         latest = window[-1]
         timestamp = latest.get("timestamp", "")[:19].replace("T", " ")
@@ -1449,7 +1529,12 @@ def write_trend_json(path, entries, limit=20):
     Creates the parent directory when needed. Returns the
     comparison dict — the same shape :func:`trend_comparison`
     returns — so a script can read the trend without parsing
-    the Markdown chart. Each backend carries its per-step sweep
+    the Markdown chart. Each backend's per-op sections under
+    ``per_op`` carry their own first-to-last per-op histogram
+    comparison under ``histogram_comparison`` — each op's
+    p50/p99 in the first and last runs that ran it, the p99
+    change, and the bucket drift — built from the same shared
+    rows as the overall comparison. Each backend carries its per-step sweep
     sections under ``sweeps`` — one entry per step that ran in
     the window, with the step's best and worst runs, the deltas,
     the step's per-op histograms from both runs, and the step's

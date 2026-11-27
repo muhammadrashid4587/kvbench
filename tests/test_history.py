@@ -1894,6 +1894,126 @@ class TestTrendJson(unittest.TestCase):
         self.assertIn("no first-to-last histogram comparison is "
                       "shown", comparison["notes"][0])
 
+    def test_trend_json_per_op_histogram_comparison(self):
+        # Each per-op section in the trend JSON carries its own
+        # first-to-last histogram comparison — that op's p50/p99
+        # in the first and last runs that ran it, the p99 change
+        # and the bucket drift — built from the same shared rows
+        # as the overall comparison, so the per-op numbers agree
+        # with the overall table's row for that op.
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(
+                _make_result(
+                    ops=1000, ops_per_sec=50000.0,
+                    latencies_by_op={
+                        "SET": [200_000] * 500,
+                        "GET": [20_000] * 400,
+                        "INCR": [20_000] * 100,
+                    }),
+                workload, "kvbench"),
+        ]
+        backend = trend_comparison(entries)["backends"][0]
+        set_comparison = backend["per_op"]["SET"][
+            "histogram_comparison"]
+        self.assertEqual(set_comparison["from"], "first")
+        self.assertEqual(set_comparison["to"], "last")
+        self.assertEqual(set_comparison["notes"], [])
+        self.assertEqual(len(set_comparison["rows"]), 1)
+        row = set_comparison["rows"][0]
+        self.assertEqual(row["op"], "SET")
+        self.assertEqual(row["p50_from_ms"], 0.020)
+        self.assertEqual(row["p50_to_ms"], 0.200)
+        self.assertEqual(row["p99_from_ms"], 0.020)
+        self.assertEqual(row["p99_to_ms"], 0.200)
+        self.assertAlmostEqual(row["p99_change_pct"], 900.0)
+        self.assertAlmostEqual(row["bucket_drift_pp"], -100.0)
+        self.assertEqual(row["bucket_drift_bucket"], "<= 0.1 ms")
+        # The same row the overall comparison carries for SET.
+        overall = {r["op"]: r
+                   for r in backend["histogram_comparison"]["rows"]}
+        self.assertEqual(row, overall["SET"])
+        # An op whose latency did not move compares flat.
+        get_comparison = backend["per_op"]["GET"][
+            "histogram_comparison"]
+        self.assertEqual(len(get_comparison["rows"]), 1)
+        self.assertAlmostEqual(
+            get_comparison["rows"][0]["p99_change_pct"], 0.0)
+        self.assertAlmostEqual(
+            get_comparison["rows"][0]["bucket_drift_pp"], 0.0)
+
+    def test_trend_json_per_op_histogram_comparison_single_run_has_note(
+            self):
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(), workload, "kvbench"),
+        ]
+        comparison = trend_comparison(entries)["backends"][0][
+            "per_op"]["SET"]["histogram_comparison"]
+        self.assertIsNone(comparison["rows"])
+        self.assertEqual(len(comparison["notes"]), 1)
+        self.assertIn("Only one run in the trend window ran SET, so "
+                      "there is no first-to-last histogram "
+                      "comparison for SET.", comparison["notes"][0])
+
+    def test_trend_json_per_op_histogram_comparison_before_0_43_has_note(
+            self):
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(_make_mixed_result(ops_per_sec=50000.0),
+                         workload, "kvbench"),
+        ]
+        del entries[0]["histograms_by_op"]
+        comparison = trend_comparison(entries)["backends"][0][
+            "per_op"]["SET"]["histogram_comparison"]
+        self.assertIsNone(comparison["rows"])
+        self.assertEqual(len(comparison["notes"]), 1)
+        self.assertIn("recorded before 0.43.0",
+                      comparison["notes"][0])
+        self.assertIn("no first-to-last histogram comparison is "
+                      "shown", comparison["notes"][0])
+
+    def test_trend_json_per_op_histogram_comparison_uses_runs_that_ran_the_op(
+            self):
+        # The first run is read-only, so SET ran in only one run
+        # in the window and has no comparison, while GET compares
+        # the first and last runs — the per-op comparison follows
+        # the runs that ran the op, not the window's first and
+        # last runs.
+        workload = _make_workload()
+        read_only = _make_result(
+            ops=1000, ops_per_sec=40000.0,
+            latencies_by_op={"GET": [20_000] * 1000})
+        entries = [
+            build_record(read_only, workload, "kvbench"),
+            build_record(
+                _make_result(
+                    ops=1000, ops_per_sec=50000.0,
+                    latencies_by_op={
+                        "SET": [200_000] * 500,
+                        "GET": [20_000] * 400,
+                        "INCR": [20_000] * 100,
+                    }),
+                workload, "kvbench"),
+        ]
+        per_op = trend_comparison(entries)["backends"][0]["per_op"]
+        set_comparison = per_op["SET"]["histogram_comparison"]
+        self.assertIsNone(set_comparison["rows"])
+        self.assertEqual(len(set_comparison["notes"]), 1)
+        self.assertIn("Only one run in the trend window ran SET",
+                      set_comparison["notes"][0])
+        get_comparison = per_op["GET"]["histogram_comparison"]
+        self.assertEqual(len(get_comparison["rows"]), 1)
+        row = get_comparison["rows"][0]
+        self.assertEqual(row["op"], "GET")
+        self.assertEqual(row["p99_from_ms"], 0.020)
+        self.assertEqual(row["p99_to_ms"], 0.020)
+        self.assertAlmostEqual(row["p99_change_pct"], 0.0)
+
     def test_trend_json_empty_history(self):
         self.assertEqual(trend_comparison([]), {"backends": []})
 
