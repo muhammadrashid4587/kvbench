@@ -15,10 +15,14 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 
-from kvbench.bench import (DictClient, Workload, run_repeated_workload)
+from kvbench.bench import (DictClient, Workload, run_repeated_workload,
+                           run_workload)
 from kvbench.cli import build_parser, main
 from kvbench.history import build_record
-from kvbench.report import render_json, render_markdown, to_json_dict
+from kvbench.report import (_histogram_comparison_rows_from,
+                            _histograms_or_none,
+                            _repeat_fastest_slowest_histogram_comparison,
+                            render_json, render_markdown, to_json_dict)
 from kvbench.stats import histogram, median, spread_summary
 
 try:
@@ -196,6 +200,165 @@ class TestRepeatedWorkload(unittest.TestCase):
         record = build_record(result, workload, "kvbench --repeat 3")
         self.assertEqual(record["ops_per_sec"], result.ops_per_sec)
         self.assertEqual(record["p99_ms"], result.summary["p99_ms"])
+
+
+class TestRepeatFastestSlowestComparison(unittest.TestCase):
+    def _result_with_distinct_speeds(self):
+        # Three DictClient runs with forced, distinct ops/sec so
+        # the fastest/slowest picks are deterministic: run 2 is
+        # fastest, run 1 slowest. The per-op figures and
+        # histograms stay the runs' own, so the rows stay real.
+        workload = Workload(ops=200, clients=2)
+        result = run_repeated_workload(DictClient, workload,
+                                       "baseline (dict)", 3)
+        for entry, ops_per_sec in zip(result.repeat_runs,
+                                      (10000.0, 20000.0, 15000.0)):
+            entry["ops_per_sec"] = ops_per_sec
+        return result
+
+    def test_per_run_per_op_carries_p50(self):
+        workload = Workload(ops=200, clients=2)
+        result = run_repeated_workload(DictClient, workload,
+                                       "baseline (dict)", 3)
+        for entry in result.repeat_runs:
+            for op, figures in entry["per_op"].items():
+                self.assertIn("p50_ms", figures)
+                self.assertIsInstance(figures["p50_ms"], float)
+                self.assertGreaterEqual(figures["p50_ms"], 0.0)
+                self.assertLessEqual(figures["p50_ms"],
+                                     figures["p99_ms"])
+
+    def test_comparison_picks_fastest_and_slowest_by_ops_sec(self):
+        result = self._result_with_distinct_speeds()
+        comparison = _repeat_fastest_slowest_histogram_comparison(result)
+        self.assertEqual(comparison["from"], "slowest")
+        self.assertEqual(comparison["to"], "fastest")
+        self.assertEqual(comparison["fastest_run"], 2)
+        self.assertEqual(comparison["slowest_run"], 1)
+        self.assertEqual(comparison["notes"], [])
+        runs = {entry["run"]: entry for entry in result.repeat_runs}
+        overall = comparison["overall"]
+        self.assertEqual(overall["p50_slowest_ms"],
+                         runs[1]["p50_ms"])
+        self.assertEqual(overall["p50_fastest_ms"],
+                         runs[2]["p50_ms"])
+        self.assertEqual(overall["p99_slowest_ms"],
+                         runs[1]["p99_ms"])
+        self.assertEqual(overall["p99_fastest_ms"],
+                         runs[2]["p99_ms"])
+        self.assertAlmostEqual(
+            overall["p99_change_pct"],
+            (runs[2]["p99_ms"] - runs[1]["p99_ms"])
+            / runs[1]["p99_ms"] * 100)
+        # One row per op, with the slowest/fastest per-op
+        # percentiles straight from the runs' per_op entries.
+        rows = {row["op"]: row for row in comparison["rows"]}
+        self.assertEqual(set(rows), set(runs[1]["per_op"]))
+        for op, row in rows.items():
+            self.assertEqual(row["p50_from_ms"],
+                             runs[1]["per_op"][op]["p50_ms"])
+            self.assertEqual(row["p50_to_ms"],
+                             runs[2]["per_op"][op]["p50_ms"])
+            self.assertEqual(row["p99_from_ms"],
+                             runs[1]["per_op"][op]["p99_ms"])
+            self.assertEqual(row["p99_to_ms"],
+                             runs[2]["per_op"][op]["p99_ms"])
+            self.assertIsNotNone(row["bucket_drift_pp"])
+            self.assertIsNotNone(row["bucket_drift_bucket"])
+
+    def test_comparison_rows_agree_with_shared_rows(self):
+        # The rows are the shared helper's rows for the same two
+        # runs, so the repeat view cannot disagree with the
+        # trend/best-worst views.
+        result = self._result_with_distinct_speeds()
+        comparison = _repeat_fastest_slowest_histogram_comparison(result)
+        runs = {entry["run"]: entry for entry in result.repeat_runs}
+        expected = _histogram_comparison_rows_from(
+            _histograms_or_none(runs[1]["histograms_by_op"]),
+            _histograms_or_none(runs[2]["histograms_by_op"]),
+            runs[1]["per_op"], runs[2]["per_op"])
+        self.assertEqual(comparison["rows"], expected)
+
+    def test_comparison_in_markdown_and_json(self):
+        result = self._result_with_distinct_speeds()
+        workload = Workload(ops=200, clients=2, repeat=3)
+        text = render_markdown([result], workload, "kvbench")
+        self.assertIn("### Fastest vs slowest repeat run", text)
+        self.assertIn("Fastest run 2 vs slowest run 1", text)
+        self.assertIn("p99 slowest (ms)", text)
+        self.assertIn("p99 fastest (ms)", text)
+        parsed = json.loads(render_json([result], workload, "kvbench"))
+        comparison = parsed["results"][0]["repeat"][
+            "histogram_comparison"]
+        self.assertEqual(comparison["from"], "slowest")
+        self.assertEqual(comparison["to"], "fastest")
+        self.assertEqual(comparison["fastest_run"], 2)
+        self.assertEqual(comparison["slowest_run"], 1)
+        self.assertEqual(comparison["notes"], [])
+        self.assertTrue(comparison["rows"])
+        self.assertIn("overall", comparison)
+
+    def test_single_repeat_run_renders_a_note(self):
+        workload = Workload(ops=200, clients=2)
+        result = run_repeated_workload(DictClient, workload,
+                                       "baseline (dict)", 1)
+        comparison = _repeat_fastest_slowest_histogram_comparison(result)
+        self.assertIsNone(comparison["rows"])
+        self.assertIsNone(comparison["overall"])
+        self.assertEqual(comparison["notes"],
+                         ["Only one repeat run, so there is no "
+                          "fastest-vs-slowest histogram comparison."])
+        text = render_markdown([result], workload, "kvbench")
+        self.assertIn("Only one repeat run, so there is no "
+                      "fastest-vs-slowest histogram comparison.", text)
+        parsed = json.loads(render_json([result], workload, "kvbench"))
+        self.assertEqual(
+            parsed["results"][0]["repeat"]["histogram_comparison"],
+            comparison)
+
+    def test_identical_runs_render_a_note(self):
+        result = self._result_with_distinct_speeds()
+        result.repeat_runs[1]["ops_per_sec"] = \
+            result.repeat_runs[0]["ops_per_sec"]
+        result.repeat_runs[2]["ops_per_sec"] = \
+            result.repeat_runs[0]["ops_per_sec"]
+        comparison = _repeat_fastest_slowest_histogram_comparison(result)
+        self.assertIsNone(comparison["rows"])
+        self.assertEqual(
+            comparison["notes"],
+            ["The fastest and slowest repeat runs are the same run, "
+             "so there is no fastest-vs-slowest histogram "
+             "comparison."])
+
+    def test_missing_histograms_render_a_note(self):
+        result = self._result_with_distinct_speeds()
+        # The fastest run (run 2) loses its histograms: the note
+        # names the run.
+        del result.repeat_runs[1]["histograms_by_op"]
+        comparison = _repeat_fastest_slowest_histogram_comparison(result)
+        self.assertIsNone(comparison["rows"])
+        self.assertEqual(
+            comparison["notes"],
+            ["Repeat run 2 (the fastest run) carries no per-op "
+             "histograms, so there is no fastest-vs-slowest "
+             "histogram comparison."])
+
+    def test_malformed_histograms_render_a_note(self):
+        result = self._result_with_distinct_speeds()
+        result.repeat_runs[0]["histograms_by_op"] = {
+            "SET": "not a bucket list"}
+        comparison = _repeat_fastest_slowest_histogram_comparison(result)
+        self.assertIsNone(comparison["rows"])
+        self.assertIn("malformed", comparison["notes"][0])
+        self.assertIn("Repeat run 1", comparison["notes"][0])
+
+    def test_no_repeat_runs_renders_nothing(self):
+        workload = Workload(ops=200, clients=2)
+        result = run_workload(DictClient, workload, "baseline (dict)")
+        text = render_markdown([result], workload, "kvbench")
+        self.assertNotIn("Fastest vs slowest", text)
+        parsed = json.loads(render_json([result], workload, "kvbench"))
+        self.assertNotIn("repeat", parsed["results"][0])
 
 
 class TestRepeatCli(unittest.TestCase):

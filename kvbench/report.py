@@ -179,16 +179,22 @@ def _result_dict(result, top_n=5):
         # Only a repeated run carries this: a single run's result
         # dict is unchanged. ``runs`` is one summary per run (run
         # index, ops, elapsed, ops/sec, errors, mean/p50/p95/p99,
-        # per-op ops/sec and p99, and the per-operation latency
-        # histograms of that run under ``histograms_by_op`` — the
-        # same log-spaced buckets per op as the main run's); the
-        # top-level ops/sec, summary p99 and per-op figures are
-        # the medians over them.
+        # per-op ops/sec, p50 and p99, and the per-operation
+        # latency histograms of that run under
+        # ``histograms_by_op`` — the same log-spaced buckets per
+        # op as the main run's); the top-level ops/sec, summary
+        # p99 and per-op figures are the medians over them.
+        # ``histogram_comparison`` is the fastest-vs-slowest
+        # repeat-run comparison — the same dict the Markdown
+        # repeat section renders, so the two views cannot
+        # disagree.
         doc["repeat"] = {
             "runs": result.repeat_runs,
             "median_ops_per_sec": result.median_ops_per_sec,
             "median_p99_ms": result.median_p99_ms,
             "median_per_op": result.median_per_op,
+            "histogram_comparison": (
+                _repeat_fastest_slowest_histogram_comparison(result)),
         }
         if result.repeat_spread:
             # Only a run repeated more than once carries a spread:
@@ -364,8 +370,8 @@ def _histogram_comparison_table_lines(heading, from_label, to_label,
                                       rows):
     """The per-op histogram comparison table under one heading.
 
-    ``rows`` are :func:`kvbench.history._histogram_comparison_rows`
-    rows, or the same shape from the compare view's best/worst
+    ``rows`` are :func:`_histogram_comparison_rows_from` rows,
+    or the same shape from the compare view's best/worst
     histogram comparison; the labels name the two sides in the
     column headers ("first"/"last" for the trend, "worst"/"best"
     for best-vs-worst, "prev"/"now" for the compare view). A
@@ -395,6 +401,163 @@ def _histogram_comparison_table_lines(heading, from_label, to_label,
     lines.append("")
     return lines
 
+
+def _histogram_or_none(buckets):
+    """One op's latency histogram bucket list, or None.
+
+    A bucket list is the same log-spaced buckets
+    :func:`kvbench.stats.histogram` produces (each bucket a dict
+    with ``upper_ms`` and ``count``). A record that carries
+    something else — a hand-edited history file, say — reads as
+    no histogram, instead of crashing the best/worst view on a
+    shape it cannot draw.
+    """
+    if not isinstance(buckets, list) or not buckets:
+        return None
+    for bucket in buckets:
+        if (not isinstance(bucket, dict)
+                or "upper_ms" not in bucket
+                or "count" not in bucket):
+            return None
+    return buckets
+
+def _histograms_or_none(value):
+    """A per-op histogram mapping, or None when it is not one.
+
+    A history record written since 0.43.0 carries
+    ``histograms_by_op`` (op name to the same log-spaced bucket
+    list the single-run report uses); an older record carries
+    none, and a hand-made file may carry something else entirely.
+    Only a non-empty dict of op name to valid bucket lists passes
+    through — anything else reads as no histograms, instead of
+    crashing the best/worst view on a shape it cannot draw. The
+    compare view validates baseline histograms the same way, so
+    it imports this helper rather than keeping a second copy.
+    """
+    if not isinstance(value, dict) or not value:
+        return None
+    cleaned = {}
+    for op, buckets in value.items():
+        valid = _histogram_or_none(buckets)
+        if valid is None:
+            return None
+        cleaned[op] = valid
+    return cleaned
+
+def _bucket_drift(first_buckets, last_buckets):
+    """Largest single-bucket share move between two bucket lists.
+
+    Returns ``(change_pp, label)`` — the signed change in
+    percentage points of the bucket whose share of ops moved
+    most between the first and last runs, and that bucket's
+    label (``<= 0.25 ms`` or ``> 1000 ms`` for the overflow
+    bucket) — or None when either list holds no samples. Buckets
+    are scanned in edge order, so a tie keeps the fastest
+    bucket and the pick is stable.
+    """
+    first_total = sum(b["count"] for b in first_buckets)
+    last_total = sum(b["count"] for b in last_buckets)
+    if not first_total or not last_total:
+        return None
+    first_shares = {b["upper_ms"]: b["count"] / first_total * 100
+                    for b in first_buckets}
+    last_shares = {b["upper_ms"]: b["count"] / last_total * 100
+                   for b in last_buckets}
+    # The overflow bucket (upper_ms None) sorts last.
+    edges = sorted(set(first_shares) | set(last_shares),
+                   key=lambda upper: (upper is None, upper or 0))
+    best = None
+    for upper in edges:
+        change = (last_shares.get(upper, 0.0)
+                  - first_shares.get(upper, 0.0))
+        if best is None or abs(change) > abs(best[0]):
+            label = ("> 1000 ms" if upper is None
+                     else f"<= {upper:g} ms")
+            best = (change, label)
+    return best
+
+def _histogram_percentile(buckets, p):
+    """p-th percentile read off a histogram bucket list, or None.
+
+    ``buckets`` is one op's cleaned bucket list (each bucket a
+    dict with ``upper_ms`` and ``count``) and ``p`` a percentile
+    in (0, 100]. Nearest-rank, the same rule
+    :func:`kvbench.stats.percentile` uses on raw samples: the
+    percentile is the upper edge of the bucket holding the
+    rank-th sample (``ceil(p/100 * total)``), an upper bound on
+    the true percentile since every sample in the bucket sits at
+    or below that edge. Returns None when the list holds no
+    samples, or when the rank lands in the overflow bucket —
+    whose ``upper_ms`` is None, so there is no edge to report.
+    """
+    import math
+
+    total = sum(b["count"] for b in buckets)
+    if not total:
+        return None
+    rank = math.ceil(p / 100 * total)
+    cumulative = 0
+    for bucket in buckets:
+        cumulative += bucket["count"]
+        if cumulative >= rank:
+            return bucket["upper_ms"]
+    return None
+
+def _histogram_comparison_rows_from(first_clean, last_clean,
+                                    first_per_op, last_per_op):
+    """Per-op comparison rows from two cleaned histogram maps.
+
+    ``first_clean``/``last_clean`` are the two sides' cleaned
+    ``histograms_by_op`` maps (op name to bucket list), and
+    ``first_per_op``/``last_per_op`` their per-op percentile
+    maps (op name to a dict with ``p50_ms``/``p99_ms``) — the
+    run record's ``per_op`` for whole runs, or the percentiles
+    read off the step's own histogram buckets (see
+    :func:`_sweep_step_per_op`) for sweep steps, whose records
+    carry no per-op percentile fields. One row per op that ran
+    in either side, in the same shape
+    :func:`_histogram_comparison_rows` documents: each op's
+    p50/p99 on both sides, the p99 percentage change, and the
+    bucket drift via :func:`_bucket_drift`. An op that never
+    ran on one side shows None for that side, and the p99
+    change is None when either side has no p99 or the first
+    p99 is zero. The drift is None for an op that ran on only
+    one side. Both maps are already cleaned, so this never
+    returns None — callers check usability first.
+    """
+    rows = []
+    for op in ("SET", "GET", "INCR", "DEL"):
+        if op not in first_clean and op not in last_clean:
+            continue
+        first_op = first_per_op.get(op) or {}
+        last_op = last_per_op.get(op) or {}
+        p50_first = first_op.get("p50_ms")
+        p50_last = last_op.get("p50_ms")
+        p99_first = first_op.get("p99_ms")
+        p99_last = last_op.get("p99_ms")
+        if (isinstance(p99_first, (int, float))
+                and isinstance(p99_last, (int, float))
+                and p99_first):
+            p99_change = (p99_last - p99_first) / p99_first * 100
+        else:
+            p99_change = None
+        drift_pp = None
+        drift_bucket = None
+        if op in first_clean and op in last_clean:
+            moved = _bucket_drift(first_clean[op], last_clean[op])
+            if moved is not None:
+                drift_pp, drift_bucket = moved
+        rows.append({
+            "op": op,
+            "p50_from_ms": p50_first,
+            "p50_to_ms": p50_last,
+            "p99_from_ms": p99_first,
+            "p99_to_ms": p99_last,
+            "p99_change_pct": p99_change,
+            "bucket_drift_pp": drift_pp,
+            "bucket_drift_bucket": drift_bucket,
+        })
+    return rows
 
 def _sweep_per_op_histogram_lines(label, entries):
     """Per-operation histograms for each sweep step, or [].
@@ -692,6 +855,186 @@ def _repeat_spread_lines(result):
     return lines
 
 
+def _repeat_fastest_slowest_histogram_comparison(result):
+    """The fastest-vs-slowest repeat-run histogram comparison, as data.
+
+    The fastest and slowest runs are picked by overall ops/sec.
+    Returns a JSON-serializable dict with ``"from": "slowest"``
+    and ``"to": "fastest"``: ``fastest_run``/``slowest_run`` are
+    the picked run numbers, ``overall`` carries the two runs'
+    overall p50/p99 and the p99 change from slowest to fastest,
+    and ``rows`` is the shared
+    :func:`_histogram_comparison_rows_from` table — each op's
+    p50/p99 in the slowest and fastest runs, the p99 change, and
+    the bucket drift — with ``notes`` empty. ``rows`` is None and
+    ``notes`` names why there is no comparison when there is a
+    single repeat run, when the fastest and slowest runs are the
+    same run (every run's ops/sec identical), or when one of the
+    two runs carries no per-op histograms, recorded no per-op
+    latencies, or carries malformed histograms. The Markdown
+    repeat section renders the same comparison from this one
+    helper, so the two views cannot disagree. Per-op p50/p99
+    read from each run's ``per_op`` entry — repeat runs since
+    0.66.0 carry ``p50_ms`` there; a run built before that shows
+    ``-`` for p50 instead of a number.
+    """
+    runs = result.repeat_runs or []
+    if len(runs) < 2:
+        if len(runs) == 1:
+            note = ("Only one repeat run, so there is no "
+                    "fastest-vs-slowest histogram comparison.")
+        else:
+            note = ("No repeat runs recorded, so there is no "
+                    "fastest-vs-slowest histogram comparison.")
+        return {
+            "from": "slowest",
+            "to": "fastest",
+            "fastest_run": runs[0]["run"] if runs else None,
+            "slowest_run": runs[0]["run"] if runs else None,
+            "overall": None,
+            "rows": None,
+            "notes": [note],
+        }
+    usable = [entry for entry in runs
+              if isinstance(entry.get("ops_per_sec"), (int, float))]
+    if len(usable) < 2:
+        return {
+            "from": "slowest",
+            "to": "fastest",
+            "fastest_run": None,
+            "slowest_run": None,
+            "overall": None,
+            "rows": None,
+            "notes": ["Fewer than two repeat runs carry a numeric "
+                      "ops/sec, so there is no fastest-vs-slowest "
+                      "histogram comparison."],
+        }
+    fastest = max(usable, key=lambda e: e["ops_per_sec"])
+    slowest = min(usable, key=lambda e: e["ops_per_sec"])
+    if fastest is slowest:
+        return {
+            "from": "slowest",
+            "to": "fastest",
+            "fastest_run": fastest["run"],
+            "slowest_run": slowest["run"],
+            "overall": None,
+            "rows": None,
+            "notes": ["The fastest and slowest repeat runs are the "
+                      "same run, so there is no fastest-vs-slowest "
+                      "histogram comparison."],
+        }
+    notes = []
+    for which, entry in (("slowest", slowest), ("fastest", fastest)):
+        histograms = entry.get("histograms_by_op")
+        if histograms is None:
+            notes.append(
+                f"Repeat run {entry['run']} (the {which} run) carries "
+                "no per-op histograms, so there is no "
+                "fastest-vs-slowest histogram comparison.")
+        elif not histograms:
+            notes.append(
+                f"Repeat run {entry['run']} (the {which} run) recorded "
+                "no per-op latencies, so there are no histograms to "
+                "show — no fastest-vs-slowest histogram comparison "
+                "is shown.")
+        elif _histograms_or_none(histograms) is None:
+            notes.append(
+                f"Repeat run {entry['run']}'s (the {which} run) "
+                "recorded per-op histograms are malformed, so no "
+                "histograms are shown — no fastest-vs-slowest "
+                "histogram comparison is shown.")
+    if notes:
+        return {
+            "from": "slowest",
+            "to": "fastest",
+            "fastest_run": fastest["run"],
+            "slowest_run": slowest["run"],
+            "overall": None,
+            "rows": None,
+            "notes": notes,
+        }
+    p99_slowest = slowest.get("p99_ms")
+    p99_fastest = fastest.get("p99_ms")
+    if (isinstance(p99_slowest, (int, float))
+            and isinstance(p99_fastest, (int, float))
+            and p99_slowest):
+        p99_change = (p99_fastest - p99_slowest) / p99_slowest * 100
+    else:
+        p99_change = None
+    slowest_clean = _histograms_or_none(slowest["histograms_by_op"])
+    fastest_clean = _histograms_or_none(fastest["histograms_by_op"])
+    return {
+        "from": "slowest",
+        "to": "fastest",
+        "fastest_run": fastest["run"],
+        "slowest_run": slowest["run"],
+        "overall": {
+            "p50_slowest_ms": slowest.get("p50_ms"),
+            "p50_fastest_ms": fastest.get("p50_ms"),
+            "p99_slowest_ms": p99_slowest,
+            "p99_fastest_ms": p99_fastest,
+            "p99_change_pct": p99_change,
+        },
+        "rows": _histogram_comparison_rows_from(
+            slowest_clean, fastest_clean,
+            slowest.get("per_op") or {}, fastest.get("per_op") or {}),
+        "notes": [],
+    }
+
+
+def _repeat_fastest_slowest_lines(result):
+    """Fastest-vs-slowest repeat-run comparison lines, or [].
+
+    One section per repeated result: the fastest and slowest
+    runs' overall p50/p99 and the p99 change between them, then
+    the per-op histogram comparison table — each op's p50/p99 in
+    the slowest and fastest runs, the p99 change, and the bucket
+    drift — drawn by the shared
+    :func:`_histogram_comparison_table_lines` helper the trend
+    and best/worst views use, from the same rows the JSON report
+    carries under ``repeat.histogram_comparison``, so the two
+    views cannot disagree and a noisy repeat run shows which op's
+    latency shape moved. When nothing is comparable — a single
+    repeat run, identical runs, or a picked run with no usable
+    histograms — a note names the reason instead of a table.
+    Empty for a result with no repeat runs.
+    """
+    if not result.repeat_runs:
+        return []
+    comparison = _repeat_fastest_slowest_histogram_comparison(result)
+    lines = [f"### Fastest vs slowest repeat run — {result.name}", ""]
+
+    def _fmt(value):
+        return (f"{value:.3f}"
+                if isinstance(value, (int, float)) else "-")
+
+    overall = comparison.get("overall")
+    if overall is not None:
+        change = overall["p99_change_pct"]
+        change_text = f"{change:+.1f}%" if change is not None else "-"
+        lines.append(
+            f"Fastest run {comparison['fastest_run']} vs slowest run "
+            f"{comparison['slowest_run']}: overall p50 "
+            f"{_fmt(overall['p50_slowest_ms'])} ms -> "
+            f"{_fmt(overall['p50_fastest_ms'])} ms, p99 "
+            f"{_fmt(overall['p99_slowest_ms'])} ms -> "
+            f"{_fmt(overall['p99_fastest_ms'])} ms "
+            f"(p99 {change_text})."
+        )
+        lines.append("")
+    rows = comparison.get("rows")
+    if rows:
+        lines += _histogram_comparison_table_lines(
+            f"#### {result.name} — fastest vs slowest repeat run "
+            "histogram comparison",
+            "slowest", "fastest", rows)
+    for note in comparison.get("notes") or []:
+        lines.append(f"- {note}")
+    if comparison.get("notes"):
+        lines.append("")
+    return lines
+
+
 def _repeat_lines(result):
     """Per-run table for a repeated result, or [] for a single run.
 
@@ -702,9 +1045,11 @@ def _repeat_lines(result):
     spread as a percentage of the median, overall and per
     operation), and then by a per-operation latency histogram per
     run — the same shared helper the sweep sections use, so a
-    run where one op type slows down names the op. Runs recorded
-    before 0.34.0 carry no ``histograms_by_op`` and render the
-    table only.
+    run where one op type slows down names the op — and then by
+    the fastest-vs-slowest repeat-run histogram comparison, so a
+    noisy repeat run shows which op's latency shape moved.
+    Runs recorded before 0.34.0 carry no ``histograms_by_op`` and
+    render the table only.
     """
     if not result.repeat_runs:
         return []
@@ -730,6 +1075,7 @@ def _repeat_lines(result):
     lines += _repeat_spread_lines(result)
     lines += _sweep_per_op_histogram_lines(
         lambda entry: f"Run {entry['run']}", result.repeat_runs)
+    lines += _repeat_fastest_slowest_lines(result)
     return lines
 
 

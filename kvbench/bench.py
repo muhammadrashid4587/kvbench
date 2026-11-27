@@ -906,6 +906,10 @@ def run_repeated_workload(client_factory, workload, name, repeat):
                 op: {
                     "ops": entry["count"],
                     "ops_per_sec": entry["ops_per_sec"],
+                    # p50 per op as well as p99, since 0.66.0: the
+                    # fastest-vs-slowest repeat-run histogram
+                    # comparison reads both off this entry.
+                    "p50_ms": entry["p50_ms"],
                     "p99_ms": entry["p99_ms"],
                 }
                 for op, entry in run.per_op_summary.items()

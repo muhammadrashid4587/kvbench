@@ -44,8 +44,8 @@ import json
 import os
 from datetime import datetime, timezone
 
-from .history import _WORKLOAD_KEYS, _bucket_drift, _histograms_or_none, \
-    load_history
+from .history import _WORKLOAD_KEYS, load_history
+from .report import _bucket_drift, _histograms_or_none
 
 
 def _parse_history_selector(selector):

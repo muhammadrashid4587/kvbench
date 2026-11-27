@@ -115,8 +115,9 @@ import tempfile
 from datetime import datetime, timezone
 
 from . import __version__
-from .report import _histogram_comparison_table_lines, \
-    _per_op_histogram_block
+from .report import _bucket_drift, _histogram_comparison_rows_from, \
+    _histogram_comparison_table_lines, _histogram_percentile, \
+    _histograms_or_none, _histogram_or_none, _per_op_histogram_block
 
 DEFAULT_HISTORY_FILE = os.path.join(
     os.path.expanduser("~"), ".kvbench", "history.jsonl"
@@ -923,38 +924,6 @@ def _trend_histogram_lines(entry):
     ]
 
 
-def _bucket_drift(first_buckets, last_buckets):
-    """Largest single-bucket share move between two bucket lists.
-
-    Returns ``(change_pp, label)`` — the signed change in
-    percentage points of the bucket whose share of ops moved
-    most between the first and last runs, and that bucket's
-    label (``<= 0.25 ms`` or ``> 1000 ms`` for the overflow
-    bucket) — or None when either list holds no samples. Buckets
-    are scanned in edge order, so a tie keeps the fastest
-    bucket and the pick is stable.
-    """
-    first_total = sum(b["count"] for b in first_buckets)
-    last_total = sum(b["count"] for b in last_buckets)
-    if not first_total or not last_total:
-        return None
-    first_shares = {b["upper_ms"]: b["count"] / first_total * 100
-                    for b in first_buckets}
-    last_shares = {b["upper_ms"]: b["count"] / last_total * 100
-                   for b in last_buckets}
-    # The overflow bucket (upper_ms None) sorts last.
-    edges = sorted(set(first_shares) | set(last_shares),
-                   key=lambda upper: (upper is None, upper or 0))
-    best = None
-    for upper in edges:
-        change = (last_shares.get(upper, 0.0)
-                  - first_shares.get(upper, 0.0))
-        if best is None or abs(change) > abs(best[0]):
-            label = ("> 1000 ms" if upper is None
-                     else f"<= {upper:g} ms")
-            best = (change, label)
-    return best
-
 
 def _histogram_comparison_notes(first, last, first_label, last_label,
                                 comparison_name):
@@ -996,33 +965,6 @@ def _histogram_comparison_notes(first, last, first_label, last_label,
     return notes
 
 
-def _histogram_percentile(buckets, p):
-    """p-th percentile read off a histogram bucket list, or None.
-
-    ``buckets`` is one op's cleaned bucket list (each bucket a
-    dict with ``upper_ms`` and ``count``) and ``p`` a percentile
-    in (0, 100]. Nearest-rank, the same rule
-    :func:`kvbench.stats.percentile` uses on raw samples: the
-    percentile is the upper edge of the bucket holding the
-    rank-th sample (``ceil(p/100 * total)``), an upper bound on
-    the true percentile since every sample in the bucket sits at
-    or below that edge. Returns None when the list holds no
-    samples, or when the rank lands in the overflow bucket —
-    whose ``upper_ms`` is None, so there is no edge to report.
-    """
-    import math
-
-    total = sum(b["count"] for b in buckets)
-    if not total:
-        return None
-    rank = math.ceil(p / 100 * total)
-    cumulative = 0
-    for bucket in buckets:
-        cumulative += bucket["count"]
-        if cumulative >= rank:
-            return bucket["upper_ms"]
-    return None
-
 
 def _histogram_comparison_rows(first, last):
     """Per-op comparison rows between two runs' histograms.
@@ -1054,62 +996,6 @@ def _histogram_comparison_rows(first, last):
         first_clean, last_clean,
         first.get("per_op") or {}, last.get("per_op") or {})
 
-
-def _histogram_comparison_rows_from(first_clean, last_clean,
-                                    first_per_op, last_per_op):
-    """Per-op comparison rows from two cleaned histogram maps.
-
-    ``first_clean``/``last_clean`` are the two sides' cleaned
-    ``histograms_by_op`` maps (op name to bucket list), and
-    ``first_per_op``/``last_per_op`` their per-op percentile
-    maps (op name to a dict with ``p50_ms``/``p99_ms``) — the
-    run record's ``per_op`` for whole runs, or the percentiles
-    read off the step's own histogram buckets (see
-    :func:`_sweep_step_per_op`) for sweep steps, whose records
-    carry no per-op percentile fields. One row per op that ran
-    in either side, in the same shape
-    :func:`_histogram_comparison_rows` documents: each op's
-    p50/p99 on both sides, the p99 percentage change, and the
-    bucket drift via :func:`_bucket_drift`. An op that never
-    ran on one side shows None for that side, and the p99
-    change is None when either side has no p99 or the first
-    p99 is zero. The drift is None for an op that ran on only
-    one side. Both maps are already cleaned, so this never
-    returns None — callers check usability first.
-    """
-    rows = []
-    for op in ("SET", "GET", "INCR", "DEL"):
-        if op not in first_clean and op not in last_clean:
-            continue
-        first_op = first_per_op.get(op) or {}
-        last_op = last_per_op.get(op) or {}
-        p50_first = first_op.get("p50_ms")
-        p50_last = last_op.get("p50_ms")
-        p99_first = first_op.get("p99_ms")
-        p99_last = last_op.get("p99_ms")
-        if (isinstance(p99_first, (int, float))
-                and isinstance(p99_last, (int, float))
-                and p99_first):
-            p99_change = (p99_last - p99_first) / p99_first * 100
-        else:
-            p99_change = None
-        drift_pp = None
-        drift_bucket = None
-        if op in first_clean and op in last_clean:
-            moved = _bucket_drift(first_clean[op], last_clean[op])
-            if moved is not None:
-                drift_pp, drift_bucket = moved
-        rows.append({
-            "op": op,
-            "p50_from_ms": p50_first,
-            "p50_to_ms": p50_last,
-            "p99_from_ms": p99_first,
-            "p99_to_ms": p99_last,
-            "p99_change_pct": p99_change,
-            "bucket_drift_pp": drift_pp,
-            "bucket_drift_bucket": drift_bucket,
-        })
-    return rows
 
 
 def _trend_histogram_comparison(first, last):
@@ -1784,48 +1670,6 @@ def write_trend_json(path, entries, limit=20):
     return comparison
 
 
-def _histogram_or_none(buckets):
-    """One op's latency histogram bucket list, or None.
-
-    A bucket list is the same log-spaced buckets
-    :func:`kvbench.stats.histogram` produces (each bucket a dict
-    with ``upper_ms`` and ``count``). A record that carries
-    something else — a hand-edited history file, say — reads as
-    no histogram, instead of crashing the best/worst view on a
-    shape it cannot draw.
-    """
-    if not isinstance(buckets, list) or not buckets:
-        return None
-    for bucket in buckets:
-        if (not isinstance(bucket, dict)
-                or "upper_ms" not in bucket
-                or "count" not in bucket):
-            return None
-    return buckets
-
-
-def _histograms_or_none(value):
-    """A per-op histogram mapping, or None when it is not one.
-
-    A history record written since 0.43.0 carries
-    ``histograms_by_op`` (op name to the same log-spaced bucket
-    list the single-run report uses); an older record carries
-    none, and a hand-made file may carry something else entirely.
-    Only a non-empty dict of op name to valid bucket lists passes
-    through — anything else reads as no histograms, instead of
-    crashing the best/worst view on a shape it cannot draw. The
-    compare view validates baseline histograms the same way, so
-    it imports this helper rather than keeping a second copy.
-    """
-    if not isinstance(value, dict) or not value:
-        return None
-    cleaned = {}
-    for op, buckets in value.items():
-        valid = _histogram_or_none(buckets)
-        if valid is None:
-            return None
-        cleaned[op] = valid
-    return cleaned
 
 
 def _run_numbers(entry, histograms=None):
