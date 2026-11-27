@@ -81,6 +81,14 @@ and last runs that ran it, the p99 change, and the bucket
 drift — built from the same shared rows as the overall
 first-to-last comparison, so the per-op numbers agree with the
 overall table's row for that op.
+Since 0.62.0 each sweep-step trend section also carries its own
+first-to-last per-op histogram comparison — each op's p50/p99
+in the first and last runs that recorded the step, the p99
+change, and the bucket drift — in both the Markdown chart and
+under ``histogram_comparison`` in each trend-JSON
+``sweep_trends`` entry, built from the same shared sweep-step
+rows the best/worst view already uses, so the two views cannot
+disagree.
 """
 
 import json
@@ -600,6 +608,47 @@ def _sweep_step_histogram_lines(label, step_label, window, kind,
         label, step_label, latest, latest_step, "latest")
 
 
+def _sweep_step_trend_comparison_lines(label, step_label, window,
+                                       kind, step_key, step_value):
+    """First-to-last per-op histogram comparison for one sweep step, or notes.
+
+    ``window`` is the trend window (oldest first); the comparison
+    runs between the first and last runs in it that recorded
+    this step, so a step that stopped running still compares
+    the shapes it last measured instead of nothing. The table
+    is built from the same shared helper the trend JSON carries
+    for this step, so the chart and the JSON cannot disagree —
+    each op's p50/p99 in the first and last runs' steps, the
+    p99 change, and the bucket drift, so a p99 move in the
+    step shows how each op's latency shape moved between the
+    first and last runs. A step recorded in only one run in
+    the window, or a step recorded before 0.49.0, with no
+    per-op latencies, or with malformed histograms, renders a
+    note naming the reason instead of a table. The returned
+    lines carry no trailing blank line; the caller adds the
+    section separator.
+    """
+    step_runs = [entry for entry in window
+                 if _sweep_step_entry(entry, kind, step_key,
+                                      step_value) is not None]
+    if not step_runs:
+        return []
+    first_entry, last_entry = step_runs[0], step_runs[-1]
+    comparison = _trend_sweep_step_histogram_comparison(
+        label, step_label, first_entry, last_entry,
+        _sweep_step_entry(first_entry, kind, step_key, step_value),
+        _sweep_step_entry(last_entry, kind, step_key, step_value))
+    if comparison["rows"] is not None:
+        lines = _histogram_comparison_table_lines(
+            f"#### {label} — {step_label} — per-op histogram "
+            "comparison — first vs last run",
+            "first", "last", comparison["rows"])
+        while lines and lines[-1] == "":
+            lines.pop()
+        return lines
+    return [f"- {note}" for note in comparison["notes"]]
+
+
 def _sweep_trend_lines(runs, window):
     """Per-sweep-step trend sections for one backend.
 
@@ -620,7 +669,15 @@ def _sweep_trend_lines(runs, window):
     the same shared helper as the latest run's block, so a p99
     move in a step names the op whose latency shape moved — or a
     note naming why there are none (recorded before 0.49.0, no
-    per-op latencies, or malformed histograms).
+    per-op latencies, or malformed histograms) — and with the
+    step's first-to-last per-op histogram comparison between
+    the first and last runs that recorded it — each op's p50/p99
+    in the two steps, the p99 change, and the bucket drift,
+    built from the same shared helper the trend JSON carries for
+    the step, so a p99 move in a step shows how each op's
+    latency shape moved between the first and last runs — or a
+    note naming why there is none (a step recorded in only one
+    run in the window, or steps without usable histograms).
     """
     lines = []
     for kind, step_key, label, unit in _SWEEP_KINDS:
@@ -720,6 +777,16 @@ def _sweep_trend_lines(runs, window):
             # the latest run's block — so a p99 move in the step
             # names the op whose latency shape moved.
             lines.extend(_sweep_step_histogram_lines(
+                label, step_label, window, kind, step_key,
+                step_value))
+            # The step's first-to-last per-op histogram
+            # comparison — each op's p50/p99 in the first and
+            # last runs that recorded this step, the p99 change
+            # and the bucket drift — built from the same shared
+            # helper the trend JSON carries for this step, so a
+            # p99 move in the step shows how each op's latency
+            # shape moved between the first and last runs.
+            lines.extend(_sweep_step_trend_comparison_lines(
                 label, step_label, window, kind, step_key,
                 step_value))
             lines.append("")
@@ -1145,6 +1212,13 @@ def format_trend(entries, limit=20):
     per-operation latency histograms from the latest run that
     recorded it — or a note naming why there are none — so a p99
     move in a step names the op whose latency shape moved,
+    and with the step's first-to-last per-op histogram
+    comparison — each op's p50/p99 in the first and last runs
+    that recorded the step, the p99 change, and the bucket
+    drift, built from the same shared rows the trend JSON
+    carries for the step, or a note naming why there is none —
+    so a p99 move in a step shows how each op's latency shape
+    moved between the first and last runs,
     and the latest run's per-operation latency histograms, so a
     p99 move in the trend names the op whose latency shape moved,
     plus a per-op histogram comparison between the first and
@@ -1358,7 +1432,14 @@ def _sweep_trend_entries(runs, window):
     built from the same :func:`_trend_section_data` helper
     the Markdown view's :func:`_sweep_trend_lines` builds
     its tables from, so a script reading the JSON sees what
-    the Markdown chart shows. Runs recorded before 0.37.0
+    the Markdown chart shows. Each entry also carries the
+    step's first-to-last per-op histogram comparison under
+    ``histogram_comparison`` — each op's p50/p99 in the first
+    and last runs that recorded the step, the p99 change, and
+    the bucket drift, or a note naming why there is none —
+    built from the same shared helper as the Markdown view's
+    per-step comparison table, so the JSON and Markdown views
+    cannot disagree. Runs recorded before 0.37.0
     carry no ``sweeps`` data and contribute no sections; a
     step with no numeric ops/sec in the window gets no
     section at all. A step recorded before 0.49.0, one
@@ -1421,6 +1502,26 @@ def _sweep_trend_entries(runs, window):
                         f"{label} — {step_label} (latest run, "
                         f"{timestamp}): "
                         f"{_SWEEP_STEP_HISTOGRAM_REASONS[reason]}")
+            # The step's first-to-last per-op histogram
+            # comparison — each op's p50/p99 in the first and
+            # last runs that recorded this step, the p99 change,
+            # and the bucket drift, or a note naming why there
+            # is none — built from the same shared helper as
+            # the Markdown view's per-step comparison table, so
+            # a script reading the JSON sees what the chart
+            # shows for the same step.
+            step_runs = [run for run in window
+                         if _sweep_step_entry(run, kind, step_key,
+                                              step_value)
+                         is not None]
+            first_run, last_run = step_runs[0], step_runs[-1]
+            entry["histogram_comparison"] = \
+                _trend_sweep_step_histogram_comparison(
+                    label, step_label, first_run, last_run,
+                    _sweep_step_entry(first_run, kind, step_key,
+                                      step_value),
+                    _sweep_step_entry(last_run, kind, step_key,
+                                      step_value))
             entries.append(entry)
     return entries
 
@@ -1446,7 +1547,11 @@ def trend_comparison(entries, limit=20):
     histograms from the latest run that recorded it — the
     same per-step trend sections the Markdown view renders,
     built from the same shared helper, so a script reading
-    the JSON sees what the chart shows. Each backend also
+    the JSON sees what the chart shows — plus the step's
+    first-to-last per-op histogram comparison under
+    ``histogram_comparison`` on each entry, with ``rows``
+    carrying the same per-op numbers the Markdown table
+    shows or ``notes`` naming why there is none. Each backend also
     carries a ``sweeps`` list — one entry per sweep step
     that ran in the window, with the step's best and worst
     runs by the step's own ops/sec, the percentage changes
@@ -1531,7 +1636,14 @@ def write_trend_json(path, entries, limit=20):
     the window, with the step's best and worst runs, the deltas,
     the step's per-op histograms from both runs, and the step's
     per-op histogram comparison between them — the same sections
-    ``--best-worst-json`` carries.
+    ``--best-worst-json`` carries. Each backend also carries its
+    per-step trend sections under ``sweep_trends`` — one entry
+    per step that ran in the window, with the step's runs table,
+    sparkline and first-to-last change in ops/sec and in p99,
+    the step's per-op histograms from the latest run that
+    recorded it, and the step's first-to-last per-op histogram
+    comparison under ``histogram_comparison`` — the same
+    sections the Markdown ``--trend`` chart renders.
     """
     comparison = trend_comparison(entries, limit=limit)
     directory = os.path.dirname(os.path.abspath(path))
@@ -1767,6 +1879,76 @@ def _best_worst_sweep_histogram_comparison(label, step_label,
             cleaned["worst"], cleaned["best"],
             _sweep_step_per_op(cleaned["worst"]),
             _sweep_step_per_op(cleaned["best"])),
+        "notes": [],
+        "percentiles_from_histograms": True,
+    }
+
+
+def _trend_sweep_step_histogram_comparison(label, step_label,
+                                           first_entry, last_entry,
+                                           first_step, last_step):
+    """The first-to-last per-op histogram comparison for one sweep step.
+
+    ``first_step``/``last_step`` are the step dicts from the
+    step's first and last runs in the trend window (see
+    :func:`_sweep_trend_lines`); ``label``/``step_label`` name
+    the step in the notes. Returns a JSON-serializable dict
+    with ``"from": "first"`` and ``"to": "last"``: ``rows`` is
+    the shared :func:`_histogram_comparison_rows_from` table
+    — each op's p50/p99 in the first and last runs' steps, the
+    p99 change, and the bucket drift — with ``notes`` empty and
+    ``percentiles_from_histograms`` True, or ``rows`` is None
+    and ``notes`` names why there is no comparison: the step's
+    first and last runs are the same run (a step recorded in
+    only one run in the window), or one of the steps was
+    recorded before 0.49.0, recorded no per-op latencies, or
+    carries malformed histograms. The Markdown and JSON views
+    both build from this one helper, so the two views cannot
+    disagree. The p50/p99 in the rows are read off the steps'
+    histogram buckets (see :func:`_sweep_step_per_op`),
+    because a step record carries no per-op percentile
+    fields — the flag says so, so a script reading the JSON
+    does not mistake them for the exact percentiles a whole
+    run's ``per_op`` carries.
+    """
+    if first_entry is last_entry:
+        return {
+            "from": "first",
+            "to": "last",
+            "rows": None,
+            "notes": [f"The first and last runs for {label} — "
+                      f"{step_label} are the same run, so there "
+                      "is no first-to-last histogram comparison "
+                      "for this step."],
+        }
+    notes = []
+    cleaned = {}
+    for pick, entry, step in (("first", first_entry, first_step),
+                              ("last", last_entry, last_step)):
+        step_cleaned, reason = _sweep_step_histograms(step)
+        if step_cleaned is not None:
+            cleaned[pick] = step_cleaned
+            continue
+        timestamp = entry.get("timestamp", "")[:19].replace("T", " ")
+        notes.append(
+            f"{label} — {step_label} ({pick} run, {timestamp}): "
+            f"{_SWEEP_STEP_HISTOGRAM_REASONS[reason]} No "
+            "first-to-last histogram comparison is shown for "
+            "this step.")
+    if notes:
+        return {
+            "from": "first",
+            "to": "last",
+            "rows": None,
+            "notes": notes,
+        }
+    return {
+        "from": "first",
+        "to": "last",
+        "rows": _histogram_comparison_rows_from(
+            cleaned["first"], cleaned["last"],
+            _sweep_step_per_op(cleaned["first"]),
+            _sweep_step_per_op(cleaned["last"])),
         "notes": [],
         "percentiles_from_histograms": True,
     }

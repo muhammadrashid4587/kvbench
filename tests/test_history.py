@@ -1278,6 +1278,256 @@ class TestSweepStepHistograms(unittest.TestCase):
             self.assertIn("SET (800 ops)", text)
 
 
+class TestSweepStepTrendComparison(unittest.TestCase):
+    def _step_record(self, ops_per_sec, set_count=500,
+                     get_count=400, keys=100, clients=None,
+                     value_size=None, pipeline=None, mix=None,
+                     histograms="real", p99_ms=0.020,
+                     set_buckets=None, get_buckets=None):
+        # One recorded run whose sweep step(s) carry per-op
+        # histograms: SET set_count samples and GET get_count
+        # samples, all in the <= 0.1 ms bucket. ``histograms``
+        # picks the shape under test: "real" (valid bucket
+        # lists), "empty" (no per-op latencies), "malformed"
+        # (a bucket list that is not a list), or "missing" (no
+        # key at all — a run recorded before 0.49.0).
+        # ``set_buckets``/``get_buckets`` replace the
+        # single-bucket lists with explicit ones, so a test can
+        # put the two runs' tails in different buckets.
+        result = _make_result(ops_per_sec=ops_per_sec)
+        step = {"keys": keys, "ops": 1000,
+                "ops_per_sec": ops_per_sec,
+                "mean_ms": 0.020, "p99_ms": p99_ms}
+        if histograms == "real":
+            step["histograms_by_op"] = {
+                "SET": set_buckets or [
+                    {"upper_ms": 0.1, "count": set_count}],
+                "GET": get_buckets or [
+                    {"upper_ms": 0.1, "count": get_count}],
+            }
+        elif histograms == "empty":
+            step["histograms_by_op"] = {}
+        elif histograms == "malformed":
+            step["histograms_by_op"] = {"SET": {}}
+        result.sweep = [step]
+        if clients is not None:
+            client_step = dict(step)
+            client_step["clients"] = clients
+            del client_step["keys"]
+            result.client_sweep = [client_step]
+        if value_size is not None:
+            value_step = dict(step)
+            value_step["value_size"] = value_size
+            del value_step["keys"]
+            result.value_sweep = [value_step]
+        if pipeline is not None:
+            pipeline_step = dict(step)
+            pipeline_step["pipeline"] = pipeline
+            del pipeline_step["keys"]
+            result.pipeline_sweep = [pipeline_step]
+        if mix is not None:
+            mix_step = dict(step)
+            mix_step["mix"] = mix
+            del mix_step["keys"]
+            result.mix_sweep = [mix_step]
+        return build_record(result, _make_workload(), "kvbench")
+
+    def _moved_entries(self):
+        # The first run's SET tail sits in the <= 0.25 ms
+        # bucket (p99 0.250) while the last run's stays in
+        # <= 0.1 ms (p99 0.100); GET is identical in both runs.
+        return [
+            self._step_record(
+                40000.0,
+                set_buckets=[{"upper_ms": 0.1, "count": 400},
+                             {"upper_ms": 0.25, "count": 100}]),
+            self._step_record(
+                60000.0,
+                set_buckets=[{"upper_ms": 0.1, "count": 500}]),
+        ]
+
+    def test_step_trend_comparison_table(self):
+        # The core of the feature: each sweep-step trend
+        # section ends with a per-op histogram comparison
+        # between the first and last runs that recorded the
+        # step — each op's p50/p99 in the two steps, the p99
+        # change, and the bucket drift — so SET reads -60.0%
+        # with the <= 0.1 ms bucket up 20.0 pp, while GET did
+        # not move at all.
+        text = format_trend(self._moved_entries())
+        self.assertIn(
+            "#### Keyspace sweep — 100 keys — per-op histogram "
+            "comparison — first vs last run", text)
+        self.assertIn(
+            "| SET | 0.100 | 0.100 | 0.250 | 0.100 | -60.0% | "
+            "+20.0 pp (<= 0.1 ms) |", text)
+        self.assertIn(
+            "| GET | 0.100 | 0.100 | 0.100 | 0.100 | +0.0% | "
+            "+0.0 pp (<= 0.1 ms) |", text)
+
+    def test_step_trend_comparison_json_carries_same_rows(self):
+        # The trend JSON carries the same comparison under
+        # histogram_comparison on the step's sweep_trends entry
+        # — the same rows the Markdown table shows, built from
+        # the same shared helper, so a script reading the JSON
+        # sees what the chart shows. The p50/p99 are read off
+        # the steps' histogram buckets, so the entry flags that.
+        entries = self._moved_entries()
+        step = trend_comparison(entries)["backends"][0][
+            "sweep_trends"][0]
+        comparison = step["histogram_comparison"]
+        self.assertEqual(comparison["from"], "first")
+        self.assertEqual(comparison["to"], "last")
+        self.assertEqual(comparison["notes"], [])
+        self.assertTrue(comparison["percentiles_from_histograms"])
+        rows = {row["op"]: row for row in comparison["rows"]}
+        self.assertEqual(rows["SET"]["p99_from_ms"], 0.25)
+        self.assertEqual(rows["SET"]["p99_to_ms"], 0.1)
+        self.assertEqual(rows["SET"]["p99_change_pct"], -60.0)
+        self.assertEqual(rows["SET"]["bucket_drift_pp"], 20.0)
+        self.assertEqual(rows["SET"]["bucket_drift_bucket"],
+                         "<= 0.1 ms")
+        self.assertEqual(rows["GET"]["p99_change_pct"], 0.0)
+        self.assertEqual(rows["GET"]["bucket_drift_pp"], 0.0)
+
+    def test_step_trend_comparison_all_five_kinds(self):
+        # Every sweep kind's trend section carries its own
+        # comparison — the helper is shared across kinds, not
+        # special-cased per kind.
+        entries = [
+            self._step_record(40000.0, keys=100, clients=4,
+                              value_size=128, pipeline=5,
+                              mix="90:10"),
+            self._step_record(50000.0, keys=100, clients=4,
+                              value_size=128, pipeline=5,
+                              mix="90:10"),
+        ]
+        trends = trend_comparison(entries)["backends"][0][
+            "sweep_trends"]
+        self.assertEqual(len(trends), 5)
+        for step in trends:
+            comparison = step["histogram_comparison"]
+            self.assertIsNotNone(comparison["rows"])
+            self.assertEqual(len(comparison["rows"]), 2)
+        text = format_trend(entries)
+        self.assertEqual(
+            text.count("per-op histogram comparison — first vs "
+                       "last run"),
+            5)
+
+    def test_step_trend_comparison_single_run_has_note(self):
+        # One run recorded the step, so its first and last runs
+        # are the same run: a note names that instead of a
+        # table, in both views.
+        entries = [self._step_record(50000.0, set_count=500)]
+        text = format_trend(entries)
+        self.assertIn(
+            "The first and last runs for Keyspace sweep — 100 "
+            "keys are the same run, so there is no first-to-last "
+            "histogram comparison for this step.", text)
+        self.assertNotIn(
+            "per-op histogram comparison — first vs last run",
+            text)
+        step = trend_comparison(entries)["backends"][0][
+            "sweep_trends"][0]
+        comparison = step["histogram_comparison"]
+        self.assertIsNone(comparison["rows"])
+        self.assertEqual(len(comparison["notes"]), 1)
+        self.assertIn("are the same run", comparison["notes"][0])
+
+    def test_step_trend_comparison_before_0_49_has_note(self):
+        # Both runs' steps were recorded before 0.49.0 and
+        # carry no histograms_by_op key: the section names that
+        # instead of a comparison table, in both views.
+        entries = [self._step_record(40000.0, histograms="missing"),
+                   self._step_record(50000.0, histograms="missing")]
+        text = format_trend(entries)
+        self.assertIn(
+            "this step was recorded before 0.49.0, so it carries "
+            "no per-op histograms.", text)
+        self.assertIn(
+            "No first-to-last histogram comparison is shown for "
+            "this step.", text)
+        self.assertNotIn(
+            "per-op histogram comparison — first vs last run",
+            text)
+        step = trend_comparison(entries)["backends"][0][
+            "sweep_trends"][0]
+        comparison = step["histogram_comparison"]
+        self.assertIsNone(comparison["rows"])
+        self.assertIn("before 0.49.0", comparison["notes"][0])
+
+    def test_step_trend_comparison_no_latencies_has_note(self):
+        # Both runs' steps recorded no per-op latencies: the
+        # section names that instead of a comparison table.
+        entries = [self._step_record(40000.0, histograms="empty"),
+                   self._step_record(50000.0, histograms="empty")]
+        text = format_trend(entries)
+        self.assertIn(
+            "this step recorded no per-op latencies, so there are "
+            "no histograms to show.", text)
+        self.assertIn(
+            "No first-to-last histogram comparison is shown for "
+            "this step.", text)
+        self.assertNotIn(
+            "per-op histogram comparison — first vs last run",
+            text)
+        step = trend_comparison(entries)["backends"][0][
+            "sweep_trends"][0]
+        self.assertIsNone(step["histogram_comparison"]["rows"])
+
+    def test_step_trend_comparison_malformed_has_note(self):
+        # A hand-made history file may carry step histograms
+        # that are not a per-op mapping: the section names that
+        # instead of crashing or drawing a table.
+        entries = [self._step_record(40000.0,
+                                     histograms="malformed"),
+                   self._step_record(50000.0,
+                                     histograms="malformed")]
+        text = format_trend(entries)
+        self.assertIn(
+            "the recorded per-op histograms for this step are "
+            "malformed, so no histograms are shown.", text)
+        self.assertIn(
+            "No first-to-last histogram comparison is shown for "
+            "this step.", text)
+        self.assertNotIn(
+            "per-op histogram comparison — first vs last run",
+            text)
+        step = trend_comparison(entries)["backends"][0][
+            "sweep_trends"][0]
+        self.assertIsNone(step["histogram_comparison"]["rows"])
+
+    def test_step_trend_comparison_skips_runs_without_that_step(self):
+        # The middle run recorded no sweep at all, so the
+        # comparison runs between the first and third runs —
+        # the first and last runs that recorded the step — not
+        # between adjacent runs.
+        entries = [
+            self._step_record(
+                40000.0,
+                set_buckets=[{"upper_ms": 0.1, "count": 400},
+                             {"upper_ms": 0.25, "count": 100}]),
+            build_record(_make_result(ops_per_sec=50000.0),
+                         _make_workload(), "kvbench"),
+            self._step_record(
+                60000.0,
+                set_buckets=[{"upper_ms": 0.1, "count": 500}]),
+        ]
+        text = format_trend(entries)
+        self.assertIn(
+            "#### Keyspace sweep — 100 keys — per-op histogram "
+            "comparison — first vs last run", text)
+        self.assertIn(
+            "| SET | 0.100 | 0.100 | 0.250 | 0.100 | -60.0% | "
+            "+20.0 pp (<= 0.1 ms) |", text)
+        step = trend_comparison(entries)["backends"][0][
+            "sweep_trends"][0]
+        rows = {row["op"]: row
+                for row in step["histogram_comparison"]["rows"]}
+        self.assertEqual(rows["SET"]["p99_change_pct"], -60.0)
+
+
 class TestWriteTrend(unittest.TestCase):
     def _entries(self, rates=(40000.0, 50000.0, 60000.0)):
         workload = _make_workload()

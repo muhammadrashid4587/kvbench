@@ -661,19 +661,26 @@ trend section per step that ran, with the same table, delta,
 sparkline and first-to-last change as the overall chart, plus a
 p99 first-to-last change per step, and the step's per-operation
 latency histograms from the latest run that recorded it, drawn
-with the same shared helper as the latest run's block — a keyspace step's ops/sec at
-100 keys is only ever compared with the same step in other runs,
-so a step that slows down reads at a glance even when the
-overall ops/sec moved the other way, and a step whose tail crept
-up reads at a glance even when its ops/sec moved the other way,
-and a p99 move in a step names the op whose latency shape moved.
-Runs recorded before 0.37.0 carry no sweep data and simply show
-no sweep sections; a step that never ran in the window gets no
-section at all. A step recorded before 0.49.0 carries no
-per-op histograms, a step recorded with no per-op latencies
-carries an empty mapping, and a step whose recorded histograms
-are malformed carries something else — each renders a note
-naming the reason instead of a histogram block.
+with the same shared helper as the latest run's block, and the
+step's first-to-last per-op histogram comparison — each op's
+p50/p99 in the first and last runs that recorded the step, the
+p99 change, and the bucket drift, built from the same shared
+sweep-step rows the best/worst view already uses — a keyspace
+step's ops/sec at 100 keys is only ever compared with the same
+step in other runs, so a step that slows down reads at a glance
+even when the overall ops/sec moved the other way, and a step
+whose tail crept up reads at a glance even when its ops/sec
+moved the other way, and a p99 move in a step names the op whose
+latency shape moved, and shows how that shape moved between the
+first and last runs. Runs recorded before 0.37.0 carry no sweep
+data and simply show no sweep sections; a step that never ran in
+the window gets no section at all. A step recorded before 0.49.0
+carries no per-op histograms, a step recorded with no per-op
+latencies carries an empty mapping, and a step whose recorded
+histograms are malformed carries something else — each renders a
+note naming the reason instead of a histogram block or a
+comparison table, and a step recorded in only one run in the
+window renders a note instead of a comparison table.
 
 With `--trend-out PATH` the same chart is also written to a
 Markdown file — the exact text printed to stdout — so the trend
@@ -701,10 +708,13 @@ section per sweep step that ran in the window under
 `sweep_trends`: the step's runs table, sparkline and first-to-last
 change in ops/sec and in p99, and the step's per-op latency
 histograms from the latest run that recorded it (or a note under
-`notes` naming why there are none) — the same per-step trend
-sections the Markdown chart renders, built from the same shared
-helper, so a script reading the trend JSON sees what the chart
-shows for the same step — plus one per-step sweep section per sweep step that ran in the window under `sweeps`:
+`notes` naming why there are none), and the step's first-to-last
+per-op histogram comparison under `histogram_comparison` (each
+op's p50/p99 in the first and last runs that recorded the step,
+the p99 change, and the bucket drift, or a note naming why there
+is none) — the same per-step trend sections the Markdown chart
+renders, built from the same shared helper, so a script reading
+the trend JSON sees what the chart shows for the same step — plus one per-step sweep section per sweep step that ran in the window under `sweeps`:
 the step's best and worst runs by the step's own ops/sec, the
 percentage changes between them, and the step's per-op latency
 histograms from both runs — or notes naming why a pick has none
@@ -1316,12 +1326,26 @@ make test
   window, or whose first or last run that ran the op was
   recorded before 0.43.0, recorded no per-op latencies, or
   carries malformed histograms, renders a note naming the
-  reason instead of a table. Done in 0.61.0. Next: the same
-  first-to-last per-op histogram comparison for each
-  sweep-step trend section — in the Markdown chart and under
-  `histogram_comparison` in each trend-JSON `sweep_trends`
-  entry, built from the same shared sweep-step rows the
-  best/worst view already uses.
+  reason instead of a table. Done in 0.61.0. A per-op histogram
+  comparison table in each sweep-step trend section — each step's
+  section ends with its first-to-last comparison, each op's
+  p50/p99 in the first and last runs that recorded the step, the
+  p99 change and the bucket drift, rendered from the same shared
+  sweep-step rows the best/worst view already uses, so the chart
+  and the trend JSON (under `histogram_comparison` in each
+  `sweep_trends` entry) cannot disagree; a step recorded in only
+  one run in the window, or whose first or last run that recorded
+  it was recorded before 0.49.0, recorded no per-op latencies, or
+  carries malformed histograms, renders a note naming the reason
+  instead of a table. The step's p50 and p99 are read off its
+  histogram buckets (the upper edge of the bucket holding the
+  percentile rank), and the JSON flags that with
+  `percentiles_from_histograms`. Done in 0.62.0. Next: the first
+  run's per-op histogram block in each sweep-step trend section,
+  drawn with the same shared helper as the latest run's block, so
+  the two shapes can be read side by side next to the comparison
+  table, like the overall trend's first-run block sits next to
+  its comparison.
 - `--compare-file-json PATH`: with `--compare-file`, also
   write the comparison as a standalone JSON file — the exact
   dict `compare_results` returns (the same one the run's JSON
