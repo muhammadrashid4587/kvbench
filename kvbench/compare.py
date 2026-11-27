@@ -435,6 +435,31 @@ def compare_results(results, baseline_doc, current_workload,
     }
 
 
+def write_comparison_json(path, comparison):
+    """Write a comparison as standalone JSON to ``path``.
+
+    ``comparison`` is the dict :func:`compare_results` returns —
+    the same one the run's JSON report carries under
+    ``comparison`` — so the file cannot disagree with the
+    report: same entries, same per-op deltas, same per-op
+    histograms of both runs, same workload-match verdict, same
+    regression flags. A history baseline carries no per-op
+    histograms, and a baseline recorded before 0.22.0 carries
+    no per-op stats, so those fields read exactly as they do in
+    the report (``None`` histograms, per-op deltas with ``None``
+    baseline fields) instead of being filled in here.
+
+    Creates the parent directory when needed. Returns the
+    comparison dict.
+    """
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(comparison, f, indent=2)
+        f.write("\n")
+    return comparison
+
+
 def format_verdict(entry, threshold_pct=None):
     """Human-readable verdict line for one comparison entry.
 

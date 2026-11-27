@@ -126,7 +126,7 @@ from .bench import DictClient, Workload, format_duration, \
 from .workload import MIX_PRESETS, _parse_duration, _parse_mix, \
     _parse_mix_sweep, load_workload_file
 from .compare import compare_results, format_verdict, load_baseline, \
-    load_history_baseline
+    load_history_baseline, write_comparison_json
 from .history import DEFAULT_HISTORY_FILE, export_history, \
     format_best_worst, format_history, format_import, format_prune, \
     format_trend, import_history, load_history, \
@@ -627,6 +627,13 @@ def build_parser():
                         "the most recent) or by ISO timestamp (the "
                         "latest run at or before that time), "
                         "e.g. --compare-history -1")
+    parser.add_argument("--compare-history-json", default=None,
+                        metavar="PATH",
+                        help="with --compare-history, also write the "
+                        "comparison as standalone JSON to this file "
+                        "(the same comparison the run's JSON report "
+                        "carries under 'comparison'), so a script can "
+                        "read it without parsing the report")
     parser.add_argument("--compare-same-workload", action="store_true",
                         help="with --compare-history, only consider "
                         "recorded runs whose workload matches this "
@@ -731,6 +738,13 @@ def main(argv=None):
         print("kvbench: --best-worst-json needs --best-worst: it "
               "writes the best-vs-worst comparison to a file, and "
               "there is no comparison without --best-worst",
+              file=sys.stderr)
+        return 2
+    if args.compare_history_json and args.compare_history is None:
+        print("kvbench: --compare-history-json needs "
+              "--compare-history: it writes the comparison against "
+              "a history run to a file, and there is no comparison "
+              "without --compare-history",
               file=sys.stderr)
         return 2
     if not args.prune:
@@ -1271,6 +1285,9 @@ def main(argv=None):
     write_json(results, workload, command_line, json_path, comparison,
                slo)
     print(f"JSON report written to {json_path}")
+    if args.compare_history_json and comparison is not None:
+        write_comparison_json(args.compare_history_json, comparison)
+        print(f"Comparison JSON written to {args.compare_history_json}")
     if args.csv:
         write_csv(results, args.csv)
         print(f"CSV written to {args.csv}")

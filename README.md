@@ -276,6 +276,12 @@ python -m kvbench.cli --ops 20000 --clients 4 \
     --compare-history -1 --compare-same-workload \
     --regression-threshold 5
 
+# same comparison, but also written out as a standalone JSON file
+# — the exact comparison the run's JSON report carries under
+# "comparison", so a script can read it without parsing the report
+python -m kvbench.cli --ops 20000 --clients 4 \
+    --compare-history -1 --compare-history-json comparison.json
+
 # SLO gate: fail the run (exit 4) when p99 is above 1 ms or more
 # than 1% of ops error — the verdict lands in both reports
 python -m kvbench.cli --ops 20000 --clients 4 \
@@ -467,6 +473,12 @@ ISO timestamp for the latest run at or before that time, e.g.
 `--compare-history -1`; the history file is `--history-file`,
 default `~/.kvbench/history.jsonl`; mutually exclusive with
 `--compare-file`),
+`--compare-history-json PATH` (with `--compare-history`, also
+write the comparison as a standalone JSON file — the exact
+comparison the run's JSON report carries under `comparison`,
+same entries, per-op deltas and per-op histograms, so a script
+can read it without parsing the report; needs
+`--compare-history`),
 `--compare-same-workload` (with `--compare-history`, only
 consider recorded runs whose workload matches this run's, so the
 baseline is the latest run that measured the same workload; with
@@ -889,7 +901,14 @@ the history file and the selector as the baseline, and the JSON
 report carries the baseline under `comparison` with
 `"source": "history"` (a report-file baseline carries
 `"source": "report"`). `--compare-file` and `--compare-history`
-together are rejected — pick one baseline.
+together are rejected — pick one baseline. With
+`--compare-history-json PATH` the same comparison is also
+written as a standalone JSON file — the exact `comparison` dict
+the run's JSON report carries, written through the shared helper
+in `compare.py`, so the file and the report cannot disagree; a
+script can read the comparison without parsing the report. Like
+`--trend-json`, it needs its mode: without `--compare-history`
+it is rejected (exit 2).
 
 With `--compare-same-workload` the selector only sees recorded
 runs whose workload matches this run's (same ops, clients, keys,
@@ -1208,6 +1227,19 @@ make test
 
 ## Roadmap
 
+- `--compare-history-json PATH`: with `--compare-history`, also
+  write the comparison as a standalone JSON file — the exact
+  dict `compare_results` returns (the same one the run's JSON
+  report carries under `comparison`), written through one
+  shared helper in `compare.py`, so the file cannot disagree
+  with the report: same entries, same per-op deltas, same
+  per-op histograms of both runs, same workload-match verdict
+  and regression flags. A history baseline carries no per-op
+  histograms, and a baseline recorded before 0.22.0 carries no
+  per-op stats, so those fields read exactly as they do in the
+  report instead of being filled in by the export. Like
+  `--trend-json` and `--best-worst-json`, the flag needs its
+  mode (exit 2 without `--compare-history`). Done in 0.56.0.
 - Per-operation histogram comparisons in the `--trend-json`
   per-op sections: each op's section carries its own
   first-to-last comparison under `histogram_comparison` — that

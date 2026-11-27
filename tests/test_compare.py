@@ -10,7 +10,8 @@ import unittest
 from kvbench.bench import BenchmarkResult, Workload
 from kvbench.cli import main
 from kvbench.compare import compare_results, format_verdict, \
-    load_baseline, load_history_baseline, workload_differences
+    load_baseline, load_history_baseline, workload_differences, \
+    write_comparison_json
 from kvbench.report import _workload_dict, render_json, render_markdown
 from kvbench.stats import histogram
 
@@ -536,6 +537,23 @@ class TestLoadHistoryBaseline(unittest.TestCase):
 
 
 class TestCompareResults(unittest.TestCase):
+    def test_write_comparison_json_round_trips(self):
+        # The export is the exact dict compare_results returns:
+        # it round-trips unchanged, and the parent directory is
+        # created when needed.
+        comparison = compare_results(
+            [_result_with_ops()],
+            _baseline_doc(ops_per_sec=8_000, p99_ms=0.12,
+                          histograms_by_op=_baseline_histograms()),
+            _workload_dict(_workload()), "prev.json")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "nested", "comparison.json")
+            returned = write_comparison_json(path, comparison)
+            self.assertIs(returned, comparison)
+            with open(path, encoding="utf-8") as f:
+                parsed = json.load(f)
+            self.assertEqual(parsed, comparison)
+
     def test_entries_carry_per_op_histograms(self):
         comparison = compare_results(
             [_result_with_ops()],
@@ -1179,6 +1197,33 @@ class TestCompareHistoryCli(unittest.TestCase):
             self.assertEqual(
                 comparison["entries"][0]["name"],
                 f"cinder (127.0.0.1:{self.port})")
+
+    def test_compare_history_json_end_to_end(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._run_with_history(tmp)
+            out = os.path.join(tmp, "run.md")
+            export = os.path.join(tmp, "nested", "comparison.json")
+            code = main(self._argv(["--ops", "100", "--clients", "1",
+                                    "--output", out,
+                                    "--compare-history", "-1",
+                                    "--compare-history-json", export,
+                                    "--history-file", history]))
+            self.assertEqual(code, 0)
+            with open(export, encoding="utf-8") as f:
+                exported = json.load(f)
+            parsed = json.loads(open(os.path.join(tmp, "run.json"),
+                                     encoding="utf-8").read())
+            # The export is the exact comparison the JSON report
+            # carries, so the two cannot disagree.
+            self.assertEqual(exported, parsed["comparison"])
+            self.assertEqual(exported["source"], "history")
+            self.assertEqual(len(exported["entries"]), 1)
+
+    def test_compare_history_json_without_compare_history(self):
+        code = main(self._argv(["--ops", "10",
+                                "--compare-history-json",
+                                "comparison.json"]))
+        self.assertEqual(code, 2)
 
     def test_compare_history_by_timestamp(self):
         with tempfile.TemporaryDirectory() as tmp:
