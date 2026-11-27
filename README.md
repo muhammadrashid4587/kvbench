@@ -765,7 +765,15 @@ pick's own histogram under that op's table — the same
 log-spaced buckets as the regular run's `histograms_by_op`,
 drawn with the same shared helper as the single-run report
 and the `--compare` output, so a p99 move names the op whose
-latency shape moved. Below the best and worst runs' histogram
+latency shape moved. Each per-op section also carries its own
+per-op histogram comparison table — that op's p50 and p99 in
+its worst and best runs, the p99 change, and the bucket drift
+— built from the same shared rows as the overall comparison's
+row for that op, so the per-op numbers agree with the overall
+table, and a note naming the reason instead when the op's
+best and worst runs are the same run, or a run was recorded
+before 0.43.0, with no per-op latencies, or with malformed
+histograms. Below the best and worst runs' histogram
 blocks each backend also gets a per-op histogram comparison
 between the two runs — a table with each op's p50 and p99 in
 the worst and best runs, the p99 change, and the bucket drift
@@ -813,7 +821,11 @@ file (the exact text printed to stdout), and
 `--best-worst-json PATH` writes it as JSON (best and worst run
 per backend and per op, with ops/sec, p99, the deltas, and the
 per-op histograms — `histograms_by_op` on the best and worst
-runs, `histogram` on each per-op pick — plus the per-op
+runs, `histogram` on each per-op pick — plus each per-op
+section's own histogram comparison under
+`per_op.<OP>.histogram_comparison`, with `rows` carrying that
+op's p50/p99 in its worst and best runs, the p99 change and the
+bucket drift, or `notes` naming why there is none — plus the per-op
 histogram comparison under `histogram_comparison`, with `rows`
 carrying each op's p50/p99 in the worst and best runs, the p99
 change and the bucket drift, or `notes` naming why there is
@@ -1397,7 +1409,12 @@ make test
   worst runs, the p99 change and the bucket drift, rendered
   from the same shared rows the best/worst JSON carries for the
   op, so a reader of the comparison sees the per-op numbers
-  without parsing JSON and the two views cannot disagree.
+  without parsing JSON and the two views cannot disagree. Done
+  in 0.65.0. Next: the same per-op histogram comparison in the
+  repeat-run section of a single-run report — the fastest vs
+  slowest repeat run's p50/p99 per op, the p99 change and the
+  bucket drift, from the same shared rows, so a noisy repeat
+  run shows which op's latency shape moved.
 - `--compare-file-json PATH`: with `--compare-file`, also
   write the comparison as a standalone JSON file — the exact
   dict `compare_results` returns (the same one the run's JSON
@@ -1577,6 +1594,20 @@ make test
   one recorded with no per-op latencies, or one whose recorded
   histograms are malformed renders a note naming the reason
   instead of a table. Done in 0.46.0.
+- Per-operation histogram comparison in each per-op `--best-worst`
+  section: each op's section carries its own table — that op's
+  p50 and p99 in its own worst and best runs, the p99 change,
+  and the bucket drift — built from the same shared rows as the
+  overall comparison, so the per-op numbers agree with the
+  overall table's row for that op, and the comparison lands
+  under `histogram_comparison` on each `per_op` entry in the
+  `--best-worst-json` output (`rows` with the op's numbers, or
+  `notes` naming why there is none), so a script reading the
+  JSON sees what the Markdown table shows. A section whose
+  op's best and worst runs are the same run, or whose best or
+  worst run was recorded before 0.43.0, with no per-op
+  latencies, or with malformed histograms, renders a note
+  naming the reason instead of a table. Done in 0.65.0.
 - Per-operation histogram comparison across the `--trend`
   first and last runs: each backend's trend ends with a per-op
   table comparing its first and last runs in the window — each

@@ -101,6 +101,12 @@ same shared helper as the latest run's block, so that op's
 two shapes can be read side by side — and the trend JSON
 carries the same first run's histograms under
 ``first_histograms_by_op`` in each ``per_op`` section.
+Since 0.65.0 each per-op best/worst section also carries its
+own per-op histogram comparison — that op's p50/p99 in its
+worst and best runs, the p99 change, and the bucket drift —
+in both the Markdown and JSON views, built from the same
+shared rows as the overall comparison, so the per-op numbers
+agree with the overall table's row for that op.
 """
 
 import json
@@ -1922,6 +1928,70 @@ def _best_worst_histogram_comparison(usable, best, worst):
     }
 
 
+def _best_worst_per_op_histogram_comparison(op_runs, best, worst, op):
+    """The best-vs-worst histogram comparison for one op, as data.
+
+    ``op_runs`` are (entry, numbers) pairs for the runs that ran
+    ``op``; ``best``/``worst`` the picked numbers dicts. Returns
+    a JSON-serializable dict with ``"from": "worst"`` and
+    ``"to": "best"``: ``rows`` is the shared
+    :func:`_histogram_comparison_rows` table filtered to ``op`` —
+    that op's p50/p99 in its worst and best runs, the p99
+    change, and the bucket drift — with ``notes`` empty, or
+    ``rows`` is None and ``notes`` names why there is no
+    comparison: the same run is both best and worst (only one
+    run ran the op, or every run's ops/sec for the op is
+    identical), one of them was recorded before 0.43.0,
+    recorded no per-op latencies, or carries malformed
+    histograms, or the op's buckets are missing from both
+    sides' recorded histograms. The Markdown per-op
+    best/worst sections render the same comparison from this
+    one helper, so the chart and the JSON cannot disagree —
+    and a script reading the JSON sees the same numbers the
+    overall comparison's row for that op shows.
+    """
+    best_entry = next(entry for entry, numbers in op_runs
+                      if numbers is best)
+    worst_entry = next(entry for entry, numbers in op_runs
+                       if numbers is worst)
+    if best_entry is worst_entry:
+        return {
+            "from": "worst",
+            "to": "best",
+            "rows": None,
+            "notes": [f"The best and worst runs for {op} are the "
+                      "same run, so there is no best-vs-worst "
+                      f"histogram comparison for {op}."],
+        }
+    notes = _histogram_comparison_notes(
+        worst_entry, best_entry, "worst", "best", "best-vs-worst")
+    if notes:
+        return {
+            "from": "worst",
+            "to": "best",
+            "rows": None,
+            "notes": notes,
+        }
+    rows = [row for row in _histogram_comparison_rows(
+        worst_entry, best_entry) if row["op"] == op]
+    if not rows:
+        return {
+            "from": "worst",
+            "to": "best",
+            "rows": None,
+            "notes": [f"Neither the worst nor the best run for "
+                      f"{op} carries histogram buckets for {op}, "
+                      "so there is no best-vs-worst histogram "
+                      f"comparison for {op}."],
+        }
+    return {
+        "from": "worst",
+        "to": "best",
+        "rows": rows,
+        "notes": [],
+    }
+
+
 def _sweep_step_per_op(histograms):
     """Per-op p50/p99 read off a sweep step's cleaned histograms.
 
@@ -2295,7 +2365,16 @@ def best_worst_comparison(entries, workload=None):
     ``histograms_by_op`` maps, and each per-op pick's own
     ``histogram`` bucket list — the same log-spaced buckets the
     single-run report uses, so a p99 move names the op whose
-    latency shape moved. Each backend also carries a
+    latency shape moved. Each per-op section also carries its
+    own ``histogram_comparison`` — that op's p50/p99 in its
+    worst and best runs, the p99 change, and the bucket drift,
+    built from the same shared rows as the overall comparison,
+    so the per-op numbers agree with the overall table's row
+    for that op — under ``rows`` with ``"from": "worst"`` and
+    ``"to": "best"``, or under ``notes`` naming why there is
+    none (the same run is both best and worst for the op, a
+    run recorded before 0.43.0, a run with no per-op
+    latencies, or malformed histograms). Each backend also carries a
     ``histogram_comparison`` between its best and worst runs —
     the same per-op table the trend's first-to-last comparison
     renders (each op's p50/p99 in the worst and best runs, the
@@ -2377,6 +2456,15 @@ def best_worst_comparison(entries, workload=None):
                 "worst": op_worst,
                 "ops_sec_delta_pct": op_ops_delta,
                 "p99_delta_pct": op_p99_delta,
+                # That op's own histogram comparison — its
+                # p50/p99 in its worst and best runs, the p99
+                # change and the bucket drift — built from the
+                # same shared rows as the overall comparison,
+                # so the per-op numbers agree with the overall
+                # table's row for the op.
+                "histogram_comparison":
+                    _best_worst_per_op_histogram_comparison(
+                        op_runs, op_best, op_worst, op),
             }
         backends.append({
             "backend": backend,
@@ -2461,7 +2549,12 @@ def format_best_worst(entries, workload=None):
     type that ran, each followed by that op's histograms for its
     own best and worst runs — the per-op picks are independent of the
     overall picks, so a slow-write run that still won overall
-    shows its own shape. Each sweep step that ran then gets its
+    shows its own shape — and that op's own per-op histogram
+    comparison table — its p50/p99 in its worst and best runs,
+    the p99 change, and the bucket drift, built from the same
+    shared rows as the overall comparison, so the per-op numbers
+    agree with the overall table's row for the op — or a note
+    naming why there is no comparison for the op. Each sweep step that ran then gets its
     own best-vs-worst section — the best and worst runs for that
     step by the step's own ops/sec, with the step's per-op
     latency histograms from both runs, drawn with the same
@@ -2561,6 +2654,27 @@ def format_best_worst(entries, workload=None):
                 sections.extend(_per_op_histogram_block(
                     f"#### {op} — latency histogram ({label} run)",
                     {op: histogram}))
+            # That op's own histogram comparison — its p50/p99
+            # in its worst and best runs, the p99 change and
+            # the bucket drift, from the same shared rows the
+            # JSON carries for the op, so the table's numbers
+            # agree with the JSON and with the overall
+            # comparison's row for the op. When there is
+            # nothing to compare — the same run is both best
+            # and worst for the op, or a run recorded before
+            # 0.43.0, with no per-op latencies, or with
+            # malformed histograms — a note names the reason
+            # instead of a table.
+            comparison = op_entry["histogram_comparison"]
+            if comparison["rows"] is not None:
+                sections.extend(_histogram_comparison_table_lines(
+                    f"#### {op} histogram comparison — "
+                    "best vs worst run",
+                    "worst", "best", comparison["rows"]))
+            else:
+                for note in comparison["notes"]:
+                    sections.append(f"- {note}")
+                sections.append("")
         # Per-sweep-step best-vs-worst: each step that ran gets
         # its own table and the step's per-op histograms from
         # its best and worst runs — the same shared helper the
@@ -2594,8 +2708,12 @@ def write_best_worst_json(path, entries, workload=None):
     Creates the parent directory when needed. Returns the
     comparison dict — the same shape ``best_worst_comparison``
     returns — so a script can read the spread without parsing
-    the Markdown table. Each backend carries its per-step sweep
-    sections under ``sweeps`` — one entry per step that ran,
+    the Markdown table. Each backend carries its per-op
+    sections under ``per_op`` — each op's best and worst runs,
+    the deltas, the op's histogram from both runs, and the
+    op's own per-op histogram comparison under
+    ``histogram_comparison`` — and its per-step sweep sections
+    under ``sweeps`` — one entry per step that ran,
     with the step's best and worst runs, the deltas, the step's
     per-op histograms from both runs, and the step's per-op
     histogram comparison between them — the same sections the
