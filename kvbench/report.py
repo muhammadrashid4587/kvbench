@@ -360,6 +360,42 @@ def _per_op_histogram_lines(result):
     )
 
 
+def _histogram_comparison_table_lines(heading, from_label, to_label,
+                                      rows):
+    """The per-op histogram comparison table under one heading.
+
+    ``rows`` are :func:`kvbench.history._histogram_comparison_rows`
+    rows, or the same shape from the compare view's best/worst
+    histogram comparison; the labels name the two sides in the
+    column headers ("first"/"last" for the trend, "worst"/"best"
+    for best-vs-worst, "prev"/"now" for the compare view). A
+    side with no p50/p99 shows ``-``, and the p99 change and
+    bucket drift show ``-`` when they cannot be computed.
+    """
+    lines = [heading, ""]
+    lines.append(f"| Op | p50 {from_label} (ms) | p50 {to_label} (ms) | "
+                 f"p99 {from_label} (ms) | p99 {to_label} (ms) | "
+                 "p99 change | Bucket drift |")
+    lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
+
+    def _fmt(value):
+        return (f"{value:.3f}"
+                if isinstance(value, (int, float)) else "-")
+
+    for row in rows:
+        change = row["p99_change_pct"]
+        change_cell = f"{change:+.1f}%" if change is not None else "-"
+        drift_pp = row["bucket_drift_pp"]
+        drift = (f"{drift_pp:+.1f} pp ({row['bucket_drift_bucket']})"
+                 if drift_pp is not None else "-")
+        lines.append(
+            f"| {row['op']} | {_fmt(row['p50_from_ms'])} | "
+            f"{_fmt(row['p50_to_ms'])} | {_fmt(row['p99_from_ms'])} | "
+            f"{_fmt(row['p99_to_ms'])} | {change_cell} | {drift} |")
+    lines.append("")
+    return lines
+
+
 def _sweep_per_op_histogram_lines(label, entries):
     """Per-operation histograms for each sweep step, or [].
 
@@ -867,6 +903,17 @@ def _best_worst_op_lines(name, best_worst):
     the table. A comparison built before 0.59.0 carries picks
     with no histograms and renders only the table. A pick
     with no delta for a measure shows n/a for that measure.
+    The picked ops' per-op histogram comparison table — each
+    op's p50/p99 in both runs, the p99 change, and the bucket
+    drift — renders under the histogram blocks, from the same
+    ``histogram_comparison`` rows the JSON report carries, drawn
+    by the shared :func:`_histogram_comparison_table_lines`
+    helper the trend and best-vs-worst views use too, so the
+    shape move reads as numbers as well as bars and the views
+    cannot disagree. A comparison built before 0.60.0 carries
+    no ``histogram_comparison`` and renders no table; when the
+    baseline carries no per-op histograms the table's notes
+    name the reason instead.
     """
     if not best_worst:
         return []
@@ -927,6 +974,24 @@ def _best_worst_op_lines(name, best_worst):
                 f"##### {name} — {pick['op']} latency histogram "
                 "(prev)",
                 {pick["op"]: pick["baseline_histogram"]})
+    # The picked ops' per-op histogram comparison table, so the
+    # shape move reads as numbers as well as bars — rendered
+    # from the same shared rows the JSON report carries, so the
+    # two views cannot disagree. A best_worst dict built before
+    # 0.60.0 carries no histogram_comparison and renders no
+    # table; when the baseline carries no per-op histograms the
+    # notes name the reason instead of a table.
+    histogram_comparison = best_worst.get("histogram_comparison")
+    if histogram_comparison:
+        rows = histogram_comparison.get("rows")
+        if rows:
+            lines += _histogram_comparison_table_lines(
+                f"##### {name} — best/worst op histogram comparison",
+                "prev", "now", rows)
+        for note in histogram_comparison.get("notes") or []:
+            lines.append(f"- {note}")
+        if histogram_comparison.get("notes"):
+            lines.append("")
     return lines
 
 
@@ -941,9 +1006,12 @@ def _comparison_lines(comparison):
     compared backend — the op whose ops/sec rose most and the
     op whose p99 fell most, and the other end of each, with a
     note when a comparison has a single op or identical runs,
-    and each best/worst op's latency histogram from both runs —
-    both built from the same dicts the JSON report carries, so
-    the views cannot disagree — and then by a per-operation
+    and each best/worst op's latency histogram from both runs,
+    and a per-op histogram comparison table for the picked ops
+    (each op's p50/p99 in both runs, the p99 change, and the
+    bucket drift) — all built from the same dicts the JSON
+    report carries, so the views cannot disagree — and then by
+    a per-operation
     latency histogram per compared backend — the
     current run's and the baseline run's, drawn by the same
     shared helper as the single-run per-op histograms, so the

@@ -89,7 +89,8 @@ import tempfile
 from datetime import datetime, timezone
 
 from . import __version__
-from .report import _per_op_histogram_block
+from .report import _histogram_comparison_table_lines, \
+    _per_op_histogram_block
 
 DEFAULT_HISTORY_FILE = os.path.join(
     os.path.expanduser("~"), ".kvbench", "history.jsonl"
@@ -952,41 +953,6 @@ def _histogram_comparison_rows_from(first_clean, last_clean,
             "bucket_drift_bucket": drift_bucket,
         })
     return rows
-
-
-def _histogram_comparison_table_lines(heading, from_label, to_label,
-                                      rows):
-    """The per-op histogram comparison table under one heading.
-
-    ``rows`` are :func:`_histogram_comparison_rows` rows; the
-    labels name the two sides in the column headers
-    ("first"/"last" for the trend, "worst"/"best" for
-    best-vs-worst). A side with no p50/p99 shows ``-``, and the
-    p99 change and bucket drift show ``-`` when they cannot be
-    computed.
-    """
-    lines = [heading, ""]
-    lines.append(f"| Op | p50 {from_label} (ms) | p50 {to_label} (ms) | "
-                 f"p99 {from_label} (ms) | p99 {to_label} (ms) | "
-                 "p99 change | Bucket drift |")
-    lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
-
-    def _fmt(value):
-        return (f"{value:.3f}"
-                if isinstance(value, (int, float)) else "-")
-
-    for row in rows:
-        change = row["p99_change_pct"]
-        change_cell = f"{change:+.1f}%" if change is not None else "-"
-        drift_pp = row["bucket_drift_pp"]
-        drift = (f"{drift_pp:+.1f} pp ({row['bucket_drift_bucket']})"
-                 if drift_pp is not None else "-")
-        lines.append(
-            f"| {row['op']} | {_fmt(row['p50_from_ms'])} | "
-            f"{_fmt(row['p50_to_ms'])} | {_fmt(row['p99_from_ms'])} | "
-            f"{_fmt(row['p99_to_ms'])} | {change_cell} | {drift} |")
-    lines.append("")
-    return lines
 
 
 def _trend_histogram_comparison(first, last):

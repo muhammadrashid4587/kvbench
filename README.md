@@ -868,7 +868,16 @@ run's buckets under `histogram` and the baseline run's under
 under the table in Markdown, so the op that moved most also
 shows how its latency shape moved; the same op picked on both
 measures renders once, and a baseline that carries no per-op
-histograms renders only this run's shape. A comparison with a single op, or two
+histograms renders only this run's shape. Below the histogram
+blocks the best/worst section also carries a per-op histogram
+comparison table for the picked ops — each op's p50 and p99 in
+both runs, the p99 change, and the bucket drift — under
+`comparison.entries[].best_worst.histogram_comparison` in JSON,
+built from the same shared pick dicts, so the shape move reads
+as numbers as well as bars; a baseline that carries no per-op
+histograms renders a note naming the reason instead of a table,
+and the per-op delta rows carry each side's p50 as well, so the
+table's numbers agree with the delta table just above it. A comparison with a single op, or two
 identical runs, carries a note saying so instead of a spread, and
 a baseline that carries no per-op stats carries a note saying
 there is no best or worst op. A history baseline
@@ -1282,10 +1291,27 @@ make test
   moved; the same op picked on both measures renders once, and
   a baseline that carries no per-op histograms (a report before
   0.32.0, or a history baseline) renders only this run's shape.
-  Done in 0.59.0. Next: a per-op histogram comparison table for
-  the best/worst ops — p50/p99 in both runs, the p99 change and
-  the bucket drift, like the trend view's histogram comparison
-  — so the shape move reads as numbers as well as bars.
+  Done in 0.59.0. A per-op histogram comparison table for the
+  best/worst ops — each picked op's p50/p99 in both runs, the
+  p99 change and the bucket drift, like the trend view's
+  histogram comparison — under the best/worst histogram blocks
+  in Markdown and under `comparison.entries[].best_worst.
+  histogram_comparison` in JSON, built from the same shared
+  pick dicts so the JSON and Markdown views cannot disagree
+  and the shape move reads as numbers as well as bars; the
+  per-op delta rows also carry each side's p50 now, so the
+  table's numbers agree with the delta table just above it,
+  and a baseline that carries no per-op histograms (a report
+  before 0.32.0, or a history baseline) renders a note naming
+  the reason instead of a table. The `--compare-file-json`
+  export carries it too, since it writes the same comparison
+  dict. Done in 0.60.0. Next: a per-op histogram comparison
+  table in the Markdown per-op trend sections — the trend JSON
+  already carries each op's first-to-last comparison since
+  0.55.0, but the Markdown per-op sections render no table,
+  so a reader of the chart sees the per-op numbers only in
+  JSON; render the same shared rows under each per-op section
+  with the same helper the trend and compare views use.
 - `--compare-file-json PATH`: with `--compare-file`, also
   write the comparison as a standalone JSON file — the exact
   dict `compare_results` returns (the same one the run's JSON
