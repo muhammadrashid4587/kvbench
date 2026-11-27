@@ -345,7 +345,13 @@ python -m kvbench.cli --ops 20000 --clients 4 --repeat 3
 # step does not set the numbers — the per-run values and the
 # spread land under each step's repeat key in JSON, and the
 # Markdown report shows a per-step repeat block under each sweep
-# table
+# table — plus each step's own fastest-vs-slowest repeat-run
+# histogram comparison (overall p50/p99 and p99 change, and a
+# per-op table with p50, p99, p99 change and bucket drift) under
+# each step's repeat.histogram_comparison in JSON and in the
+# per-step repeat block in Markdown, so a noisy step shows which
+# op's latency shape moved; a step whose runs are not comparable
+# renders a note naming the reason instead
 python -m kvbench.cli --ops 20000 --clients 4 --repeat 3 \
     --sweep-keyspace 100,1000,10000
 
@@ -1222,11 +1228,20 @@ ratios under `sweep_mix`.
 With `--repeat N` and any sweep, each sweep step runs N times and
 its table row shows the median ops/sec and p99 over the runs, with
 a per-step repeat block below the table listing each run's ops/sec
-and p99 and the spread of each as a percentage of its median; the
-JSON report carries the same per-run values and spread under each
-step's `repeat` key (`runs` and `spread`, the same shapes as the
-main run's `repeat`). A sweep with `--repeat 1` keeps the old
-shape exactly — no `repeat` key on any step.
+and p99 and the spread of each as a percentage of its median, plus
+the step's fastest-vs-slowest repeat-run histogram comparison —
+the step's fastest and slowest runs by ops/sec, their overall
+p50/p99 and the p99 change between them, and a per-op table with
+each op's p50 and p99 in both runs, the p99 change and the bucket
+drift, built from the same shared rows the single-run repeat
+comparison uses, so a noisy step shows which op's latency shape
+moved; a step whose runs are not comparable renders a note naming
+the reason instead of a table. The JSON report carries the same
+per-run values and spread under each step's `repeat` key (`runs`
+and `spread`, the same shapes as the main run's `repeat`), plus
+the comparison under each step's `repeat.histogram_comparison`.
+A sweep with `--repeat 1` keeps the old shape exactly — no
+`repeat` key on any step.
 
 With `--repeat N` the report has a Repeat runs section: one table
 per backend with a row per run — ops, ops/sec, mean and p99 — so
@@ -1434,7 +1449,12 @@ make test
   Next: the same fastest-vs-slowest comparison in each
   sweep-step repeat block — a step that ran `--repeat` more
   than once compares its own fastest and slowest runs the same
-  way, from the same shared rows.
+  way, from the same shared rows. Done in 0.67.0.
+  Next: the fastest and slowest runs' per-op histogram blocks
+  next to each sweep-step repeat comparison table — the two
+  runs' latency shapes drawn with the same shared helper as
+  the step's own per-op blocks, so the shape move reads as
+  bars as well as numbers.
 - `--compare-file-json PATH`: with `--compare-file`, also
   write the comparison as a standalone JSON file — the exact
   dict `compare_results` returns (the same one the run's JSON

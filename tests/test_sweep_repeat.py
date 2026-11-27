@@ -23,7 +23,10 @@ from kvbench.bench import (DictClient, Workload, run_client_sweep,
                            run_pipeline_sweep,
                            run_value_size_sweep, run_workload)
 from kvbench.cli import main
-from kvbench.report import render_json, render_markdown
+from kvbench.report import (_fastest_slowest_histogram_comparison,
+                            _histogram_comparison_rows_from,
+                            _histograms_or_none, render_json,
+                            render_markdown)
 
 try:
     from test_cli import _start_server
@@ -309,6 +312,200 @@ class TestRepeatedSweepRendering(unittest.TestCase):
         text = render_markdown([result], workload, "kvbench")
         self.assertIn("Keyspace sweep", text)
         self.assertNotIn("keys — repeat runs", text)
+        parsed = json.loads(render_json([result], workload, "kvbench"))
+        for entry in parsed["results"][0]["keyspace_sweep"]:
+            self.assertNotIn("repeat", entry)
+
+
+class TestSweepStepFastestSlowestComparison(unittest.TestCase):
+    def _steps_with_distinct_speeds(self):
+        # A repeated keyspace sweep with forced, distinct ops/sec
+        # per run, so the fastest/slowest picks are deterministic:
+        # run 2 is fastest, run 1 slowest, in every step. The
+        # per-op figures and histograms stay the runs' own, so
+        # the rows stay real.
+        workload = Workload(ops=200, clients=2, keys=10)
+        sweep = run_keyspace_sweep(DictClient, workload, [5, 20],
+                                   repeat=3)
+        for entry in sweep:
+            for run, ops_per_sec in zip(
+                    entry["repeat"]["runs"], (10000.0, 20000.0, 15000.0)):
+                run["ops_per_sec"] = ops_per_sec
+        return sweep
+
+    def test_comparison_picks_fastest_and_slowest_by_ops_sec(self):
+        sweep = self._steps_with_distinct_speeds()
+        for entry in sweep:
+            comparison = _fastest_slowest_histogram_comparison(
+                entry["repeat"]["runs"])
+            self.assertEqual(comparison["from"], "slowest")
+            self.assertEqual(comparison["to"], "fastest")
+            self.assertEqual(comparison["fastest_run"], 2)
+            self.assertEqual(comparison["slowest_run"], 1)
+            self.assertEqual(comparison["notes"], [])
+            runs = {run["run"]: run
+                    for run in entry["repeat"]["runs"]}
+            overall = comparison["overall"]
+            self.assertEqual(overall["p50_slowest_ms"],
+                             runs[1]["p50_ms"])
+            self.assertEqual(overall["p50_fastest_ms"],
+                             runs[2]["p50_ms"])
+            self.assertEqual(overall["p99_slowest_ms"],
+                             runs[1]["p99_ms"])
+            self.assertEqual(overall["p99_fastest_ms"],
+                             runs[2]["p99_ms"])
+            rows = {row["op"]: row for row in comparison["rows"]}
+            self.assertEqual(set(rows), set(runs[1]["per_op"]))
+            for op, row in rows.items():
+                self.assertEqual(row["p50_from_ms"],
+                                 runs[1]["per_op"][op]["p50_ms"])
+                self.assertEqual(row["p50_to_ms"],
+                                 runs[2]["per_op"][op]["p50_ms"])
+                self.assertEqual(row["p99_from_ms"],
+                                 runs[1]["per_op"][op]["p99_ms"])
+                self.assertEqual(row["p99_to_ms"],
+                                 runs[2]["per_op"][op]["p99_ms"])
+                self.assertIsNotNone(row["bucket_drift_pp"])
+                self.assertIsNotNone(row["bucket_drift_bucket"])
+
+    def test_comparison_rows_agree_with_shared_rows(self):
+        sweep = self._steps_with_distinct_speeds()
+        for entry in sweep:
+            comparison = _fastest_slowest_histogram_comparison(
+                entry["repeat"]["runs"])
+            runs = {run["run"]: run
+                    for run in entry["repeat"]["runs"]}
+            expected = _histogram_comparison_rows_from(
+                _histograms_or_none(runs[1]["histograms_by_op"]),
+                _histograms_or_none(runs[2]["histograms_by_op"]),
+                runs[1]["per_op"], runs[2]["per_op"])
+            self.assertEqual(comparison["rows"], expected)
+
+    def test_comparison_in_markdown_and_json(self):
+        workload = Workload(ops=200, clients=2, repeat=3)
+        result = run_workload(DictClient, workload, "baseline (dict)")
+        result.sweep = self._steps_with_distinct_speeds()
+        text = render_markdown([result], workload, "kvbench")
+        # One comparison block per step, under that step's repeat
+        # block, with the fastest/slowest sentence and the table.
+        for label in ("5 keys", "20 keys"):
+            self.assertIn(
+                f"##### {label} — fastest vs slowest repeat run",
+                text)
+            self.assertIn(
+                f"##### {label} — fastest vs slowest repeat run "
+                "histogram comparison", text)
+        self.assertIn("Fastest run 2 vs slowest run 1", text)
+        self.assertIn("p99 slowest (ms)", text)
+        self.assertIn("p99 fastest (ms)", text)
+        parsed = json.loads(render_json([result], workload, "kvbench"))
+        for entry, step in zip(parsed["results"][0]["keyspace_sweep"],
+                               result.sweep):
+            comparison = entry["repeat"]["histogram_comparison"]
+            self.assertEqual(comparison["from"], "slowest")
+            self.assertEqual(comparison["to"], "fastest")
+            self.assertEqual(comparison["fastest_run"], 2)
+            self.assertEqual(comparison["slowest_run"], 1)
+            self.assertEqual(comparison["notes"], [])
+            self.assertTrue(comparison["rows"])
+            self.assertIn("overall", comparison)
+            # The JSON comparison is the same dict the Markdown
+            # block renders, from the same shared helper.
+            self.assertEqual(
+                comparison,
+                _fastest_slowest_histogram_comparison(
+                    step["repeat"]["runs"]))
+
+    def test_comparison_covers_all_sweep_types(self):
+        # Every sweep type's per-step repeat block carries the
+        # comparison — they all render through the same helper.
+        workload = Workload(ops=200, clients=2, repeat=3)
+        result = run_workload(DictClient, workload, "baseline (dict)")
+        result.sweep = run_keyspace_sweep(DictClient, workload, [5],
+                                          repeat=3)
+        result.client_sweep = run_client_sweep(DictClient, workload,
+                                               [1], repeat=3)
+        result.value_sweep = run_value_size_sweep(
+            DictClient, workload, [8], repeat=3)
+        result.pipeline_sweep = run_pipeline_sweep(
+            DictClient, workload, [1], repeat=3)
+        result.mix_sweep = run_mix_sweep(
+            DictClient, workload, [(100, 0)], repeat=3)
+        for entries in (result.sweep, result.client_sweep,
+                        result.value_sweep, result.pipeline_sweep,
+                        result.mix_sweep):
+            for entry in entries:
+                for run, ops_per_sec in zip(
+                        entry["repeat"]["runs"],
+                        (10000.0, 20000.0, 15000.0)):
+                    run["ops_per_sec"] = ops_per_sec
+        text = render_markdown([result], workload, "kvbench")
+        for heading in ("5 keys — fastest vs slowest repeat run",
+                        "1 clients — fastest vs slowest repeat run",
+                        "8 byte values — fastest vs slowest repeat run",
+                        "1 commands — fastest vs slowest repeat run",
+                        "mix 100:0 — fastest vs slowest repeat run"):
+            self.assertIn(f"##### {heading}", text)
+        parsed = json.loads(render_json([result], workload, "kvbench"))
+        doc = parsed["results"][0]
+        for key in ("keyspace_sweep", "client_sweep",
+                    "value_size_sweep", "pipeline_sweep",
+                    "mix_sweep"):
+            for entry in doc[key]:
+                comparison = entry["repeat"]["histogram_comparison"]
+                self.assertEqual(comparison["fastest_run"], 2)
+                self.assertEqual(comparison["slowest_run"], 1)
+                self.assertEqual(comparison["notes"], [])
+
+    def test_identical_runs_render_a_note(self):
+        sweep = self._steps_with_distinct_speeds()
+        entry = sweep[0]
+        for run in entry["repeat"]["runs"]:
+            run["ops_per_sec"] = 10000.0
+        comparison = _fastest_slowest_histogram_comparison(
+            entry["repeat"]["runs"])
+        self.assertIsNone(comparison["rows"])
+        self.assertEqual(
+            comparison["notes"],
+            ["The fastest and slowest repeat runs are the same run, "
+             "so there is no fastest-vs-slowest histogram "
+             "comparison."])
+        workload = Workload(ops=200, clients=2, repeat=3)
+        result = run_workload(DictClient, workload, "baseline (dict)")
+        result.sweep = sweep
+        text = render_markdown([result], workload, "kvbench")
+        self.assertIn("The fastest and slowest repeat runs are the "
+                      "same run, so there is no fastest-vs-slowest "
+                      "histogram comparison.", text)
+        parsed = json.loads(render_json([result], workload, "kvbench"))
+        self.assertEqual(
+            parsed["results"][0]["keyspace_sweep"][0]["repeat"]
+            ["histogram_comparison"],
+            comparison)
+
+    def test_missing_histograms_render_a_note(self):
+        sweep = self._steps_with_distinct_speeds()
+        entry = sweep[0]
+        # The fastest run (run 2) loses its histograms: the note
+        # names the run.
+        del entry["repeat"]["runs"][1]["histograms_by_op"]
+        comparison = _fastest_slowest_histogram_comparison(
+            entry["repeat"]["runs"])
+        self.assertIsNone(comparison["rows"])
+        self.assertEqual(
+            comparison["notes"],
+            ["Repeat run 2 (the fastest run) carries no per-op "
+             "histograms, so there is no fastest-vs-slowest "
+             "histogram comparison."])
+
+    def test_single_repeat_step_has_no_comparison(self):
+        workload = Workload(ops=200, clients=2, keys=10)
+        result = run_workload(DictClient, workload, "baseline (dict)")
+        result.sweep = run_keyspace_sweep(DictClient, workload, [5],
+                                          repeat=1)
+        text = render_markdown([result], workload, "kvbench")
+        self.assertIn("Keyspace sweep", text)
+        self.assertNotIn("fastest vs slowest repeat run", text)
         parsed = json.loads(render_json([result], workload, "kvbench"))
         for entry in parsed["results"][0]["keyspace_sweep"]:
             self.assertNotIn("repeat", entry)
