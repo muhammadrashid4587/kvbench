@@ -50,7 +50,11 @@ Since 0.50.0 the best/worst view shows the same per-step
 treatment — each sweep step's best and worst runs by the step's
 own ops/sec, with the step's per-op latency histograms from
 both runs — so a step's spread reads the same way in both
-views.
+views. Since 0.51.0 the ``--best-worst-json`` output carries
+the same per-step sections under each backend's ``sweeps`` —
+the step's best and worst runs, the deltas, and the step's
+per-op histograms from both runs — so a script reading the
+JSON sees what the Markdown table shows.
 """
 
 import json
@@ -444,6 +448,42 @@ def _sweep_step_entry(entry, kind, step_key, step_value):
     return None
 
 
+def _sweep_step_histograms(step):
+    """A sweep step's cleaned per-op histograms, or the reason there are none.
+
+    Returns (histograms, reason): ``histograms`` is the cleaned
+    per-op mapping when the step carries valid bucket lists,
+    else None; ``reason`` is None then, or one of
+    ``"before-0.49"``, ``"no-latencies"``, ``"malformed"`` naming
+    why the step carries no drawable histograms — a step
+    recorded before 0.49.0 carries no ``histograms_by_op`` key
+    at all, a step recorded with no per-op latencies carries an
+    empty mapping, and a hand-made history file may carry
+    something else entirely. Both the Markdown and JSON views
+    build their notes from this one helper, so the two views
+    cannot disagree about why a step has no histograms.
+    """
+    histograms = step.get("histograms_by_op")
+    if histograms is None:
+        return None, "before-0.49"
+    cleaned = _histograms_or_none(histograms)
+    if cleaned is not None:
+        return cleaned, None
+    if not histograms:
+        return None, "no-latencies"
+    return None, "malformed"
+
+
+_SWEEP_STEP_HISTOGRAM_REASONS = {
+    "before-0.49": "this step was recorded before 0.49.0, so it "
+                   "carries no per-op histograms.",
+    "no-latencies": "this step recorded no per-op latencies, so "
+                    "there are no histograms to show.",
+    "malformed": "the recorded per-op histograms for this step "
+                 "are malformed, so no histograms are shown.",
+}
+
+
 def _sweep_step_histogram_block(label, step_label, entry, step, pick):
     """Per-op latency histogram block for one sweep step of one run, or a note.
 
@@ -466,26 +506,14 @@ def _sweep_step_histogram_block(label, step_label, entry, step, pick):
     heading = (f"#### {label} — {step_label} — per-op latency "
                f"histogram — {pick} run ({timestamp})")
     context = f"{label} — {step_label} ({pick} run, {timestamp})"
-    histograms = step.get("histograms_by_op")
-    if histograms is None:
-        return [
-            f"- {context}: this step was recorded before 0.49.0, "
-            "so it carries no per-op histograms.",
-        ]
-    cleaned = _histograms_or_none(histograms)
+    cleaned, reason = _sweep_step_histograms(step)
     if cleaned is not None:
         block = _per_op_histogram_block(heading, cleaned)
         while block and block[-1] == "":
             block.pop()
         return block
-    if not histograms:
-        return [
-            f"- {context}: this step recorded no per-op "
-            "latencies, so there are no histograms to show.",
-        ]
     return [
-        f"- {context}: the recorded per-op histograms for this "
-        "step are malformed, so no histograms are shown.",
+        f"- {context}: {_SWEEP_STEP_HISTOGRAM_REASONS[reason]}",
     ]
 
 
@@ -1172,30 +1200,23 @@ def _best_worst_histogram_comparison(usable, best, worst):
     }
 
 
-def _best_worst_sweep_lines(runs):
-    """Per-sweep-step best-vs-worst sections for one backend.
+def _best_worst_sweep_pairs(runs):
+    """Per-sweep-step best-vs-worst picks for one backend, as data.
 
     ``runs`` are the backend's recorded runs (oldest first).
-    Each sweep step that ran — one keyspace size, one client
-    count, one value size, one pipeline depth, one read:write
-    ratio — gets its own best-vs-worst table: the best and worst
-    runs for that step by the step's own ops/sec, with the p99
-    for each and the percentage change between them — the same
-    table shape as the overall and per-op best/worst tables,
-    built from the same ``_best_worst_lines`` helper, so the
-    views cannot disagree — followed by the step's per-op
-    latency histograms from its best and worst runs, drawn with
-    the same shared helper the trend's per-step blocks use, so
-    a p99 move in a step names the op whose latency shape
-    moved. A step recorded in only one run has that run as both
-    best and worst, with 0.0% deltas; a step recorded before
-    0.49.0, one recorded with no per-op latencies, or one whose
-    recorded histograms are malformed renders a note naming the
-    reason instead of a block. A step that never ran gets no
-    section at all, and a step whose recorded ops/sec is not a
-    number is skipped instead of crashing the comparison.
+    Yields one tuple per sweep step that ran — one keyspace size,
+    one client count, one value size, one pipeline depth, one
+    read:write ratio — with the step's kind, step key, label and
+    unit, its raw value and the step label the report renders,
+    the best and worst runs for that step by the step's own
+    ops/sec with the percentage changes between them, and the
+    history entries those picks came from. The Markdown and JSON
+    views both build from these picks, so the two views cannot
+    disagree. A step recorded in only one run has that run as
+    both best and worst, with 0.0% deltas; a step that never ran
+    gets no entry at all, and a step whose recorded ops/sec is
+    not a number is skipped instead of crashing the comparison.
     """
-    lines = []
     for kind, step_key, label, unit in _SWEEP_KINDS:
         steps = sorted({
             step.get(step_key)
@@ -1230,30 +1251,121 @@ def _best_worst_sweep_lines(runs):
             if pair is None:
                 continue
             best, worst, ops_delta, p99_delta = pair
-            lines.extend(_best_worst_lines(
-                f"{label} — {step_label}", best, worst,
-                ops_delta, p99_delta))
             best_entry = next(entry for entry, numbers in pairs
                               if numbers is best)
             worst_entry = next(entry for entry, numbers in pairs
                                if numbers is worst)
-            # The step's per-op latency histograms from its best
-            # and worst runs — the same shared helper the
-            # trend's per-step blocks use, so a p99 move in the
-            # step names the op whose latency shape moved.
-            lines.extend(_sweep_step_histogram_block(
-                label, step_label, best_entry,
-                _sweep_step_entry(best_entry, kind, step_key,
-                                  step_value),
-                "best"))
-            lines.append("")
-            lines.extend(_sweep_step_histogram_block(
-                label, step_label, worst_entry,
-                _sweep_step_entry(worst_entry, kind, step_key,
-                                  step_value),
-                "worst"))
-            lines.append("")
+            yield (kind, step_key, label, unit, step_value,
+                   step_label, best, worst, ops_delta, p99_delta,
+                   best_entry, worst_entry)
+
+
+def _best_worst_sweep_lines(runs):
+    """Per-sweep-step best-vs-worst sections for one backend.
+
+    ``runs`` are the backend's recorded runs (oldest first).
+    Each sweep step that ran — one keyspace size, one client
+    count, one value size, one pipeline depth, one read:write
+    ratio — gets its own best-vs-worst table: the best and worst
+    runs for that step by the step's own ops/sec, with the p99
+    for each and the percentage change between them — the same
+    table shape as the overall and per-op best/worst tables,
+    built from the same ``_best_worst_lines`` helper, so the
+    views cannot disagree — followed by the step's per-op
+    latency histograms from its best and worst runs, drawn with
+    the same shared helper the trend's per-step blocks use, so
+    a p99 move in a step names the op whose latency shape
+    moved. The picks come from the shared
+    ``_best_worst_sweep_pairs`` helper the JSON view uses too.
+    A step recorded in only one run has that run as both
+    best and worst, with 0.0% deltas; a step recorded before
+    0.49.0, one recorded with no per-op latencies, or one whose
+    recorded histograms are malformed renders a note naming the
+    reason instead of a block. A step that never ran gets no
+    section at all, and a step whose recorded ops/sec is not a
+    number is skipped instead of crashing the comparison.
+    """
+    lines = []
+    for (kind, step_key, label, unit, step_value, step_label,
+         best, worst, ops_delta, p99_delta,
+         best_entry, worst_entry) in _best_worst_sweep_pairs(runs):
+        lines.extend(_best_worst_lines(
+            f"{label} — {step_label}", best, worst,
+            ops_delta, p99_delta))
+        # The step's per-op latency histograms from its best
+        # and worst runs — the same shared helper the
+        # trend's per-step blocks use, so a p99 move in the
+        # step names the op whose latency shape moved.
+        lines.extend(_sweep_step_histogram_block(
+            label, step_label, best_entry,
+            _sweep_step_entry(best_entry, kind, step_key,
+                              step_value),
+            "best"))
+        lines.append("")
+        lines.extend(_sweep_step_histogram_block(
+            label, step_label, worst_entry,
+            _sweep_step_entry(worst_entry, kind, step_key,
+                              step_value),
+            "worst"))
+        lines.append("")
     return lines
+
+
+def _best_worst_sweep_entries(runs):
+    """Per-sweep-step best-vs-worst sections for one backend, as data.
+
+    ``runs`` are the backend's recorded runs (oldest first).
+    One entry per sweep step that ran — one keyspace size, one
+    client count, one value size, one pipeline depth, one
+    read:write ratio — with the step's kind, label and raw value,
+    the step label the Markdown view renders, the best and worst
+    runs for that step by the step's own ops/sec with the
+    percentage changes between them, and the step's per-op
+    latency histograms from both runs under ``histograms_by_op``
+    on the best and worst numbers. A pick whose step carries no
+    drawable histograms contributes a note under ``notes``
+    naming the reason instead — recorded before 0.49.0, no
+    per-op latencies, or malformed histograms — the same reasons
+    the Markdown view renders, built from the same shared
+    helper, so a script reading the JSON sees what the table
+    shows. The picks come from the shared
+    ``_best_worst_sweep_pairs`` helper the Markdown view uses
+    too, so the two views cannot disagree.
+    """
+    entries = []
+    for (kind, step_key, label, unit, step_value, step_label,
+         best, worst, ops_delta, p99_delta,
+         best_entry, worst_entry) in _best_worst_sweep_pairs(runs):
+        best_numbers = dict(best)
+        worst_numbers = dict(worst)
+        notes = []
+        for pick, numbers, entry in (
+                ("best", best_numbers, best_entry),
+                ("worst", worst_numbers, worst_entry)):
+            step = _sweep_step_entry(entry, kind, step_key,
+                                     step_value)
+            cleaned, reason = _sweep_step_histograms(step)
+            if cleaned is not None:
+                numbers["histograms_by_op"] = cleaned
+            else:
+                timestamp = entry.get("timestamp", "")[:19].replace(
+                    "T", " ")
+                notes.append(
+                    f"{label} — {step_label} ({pick} run, "
+                    f"{timestamp}): "
+                    f"{_SWEEP_STEP_HISTOGRAM_REASONS[reason]}")
+        entries.append({
+            "kind": kind,
+            "label": label,
+            "step": step_value,
+            "step_label": step_label,
+            "best": best_numbers,
+            "worst": worst_numbers,
+            "ops_sec_delta_pct": ops_delta,
+            "p99_delta_pct": p99_delta,
+            "notes": notes,
+        })
+    return entries
 
 
 def best_worst_comparison(entries, workload=None):
@@ -1281,7 +1393,14 @@ def best_worst_comparison(entries, workload=None):
     ``rows`` with ``"from": "worst"`` and ``"to": "best"``, or
     under ``notes`` naming why there is none (a single run, a
     run recorded before 0.43.0, a run with no per-op latencies,
-    or malformed histograms). When ``workload`` is given (a
+    or malformed histograms). Each backend also carries a
+    ``sweeps`` list — one entry per sweep step that ran, with
+    the step's best and worst runs by the step's own ops/sec,
+    the percentage changes between them, and the step's per-op
+    latency histograms from both runs (or notes naming why a
+    pick has none) — the same sections the Markdown view
+    renders, built from the same shared picks, so the JSON and
+    Markdown views cannot disagree. When ``workload`` is given (a
     workload dict in the shape of a history record's
     ``workload``), only runs whose workload matches it are
     considered — the same apples-to-apples rule
@@ -1354,6 +1473,7 @@ def best_worst_comparison(entries, workload=None):
             "per_op": per_op,
             "histogram_comparison": _best_worst_histogram_comparison(
                 usable, best, worst),
+            "sweeps": _best_worst_sweep_entries(runs),
         })
     return {
         "workload": workload,
@@ -1556,7 +1676,11 @@ def write_best_worst_json(path, entries, workload=None):
     Creates the parent directory when needed. Returns the
     comparison dict — the same shape ``best_worst_comparison``
     returns — so a script can read the spread without parsing
-    the Markdown table.
+    the Markdown table. Each backend carries its per-step sweep
+    sections under ``sweeps`` — one entry per step that ran,
+    with the step's best and worst runs, the deltas, and the
+    step's per-op histograms from both runs — the same sections
+    the Markdown view renders.
     """
     comparison = best_worst_comparison(entries, workload=workload)
     directory = os.path.dirname(os.path.abspath(path))

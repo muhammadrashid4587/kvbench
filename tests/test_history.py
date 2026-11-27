@@ -1988,6 +1988,227 @@ class TestBestWorstSweepSteps(unittest.TestCase):
         text = format_best_worst(entries)
         self.assertNotIn("sweep —", text)
 
+    def test_json_carries_step_table_and_histograms(self):
+        # The core of the JSON side: each backend's "sweeps"
+        # carries one entry per step that ran, with the step's
+        # best and worst runs by the step's own ops/sec, the
+        # deltas, and the step's per-op histograms from both
+        # runs — the best run's shape (SET 300) on best, the
+        # worst run's (SET 500) on worst — the same sections the
+        # Markdown view renders, with the same step labels.
+        entries = [
+            self._step_record(40000.0, set_count=500),
+            self._step_record(60000.0, set_count=300),
+        ]
+        sweeps = best_worst_comparison(entries)["backends"][0][
+            "sweeps"]
+        self.assertEqual(len(sweeps), 1)
+        step = sweeps[0]
+        self.assertEqual(step["kind"], "keyspace")
+        self.assertEqual(step["label"], "Keyspace sweep")
+        self.assertEqual(step["step"], 100)
+        self.assertEqual(step["step_label"], "100 keys")
+        self.assertEqual(step["best"]["ops_per_sec"], 60000.0)
+        self.assertEqual(step["worst"]["ops_per_sec"], 40000.0)
+        self.assertAlmostEqual(step["ops_sec_delta_pct"], 50.0)
+        self.assertAlmostEqual(step["p99_delta_pct"], 0.0)
+        self.assertEqual(step["notes"], [])
+        self.assertEqual(step["best"]["histograms_by_op"]["SET"],
+                         [{"upper_ms": 0.1, "count": 300}])
+        self.assertEqual(step["worst"]["histograms_by_op"]["SET"],
+                         [{"upper_ms": 0.1, "count": 500}])
+        self.assertEqual(step["best"]["histograms_by_op"]["GET"],
+                         [{"upper_ms": 0.1, "count": 400}])
+        # The JSON step label is the Markdown heading's label,
+        # so the two views cannot disagree about a step.
+        self.assertIn("#### Keyspace sweep — 100 keys",
+                      format_best_worst(entries))
+
+    def test_json_step_pick_is_per_step_not_per_run(self):
+        # The step's best run is picked by the step's own
+        # ops/sec: here the run that won overall lost this step,
+        # so the JSON best pick carries the other run's shape.
+        entries = [
+            self._step_record(40000.0, set_count=500, p99_ms=0.020),
+            self._step_record(60000.0, set_count=300, p99_ms=0.020),
+        ]
+        entries[0]["sweeps"]["keyspace"][0]["ops_per_sec"] = 70000.0
+        entries[1]["sweeps"]["keyspace"][0]["ops_per_sec"] = 50000.0
+        step = best_worst_comparison(entries)["backends"][0][
+            "sweeps"][0]
+        self.assertEqual(step["best"]["ops_per_sec"], 70000.0)
+        self.assertEqual(step["worst"]["ops_per_sec"], 50000.0)
+        self.assertAlmostEqual(step["ops_sec_delta_pct"], 40.0)
+        self.assertEqual(step["best"]["histograms_by_op"]["SET"],
+                         [{"upper_ms": 0.1, "count": 500}])
+
+    def test_json_all_five_sweep_kinds(self):
+        entries = [
+            self._step_record(40000.0, keys=100, clients=4,
+                              value_size=128, pipeline=5,
+                              mix="90:10"),
+            self._step_record(50000.0, keys=100, clients=4,
+                              value_size=128, pipeline=5,
+                              mix="90:10"),
+        ]
+        sweeps = best_worst_comparison(entries)["backends"][0][
+            "sweeps"]
+        by_kind = {s["kind"]: s for s in sweeps}
+        self.assertEqual(
+            sorted(by_kind),
+            ["clients", "keyspace", "mix", "pipeline",
+             "value_size"])
+        self.assertEqual(by_kind["keyspace"]["step"], 100)
+        self.assertEqual(by_kind["keyspace"]["step_label"],
+                         "100 keys")
+        self.assertEqual(by_kind["clients"]["step"], 4)
+        self.assertEqual(by_kind["clients"]["step_label"],
+                         "4 clients")
+        self.assertEqual(by_kind["value_size"]["step"], 128)
+        self.assertEqual(by_kind["value_size"]["step_label"],
+                         "128 byte values")
+        self.assertEqual(by_kind["pipeline"]["step"], 5)
+        self.assertEqual(by_kind["pipeline"]["step_label"],
+                         "5 commands")
+        self.assertEqual(by_kind["mix"]["step"], "90:10")
+        self.assertEqual(by_kind["mix"]["step_label"],
+                         "90:10 read:write")
+        for step in sweeps:
+            self.assertEqual(step["best"]["ops_per_sec"], 50000.0)
+            self.assertEqual(step["worst"]["ops_per_sec"], 40000.0)
+            self.assertEqual(step["notes"], [])
+
+    def test_json_single_run_step_has_no_spread(self):
+        # One run of a step is both its best and its worst, with
+        # 0.0% deltas — and both picks carry that run's shape.
+        entries = [self._step_record(50000.0, set_count=500)]
+        step = best_worst_comparison(entries)["backends"][0][
+            "sweeps"][0]
+        self.assertEqual(step["best"]["ops_per_sec"], 50000.0)
+        self.assertEqual(step["worst"]["ops_per_sec"], 50000.0)
+        self.assertAlmostEqual(step["ops_sec_delta_pct"], 0.0)
+        self.assertAlmostEqual(step["p99_delta_pct"], 0.0)
+        self.assertEqual(step["notes"], [])
+        self.assertEqual(step["best"]["histograms_by_op"]["SET"],
+                         [{"upper_ms": 0.1, "count": 500}])
+        self.assertEqual(step["worst"]["histograms_by_op"]["SET"],
+                         [{"upper_ms": 0.1, "count": 500}])
+
+    def test_json_step_recorded_before_0_49_has_note(self):
+        # A step with no histograms_by_op key was recorded before
+        # 0.49.0: each pick carries a note naming that instead of
+        # a histogram map — the same reason the Markdown view
+        # renders, for the best and the worst pick separately.
+        entries = [self._step_record(40000.0, histograms="missing"),
+                   self._step_record(50000.0, histograms="missing")]
+        step = best_worst_comparison(entries)["backends"][0][
+            "sweeps"][0]
+        self.assertNotIn("histograms_by_op", step["best"])
+        self.assertNotIn("histograms_by_op", step["worst"])
+        self.assertEqual(len(step["notes"]), 2)
+        self.assertIn(
+            "Keyspace sweep — 100 keys (best run",
+            step["notes"][0])
+        self.assertIn(
+            "this step was recorded before 0.49.0, so it carries "
+            "no per-op histograms.", step["notes"][0])
+        self.assertIn(
+            "Keyspace sweep — 100 keys (worst run",
+            step["notes"][1])
+
+    def test_json_step_with_no_per_op_latencies_has_note(self):
+        entries = [self._step_record(40000.0, histograms="empty"),
+                   self._step_record(50000.0, histograms="empty")]
+        step = best_worst_comparison(entries)["backends"][0][
+            "sweeps"][0]
+        self.assertNotIn("histograms_by_op", step["best"])
+        self.assertNotIn("histograms_by_op", step["worst"])
+        self.assertEqual(len(step["notes"]), 2)
+        self.assertIn(
+            "this step recorded no per-op latencies, so there are "
+            "no histograms to show.", step["notes"][0])
+
+    def test_json_step_malformed_histograms_has_note(self):
+        entries = [self._step_record(40000.0,
+                                     histograms="malformed"),
+                   self._step_record(50000.0,
+                                     histograms="malformed")]
+        step = best_worst_comparison(entries)["backends"][0][
+            "sweeps"][0]
+        self.assertNotIn("histograms_by_op", step["best"])
+        self.assertNotIn("histograms_by_op", step["worst"])
+        self.assertEqual(len(step["notes"]), 2)
+        self.assertIn(
+            "the recorded per-op histograms for this step are "
+            "malformed, so no histograms are shown.",
+            step["notes"][0])
+
+    def test_json_records_without_sweeps_have_empty_sweeps(self):
+        # History written before 0.37.0 has no "sweeps" key: the
+        # JSON carries an empty list, not a missing key.
+        workload = _make_workload()
+        entries = [
+            build_record(_make_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(_make_result(ops_per_sec=50000.0),
+                         workload, "kvbench"),
+        ]
+        for entry in entries:
+            self.assertNotIn("sweeps", entry)
+        backend = best_worst_comparison(entries)["backends"][0]
+        self.assertEqual(backend["sweeps"], [])
+
+    def test_json_step_with_non_numeric_ops_sec_is_skipped(self):
+        # A step whose recorded ops/sec is not a number cannot be
+        # ranked, so it gets no section instead of crashing the
+        # comparison — the same rule the Markdown view uses.
+        entries = [
+            self._step_record(40000.0),
+            self._step_record(50000.0),
+        ]
+        for entry in entries:
+            entry["sweeps"]["keyspace"][0]["ops_per_sec"] = "fast"
+        backend = best_worst_comparison(entries)["backends"][0]
+        self.assertEqual(backend["sweeps"], [])
+
+    def test_json_workload_filter_limits_sweep_sections(self):
+        # With --compare-same-workload only matching runs are
+        # compared: a step that ran only in a run with a
+        # different workload gets no JSON section.
+        other = Workload(ops=1000, clients=8, keys=1000,
+                         value_size=32, set_weight=50, get_weight=40,
+                         incr_weight=10, seed=1234, pipeline=1)
+        entries = [
+            self._step_record(40000.0, keys=100),
+            self._step_record(50000.0, keys=100),
+        ]
+        foreign = self._step_record(60000.0, keys=200)
+        foreign["workload"] = build_record(
+            _make_result(), other, "kvbench")["workload"]
+        entries.append(foreign)
+        backend = best_worst_comparison(
+            entries, workload=entries[0]["workload"])["backends"][0]
+        steps = [s["step"] for s in backend["sweeps"]]
+        self.assertEqual(steps, [100])
+
+    def test_json_file_round_trip_carries_sweeps(self):
+        entries = [
+            self._step_record(40000.0, set_count=500),
+            self._step_record(60000.0, set_count=300),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "best-worst.json")
+            comparison = write_best_worst_json(path, entries)
+            with open(path, encoding="utf-8") as f:
+                parsed = json.load(f)
+            self.assertEqual(parsed, comparison)
+            step = parsed["backends"][0]["sweeps"][0]
+            self.assertEqual(step["step_label"], "100 keys")
+            self.assertEqual(step["best"]["ops_per_sec"], 60000.0)
+            self.assertEqual(
+                step["best"]["histograms_by_op"]["SET"],
+                [{"upper_ms": 0.1, "count": 300}])
+
     def test_workload_filter_limits_sweep_sections(self):
         # With --compare-same-workload only matching runs are
         # compared: a step that ran only in a run with a

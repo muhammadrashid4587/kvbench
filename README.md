@@ -708,7 +708,12 @@ runs, `histogram` on each per-op pick — plus the per-op
 histogram comparison under `histogram_comparison`, with `rows`
 carrying each op's p50/p99 in the worst and best runs, the p99
 change and the bucket drift, or `notes` naming why there is
-none), so a
+none — plus one per-step sweep section per sweep step that ran
+under `sweeps`: the step's best and worst runs by the step's
+own ops/sec, the deltas, and the step's per-op histograms from
+both runs — `histograms_by_op` on the best and worst step
+picks — or `notes` naming why a pick has none, so a script
+reading the JSON sees what the Markdown table shows), so a
 script can read the spread without parsing the table. Both need
 `--best-worst` (exit 2 otherwise), like `--trend-out` needs
 `--trend`.
@@ -1146,6 +1151,17 @@ make test
 
 ## Roadmap
 
+- Per-sweep-step best-vs-worst sections in the `--best-worst-json`
+  output: each backend's `sweeps` list carries one entry per sweep
+  step that ran — the step's best and worst runs by the step's own
+  ops/sec, the percentage changes between them, and the step's
+  per-op latency histograms from both runs — built from the same
+  shared picks as the Markdown per-step sections, so the JSON and
+  Markdown views cannot disagree and a script reading the JSON
+  sees what the table shows. A step recorded before 0.49.0, one
+  recorded with no per-op latencies, or one whose recorded
+  histograms are malformed contributes a note naming the reason
+  instead of a histogram map. Done in 0.51.0.
 - Per-sweep-step best-vs-worst sections in the `--best-worst`
   output: each sweep step that ran gets its own best-vs-worst
   section below the per-op sections — the best and worst runs
