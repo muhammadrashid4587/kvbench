@@ -62,6 +62,13 @@ both the Markdown and JSON views, built from the same shared
 rows, so the views cannot disagree; a step record carries no
 per-op percentile fields, so the step's p50/p99 are read off
 its histogram buckets.
+Since 0.53.0 ``--trend-json`` writes the same trend as JSON —
+the runs table, sparkline and first-to-last change per backend,
+the per-op sections, the latest run's per-op histograms and the
+first-to-last histogram comparison — with the same per-sweep-step
+sections ``--best-worst-json`` carries, built from the same
+shared helper, so a script can read the trend without parsing
+the Markdown chart.
 """
 
 import json
@@ -682,6 +689,42 @@ def _sweep_trend_lines(runs, window):
     return lines
 
 
+def _latest_run_histograms(entry):
+    """A trend run's cleaned per-op histograms, or the reason there are none.
+
+    Returns (histograms, reason): ``histograms`` is the cleaned
+    per-op mapping when the run carries valid bucket lists,
+    else None; ``reason`` is None then, or one of
+    ``"before-0.43"``, ``"no-latencies"``, ``"malformed"`` naming
+    why the run carries no drawable histograms — a run recorded
+    before 0.43.0 carries no ``histograms_by_op`` key at all, a
+    run recorded with no per-op latencies carries an empty
+    mapping, and a hand-made history file may carry something
+    else entirely. Both the Markdown and JSON views build their
+    notes from this one helper, so the two views cannot disagree
+    about why a run has no histograms.
+    """
+    histograms = entry.get("histograms_by_op")
+    if histograms is None:
+        return None, "before-0.43"
+    cleaned = _histograms_or_none(histograms)
+    if cleaned is not None:
+        return cleaned, None
+    if not histograms:
+        return None, "no-latencies"
+    return None, "malformed"
+
+
+_TREND_HISTOGRAM_REASONS = {
+    "before-0.43": "recorded before 0.43.0, so this run carries "
+                   "no per-op histograms.",
+    "no-latencies": "this run recorded no per-op latencies, so "
+                    "there are no histograms to show.",
+    "malformed": "the recorded per-op histograms are malformed, "
+                 "so no histograms are shown.",
+}
+
+
 def _trend_histogram_lines(entry):
     """Per-op latency histogram block for one trend run, or a note.
 
@@ -698,28 +741,14 @@ def _trend_histogram_lines(entry):
     trend never crashes on a record shape it cannot draw.
     """
     timestamp = entry.get("timestamp", "")[:19].replace("T", " ")
-    histograms = entry.get("histograms_by_op")
-    if histograms is None:
-        return [
-            f"- {timestamp}: recorded before 0.43.0, so this run "
-            "carries no per-op histograms.",
-            "",
-        ]
-    cleaned = _histograms_or_none(histograms)
+    cleaned, reason = _latest_run_histograms(entry)
     if cleaned is not None:
         return _per_op_histogram_block(
             "#### Per-op latency histogram — latest run "
             f"({timestamp})",
             cleaned)
-    if not histograms:
-        return [
-            f"- {timestamp}: this run recorded no per-op "
-            "latencies, so there are no histograms to show.",
-            "",
-        ]
     return [
-        f"- {timestamp}: the recorded per-op histograms are "
-        "malformed, so no histograms are shown.",
+        f"- {timestamp}: {_TREND_HISTOGRAM_REASONS[reason]}",
         "",
     ]
 
@@ -948,6 +977,46 @@ def _histogram_comparison_table_lines(heading, from_label, to_label,
     return lines
 
 
+def _trend_histogram_comparison(first, last):
+    """The first-to-last per-op histogram comparison for one backend, as data.
+
+    Returns a JSON-serializable dict with ``"from": "first"`` and
+    ``"to": "last"``: ``rows`` is the shared
+    :func:`_histogram_comparison_rows` table — each op's p50/p99
+    in the first and last runs, the p99 change, and the bucket
+    drift — with ``notes`` empty, or ``rows`` is None and
+    ``notes`` names why there is no comparison: the first and
+    last runs are the same run (a single run in the window), or
+    one of them was recorded before 0.43.0, recorded no per-op
+    latencies, or carries malformed histograms. The Markdown
+    view renders the same comparison from this one helper, so
+    the two views cannot disagree.
+    """
+    if first is last:
+        return {
+            "from": "first",
+            "to": "last",
+            "rows": None,
+            "notes": ["Only one run in the trend window, so there "
+                      "is no first-to-last histogram comparison."],
+        }
+    notes = _histogram_comparison_notes(
+        first, last, "first", "last", "first-to-last")
+    if notes:
+        return {
+            "from": "first",
+            "to": "last",
+            "rows": None,
+            "notes": notes,
+        }
+    return {
+        "from": "first",
+        "to": "last",
+        "rows": _histogram_comparison_rows(first, last),
+        "notes": [],
+    }
+
+
 def _trend_histogram_comparison_lines(first, last):
     """Per-op histogram comparison between the trend's first and last runs.
 
@@ -971,23 +1040,18 @@ def _trend_histogram_comparison_lines(first, last):
     :func:`_histogram_comparison_rows` /
     :func:`_histogram_comparison_table_lines` helpers, so the
     best-vs-worst view renders the same table from the same
-    rows and the views cannot disagree.
+    rows and the views cannot disagree — and the JSON view
+    carries the same comparison from
+    :func:`_trend_histogram_comparison`, so a script reading it
+    sees what the table shows.
     """
     first_ts = first.get("timestamp", "")[:19].replace("T", " ")
-    if first is last:
-        return [
-            "- Only one run in the trend window, so there is no "
-            "first-to-last histogram comparison.",
-            "",
-        ]
-    notes = _histogram_comparison_notes(
-        first, last, "first", "last", "first-to-last")
-    if notes:
-        return [f"- {note}" for note in notes] + [""]
-    rows = _histogram_comparison_rows(first, last)
+    comparison = _trend_histogram_comparison(first, last)
+    if comparison["rows"] is None:
+        return [f"- {note}" for note in comparison["notes"]] + [""]
     lines = _histogram_comparison_table_lines(
         "#### Per-op histogram comparison — first vs last run",
-        "first", "last", rows)
+        "first", "last", comparison["rows"])
     # The first run's shapes, next to the latest run's block just
     # above — the same shared helper draws both, so the views
     # cannot disagree.
@@ -1118,6 +1182,185 @@ def write_trend(path, entries, limit=20):
         if not text.endswith("\n"):
             f.write("\n")
     return text
+
+
+def _trend_first_to_last(values):
+    """First-to-last change over ``values`` (oldest first), or None.
+
+    ``values`` are the recorded numbers in window order; fewer
+    than two means there is no change to report. Returns the
+    first and last values and the percentage change between
+    them — the same numbers the Markdown first-to-last lines
+    render, so the JSON and Markdown views cannot disagree.
+    """
+    if len(values) < 2:
+        return None
+    first, last = values[0], values[-1]
+    return {
+        "first": first,
+        "last": last,
+        "delta_pct": (last - first) / first * 100 if first else 0.0,
+    }
+
+
+def _trend_table_rows(runs, window, pick):
+    """One trend table as JSON data, in window order (oldest first).
+
+    ``pick(entry)`` returns the numbers source for a run — the
+    run itself for the overall table, its per-op entry for a
+    per-op table — or None when the run did not measure it.
+    Each row carries the timestamp, ops/sec, the numeric change
+    versus the previous run that measured the same thing
+    (scanning all runs, so a run outside the window still
+    counts — the same rule the Markdown tables use), and p99.
+    A run whose ops/sec or p99 is not a number still gets a
+    row, with None in its place — the Markdown table shows "-"
+    for it.
+    """
+    previous_by_id = {}
+    previous = None
+    for entry in runs:
+        source = pick(entry)
+        if source is None:
+            previous_by_id[id(entry)] = None
+            continue
+        previous_by_id[id(entry)] = previous
+        previous = source
+    rows = []
+    for entry in window:
+        source = pick(entry)
+        if source is None:
+            continue
+        ops_sec = source.get("ops_per_sec")
+        prev = previous_by_id[id(entry)]
+        delta = None
+        if (prev is not None
+                and isinstance(ops_sec, (int, float))
+                and isinstance(prev.get("ops_per_sec"), (int, float))
+                and prev["ops_per_sec"]):
+            delta = ((ops_sec - prev["ops_per_sec"])
+                     / prev["ops_per_sec"] * 100)
+        p99 = source.get("p99_ms")
+        rows.append({
+            "timestamp": entry.get("timestamp", "")[:19].replace(
+                "T", " "),
+            "ops_per_sec": (ops_sec
+                            if isinstance(ops_sec, (int, float))
+                            else None),
+            "ops_sec_delta_pct": delta,
+            "p99_ms": p99 if isinstance(p99, (int, float)) else None,
+        })
+    return rows
+
+
+def _trend_section_data(runs, window, pick):
+    """One trend section as JSON data: its table plus first-to-last.
+
+    ``pick`` is the same selector :func:`_trend_table_rows`
+    takes. Returns the section's rows and the first-to-last
+    change in ops/sec and in p99 over the rows' numeric values
+    — None for a side with fewer than two values, so a single
+    run carries no change to report, like the Markdown view.
+    """
+    rows = _trend_table_rows(runs, window, pick)
+    return {
+        "runs": rows,
+        "first_to_last": {
+            "ops_per_sec": _trend_first_to_last(
+                [row["ops_per_sec"] for row in rows
+                 if row["ops_per_sec"] is not None]),
+            "p99_ms": _trend_first_to_last(
+                [row["p99_ms"] for row in rows
+                 if row["p99_ms"] is not None]),
+        },
+    }
+
+
+def trend_comparison(entries, limit=20):
+    """Ops/sec trend per backend, as JSON-serializable data.
+
+    ``entries`` are in file order (oldest first). Each backend
+    gets the same trend the Markdown view renders, as data: its
+    most recent ``limit`` runs with ops/sec, the change versus
+    the previous run, and p99, plus the sparkline and the
+    first-to-last change in ops/sec and in p99, the same table
+    per operation type (SET, GET, INCR, DEL) that ran, the
+    latest run's per-operation latency histograms — or a note
+    naming why there are none — and the per-op histogram
+    comparison between the first and last runs in the window.
+    Each backend also carries a ``sweeps`` list — one entry per
+    sweep step that ran in the window, with the step's best and
+    worst runs by the step's own ops/sec, the percentage changes
+    between them, and the step's per-op latency histograms from
+    both runs, plus the step's per-op histogram comparison —
+    the same per-step sections ``--best-worst-json`` carries,
+    built from the same shared
+    :func:`_best_worst_sweep_entries` helper, so a script
+    reading the trend JSON sees what the best/worst views show
+    for the same step. An empty history carries no backends.
+
+    Returns a JSON-serializable dict with a ``backends`` list.
+    """
+    if not entries:
+        return {"backends": []}
+    by_backend = {}
+    for entry in entries:
+        by_backend.setdefault(entry.get("backend", "?"), []).append(entry)
+    backends = []
+    for backend, runs in by_backend.items():
+        window = runs[-limit:]
+        overall = _trend_section_data(runs, window, lambda e: e)
+        values = [row["ops_per_sec"] for row in overall["runs"]
+                  if row["ops_per_sec"] is not None]
+        per_op = {}
+        for op in ("SET", "GET", "INCR", "DEL"):
+            section = _trend_section_data(
+                runs, window,
+                lambda e, op=op: (e.get("per_op") or {}).get(op))
+            if section["runs"]:
+                per_op[op] = section
+        latest = window[-1]
+        timestamp = latest.get("timestamp", "")[:19].replace("T", " ")
+        histograms, reason = _latest_run_histograms(latest)
+        notes = []
+        if reason is not None:
+            notes.append(
+                f"{timestamp}: {_TREND_HISTOGRAM_REASONS[reason]}")
+        backends.append({
+            "backend": backend,
+            "runs": overall["runs"],
+            "sparkline": _sparkline(values),
+            "first_to_last": overall["first_to_last"],
+            "per_op": per_op,
+            "sweeps": _best_worst_sweep_entries(window),
+            "histograms_by_op": histograms,
+            "notes": notes,
+            "histogram_comparison": _trend_histogram_comparison(
+                window[0], window[-1]),
+        })
+    return {"backends": backends}
+
+
+def write_trend_json(path, entries, limit=20):
+    """Write the ops/sec trend as JSON to ``path``.
+
+    Creates the parent directory when needed. Returns the
+    comparison dict — the same shape :func:`trend_comparison`
+    returns — so a script can read the trend without parsing
+    the Markdown chart. Each backend carries its per-step sweep
+    sections under ``sweeps`` — one entry per step that ran in
+    the window, with the step's best and worst runs, the deltas,
+    the step's per-op histograms from both runs, and the step's
+    per-op histogram comparison between them — the same sections
+    ``--best-worst-json`` carries.
+    """
+    comparison = trend_comparison(entries, limit=limit)
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(comparison, f, indent=2)
+        f.write("\n")
+    return comparison
 
 
 def _histogram_or_none(buckets):

@@ -131,7 +131,7 @@ from .history import DEFAULT_HISTORY_FILE, export_history, \
     format_best_worst, format_history, format_import, format_prune, \
     format_trend, import_history, load_history, \
     prune_history, record_run, write_best_worst, \
-    write_best_worst_json, write_trend
+    write_best_worst_json, write_trend, write_trend_json
 from .report import _workload_dict, render_csv, write_csv, write_json, \
     write_report
 from .resp import RespClient, RespError
@@ -544,6 +544,10 @@ def build_parser():
                         help="with --trend, also write the trend chart "
                         "to this Markdown file (e.g. trend.md) so it "
                         "can be committed or attached to a report")
+    parser.add_argument("--trend-json", default=None, metavar="PATH",
+                        help="with --trend, also write the trend chart "
+                        "as JSON to this file, so a script can read "
+                        "the trend without parsing Markdown")
     parser.add_argument("--best-worst", action="store_true",
                         help="print a best-run vs worst-run comparison "
                         "per backend from the recorded run history and "
@@ -713,6 +717,11 @@ def main(argv=None):
               "trend chart to a file, and there is no trend chart "
               "without --trend", file=sys.stderr)
         return 2
+    if args.trend_json and not args.trend:
+        print("kvbench: --trend-json needs --trend: it writes the "
+              "trend chart to a file, and there is no trend chart "
+              "without --trend", file=sys.stderr)
+        return 2
     if args.best_worst_out and not args.best_worst:
         print("kvbench: --best-worst-out needs --best-worst: it writes "
               "the best-vs-worst comparison to a file, and there is "
@@ -746,6 +755,10 @@ def main(argv=None):
             write_trend(args.trend_out, entries,
                         limit=args.history_limit)
             print(f"Trend written to {args.trend_out}")
+        if args.trend_json:
+            write_trend_json(args.trend_json, entries,
+                             limit=args.history_limit)
+            print(f"Trend JSON written to {args.trend_json}")
         return 0
     if args.best_worst:
         # Best-vs-worst mode: same history file, rendered as a

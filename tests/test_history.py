@@ -14,8 +14,9 @@ from kvbench.history import DEFAULT_HISTORY_FILE, \
     best_worst_comparison, build_record, export_history, \
     format_best_worst, format_history, format_import, \
     format_trend, import_history, load_export, load_history, \
-    record_run, write_best_worst, write_best_worst_json, \
-    write_trend, _sparkline
+    record_run, trend_comparison, write_best_worst, \
+    write_best_worst_json, write_trend, write_trend_json, \
+    _sparkline
 
 
 def _make_result(name="cinder (127.0.0.1:6379)", ops=1000,
@@ -1277,6 +1278,547 @@ class TestTrendCli(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertIn("--trend-out needs --trend", err.getvalue())
             self.assertFalse(os.path.exists(out_path))
+
+
+class TestTrendJson(unittest.TestCase):
+    def _step_record(self, ops_per_sec, set_count=500,
+                     get_count=400, keys=100, clients=None,
+                     value_size=None, pipeline=None, mix=None,
+                     histograms="real", p99_ms=0.020,
+                     set_buckets=None, get_buckets=None):
+        # One recorded run whose sweep step(s) carry per-op
+        # histograms: SET set_count samples and GET get_count
+        # samples, all in the <= 0.1 ms bucket. ``histograms``
+        # picks the shape under test: "real" (valid bucket
+        # lists), "empty" (no per-op latencies), "malformed"
+        # (a bucket list that is not a list), or "missing" (no
+        # key at all — a run recorded before 0.49.0).
+        # ``set_buckets``/``get_buckets`` replace the
+        # single-bucket lists with explicit ones, so a test can
+        # put the two runs' tails in different buckets.
+        result = _make_result(ops_per_sec=ops_per_sec)
+        step = {"keys": keys, "ops": 1000,
+                "ops_per_sec": ops_per_sec,
+                "mean_ms": 0.020, "p99_ms": p99_ms}
+        if histograms == "real":
+            step["histograms_by_op"] = {
+                "SET": set_buckets or [
+                    {"upper_ms": 0.1, "count": set_count}],
+                "GET": get_buckets or [
+                    {"upper_ms": 0.1, "count": get_count}],
+            }
+        elif histograms == "empty":
+            step["histograms_by_op"] = {}
+        elif histograms == "malformed":
+            step["histograms_by_op"] = {"SET": {}}
+        result.sweep = [step]
+        if clients is not None:
+            client_step = dict(step)
+            client_step["clients"] = clients
+            del client_step["keys"]
+            result.client_sweep = [client_step]
+        if value_size is not None:
+            value_step = dict(step)
+            value_step["value_size"] = value_size
+            del value_step["keys"]
+            result.value_sweep = [value_step]
+        if pipeline is not None:
+            pipeline_step = dict(step)
+            pipeline_step["pipeline"] = pipeline
+            del pipeline_step["keys"]
+            result.pipeline_sweep = [pipeline_step]
+        if mix is not None:
+            mix_step = dict(step)
+            mix_step["mix"] = mix
+            del mix_step["keys"]
+            result.mix_sweep = [mix_step]
+        return build_record(result, _make_workload(), "kvbench")
+
+    def test_trend_json_carries_runs_deltas_and_first_to_last(self):
+        # The core of the JSON side: each backend carries its
+        # trend window as data — the runs oldest first, the
+        # numeric change versus the previous run, the sparkline
+        # and the first-to-last change in ops/sec and in p99 —
+        # the same numbers the Markdown chart shows.
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(_make_mixed_result(ops_per_sec=50000.0),
+                         workload, "kvbench"),
+        ]
+        backend = trend_comparison(entries)["backends"][0]
+        self.assertEqual(backend["backend"],
+                         "cinder (127.0.0.1:6379)")
+        self.assertEqual(len(backend["runs"]), 2)
+        self.assertEqual(backend["runs"][0]["ops_per_sec"], 40000.0)
+        self.assertIsNone(backend["runs"][0]["ops_sec_delta_pct"])
+        self.assertEqual(backend["runs"][1]["ops_per_sec"], 50000.0)
+        self.assertAlmostEqual(
+            backend["runs"][1]["ops_sec_delta_pct"], 25.0)
+        self.assertEqual(backend["runs"][0]["p99_ms"], 0.020)
+        self.assertEqual(backend["runs"][1]["p99_ms"], 0.020)
+        self.assertEqual(backend["sparkline"], "▁█")
+        first_to_last = backend["first_to_last"]
+        self.assertEqual(first_to_last["ops_per_sec"]["first"],
+                         40000.0)
+        self.assertEqual(first_to_last["ops_per_sec"]["last"],
+                         50000.0)
+        self.assertAlmostEqual(
+            first_to_last["ops_per_sec"]["delta_pct"], 25.0)
+        self.assertEqual(first_to_last["p99_ms"]["first"], 0.020)
+        self.assertEqual(first_to_last["p99_ms"]["last"], 0.020)
+        self.assertAlmostEqual(first_to_last["p99_ms"]["delta_pct"],
+                               0.0)
+        # The Markdown chart renders the same numbers.
+        text = format_trend(entries)
+        self.assertIn("First → last: 40,000 → 50,000 ops/sec "
+                      "(+25.0%)", text)
+        self.assertIn("p99 first → last: 0.020 → 0.020 ms (+0.0%)",
+                      text)
+
+    def test_trend_json_carries_per_op_sections(self):
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(_make_mixed_result(ops_per_sec=50000.0),
+                         workload, "kvbench"),
+        ]
+        per_op = trend_comparison(entries)["backends"][0]["per_op"]
+        self.assertEqual(sorted(per_op), ["GET", "INCR", "SET"])
+        set_section = per_op["SET"]
+        self.assertEqual(
+            [row["ops_per_sec"] for row in set_section["runs"]],
+            [20000.0, 25000.0])
+        self.assertAlmostEqual(
+            set_section["runs"][1]["ops_sec_delta_pct"], 25.0)
+        self.assertEqual(
+            set_section["first_to_last"]["ops_per_sec"]["first"],
+            20000.0)
+        self.assertEqual(
+            set_section["first_to_last"]["ops_per_sec"]["last"],
+            25000.0)
+        self.assertAlmostEqual(
+            set_section["first_to_last"]["ops_per_sec"]["delta_pct"],
+            25.0)
+        self.assertEqual(
+            set_section["first_to_last"]["p99_ms"]["first"], 0.020)
+
+    def test_trend_json_carries_sweep_sections(self):
+        # The core of the per-step treatment: each backend's
+        # "sweeps" carries one entry per step that ran in the
+        # window, with the step's best and worst runs by the
+        # step's own ops/sec, the deltas, and the step's per-op
+        # histograms from both runs — the same sections
+        # --best-worst-json carries.
+        entries = [
+            self._step_record(40000.0, set_count=500),
+            self._step_record(60000.0, set_count=300),
+        ]
+        sweeps = trend_comparison(entries)["backends"][0]["sweeps"]
+        self.assertEqual(len(sweeps), 1)
+        step = sweeps[0]
+        self.assertEqual(step["kind"], "keyspace")
+        self.assertEqual(step["label"], "Keyspace sweep")
+        self.assertEqual(step["step"], 100)
+        self.assertEqual(step["step_label"], "100 keys")
+        self.assertEqual(step["best"]["ops_per_sec"], 60000.0)
+        self.assertEqual(step["worst"]["ops_per_sec"], 40000.0)
+        self.assertAlmostEqual(step["ops_sec_delta_pct"], 50.0)
+        self.assertAlmostEqual(step["p99_delta_pct"], 0.0)
+        self.assertEqual(step["notes"], [])
+        self.assertEqual(step["best"]["histograms_by_op"]["SET"],
+                         [{"upper_ms": 0.1, "count": 300}])
+        self.assertEqual(step["worst"]["histograms_by_op"]["SET"],
+                         [{"upper_ms": 0.1, "count": 500}])
+        comparison = step["histogram_comparison"]
+        self.assertEqual(comparison["from"], "worst")
+        self.assertEqual(comparison["to"], "best")
+        self.assertEqual(comparison["notes"], [])
+        self.assertTrue(comparison["percentiles_from_histograms"])
+        by_op = {row["op"]: row for row in comparison["rows"]}
+        self.assertEqual(by_op["SET"]["p99_from_ms"], 0.1)
+        self.assertEqual(by_op["SET"]["p99_to_ms"], 0.1)
+        self.assertAlmostEqual(by_op["SET"]["p99_change_pct"], 0.0)
+        self.assertAlmostEqual(by_op["SET"]["bucket_drift_pp"], 0.0)
+
+    def test_trend_json_sweep_pick_is_per_step_not_per_run(self):
+        # The step's best run is picked by the step's own
+        # ops/sec: here the run that won overall lost this step,
+        # so the JSON best pick carries the other run's shape —
+        # while the overall first-to-last still follows the
+        # runs themselves.
+        entries = [
+            self._step_record(40000.0, set_count=500, p99_ms=0.020),
+            self._step_record(60000.0, set_count=300, p99_ms=0.020),
+        ]
+        entries[0]["sweeps"]["keyspace"][0]["ops_per_sec"] = 70000.0
+        entries[1]["sweeps"]["keyspace"][0]["ops_per_sec"] = 50000.0
+        backend = trend_comparison(entries)["backends"][0]
+        step = backend["sweeps"][0]
+        self.assertEqual(step["best"]["ops_per_sec"], 70000.0)
+        self.assertEqual(step["worst"]["ops_per_sec"], 50000.0)
+        self.assertAlmostEqual(step["ops_sec_delta_pct"], 40.0)
+        self.assertEqual(step["best"]["histograms_by_op"]["SET"],
+                         [{"upper_ms": 0.1, "count": 500}])
+        self.assertEqual(
+            backend["first_to_last"]["ops_per_sec"]["first"], 40000.0)
+        self.assertEqual(
+            backend["first_to_last"]["ops_per_sec"]["last"], 60000.0)
+
+    def test_trend_json_all_five_sweep_kinds(self):
+        entries = [
+            self._step_record(40000.0, keys=100, clients=4,
+                              value_size=128, pipeline=5,
+                              mix="90:10"),
+            self._step_record(50000.0, keys=100, clients=4,
+                              value_size=128, pipeline=5,
+                              mix="90:10"),
+        ]
+        sweeps = trend_comparison(entries)["backends"][0]["sweeps"]
+        by_kind = {s["kind"]: s for s in sweeps}
+        self.assertEqual(
+            sorted(by_kind),
+            ["clients", "keyspace", "mix", "pipeline",
+             "value_size"])
+        self.assertEqual(by_kind["keyspace"]["step"], 100)
+        self.assertEqual(by_kind["keyspace"]["step_label"],
+                         "100 keys")
+        self.assertEqual(by_kind["clients"]["step"], 4)
+        self.assertEqual(by_kind["clients"]["step_label"],
+                         "4 clients")
+        self.assertEqual(by_kind["value_size"]["step"], 128)
+        self.assertEqual(by_kind["value_size"]["step_label"],
+                         "128 byte values")
+        self.assertEqual(by_kind["pipeline"]["step"], 5)
+        self.assertEqual(by_kind["pipeline"]["step_label"],
+                         "5 commands")
+        self.assertEqual(by_kind["mix"]["step"], "90:10")
+        self.assertEqual(by_kind["mix"]["step_label"],
+                         "90:10 read:write")
+        for step in sweeps:
+            self.assertEqual(step["best"]["ops_per_sec"], 50000.0)
+            self.assertEqual(step["worst"]["ops_per_sec"], 40000.0)
+            self.assertEqual(step["notes"], [])
+
+    def test_trend_json_single_run_step_has_no_spread(self):
+        # One run of a step is both its best and its worst, with
+        # 0.0% deltas — and both picks carry that run's shape —
+        # and the step's histogram comparison is a note, not a
+        # table.
+        entries = [self._step_record(50000.0, set_count=500)]
+        step = trend_comparison(entries)["backends"][0]["sweeps"][0]
+        self.assertEqual(step["best"]["ops_per_sec"], 50000.0)
+        self.assertEqual(step["worst"]["ops_per_sec"], 50000.0)
+        self.assertAlmostEqual(step["ops_sec_delta_pct"], 0.0)
+        self.assertAlmostEqual(step["p99_delta_pct"], 0.0)
+        self.assertEqual(step["notes"], [])
+        self.assertEqual(step["best"]["histograms_by_op"]["SET"],
+                         [{"upper_ms": 0.1, "count": 500}])
+        self.assertEqual(step["worst"]["histograms_by_op"]["SET"],
+                         [{"upper_ms": 0.1, "count": 500}])
+        comparison = step["histogram_comparison"]
+        self.assertIsNone(comparison["rows"])
+        self.assertEqual(len(comparison["notes"]), 1)
+        self.assertIn(
+            "are the same run, so there is no best-vs-worst "
+            "histogram comparison for this step.",
+            comparison["notes"][0])
+
+    def test_trend_json_step_recorded_before_0_49_has_note(self):
+        entries = [self._step_record(40000.0, histograms="missing"),
+                   self._step_record(50000.0, histograms="missing")]
+        step = trend_comparison(entries)["backends"][0]["sweeps"][0]
+        self.assertNotIn("histograms_by_op", step["best"])
+        self.assertNotIn("histograms_by_op", step["worst"])
+        self.assertEqual(len(step["notes"]), 2)
+        self.assertIn(
+            "Keyspace sweep — 100 keys (best run",
+            step["notes"][0])
+        self.assertIn(
+            "this step was recorded before 0.49.0, so it carries "
+            "no per-op histograms.", step["notes"][0])
+
+    def test_trend_json_step_with_no_per_op_latencies_has_note(self):
+        entries = [self._step_record(40000.0, histograms="empty"),
+                   self._step_record(50000.0, histograms="empty")]
+        step = trend_comparison(entries)["backends"][0]["sweeps"][0]
+        self.assertNotIn("histograms_by_op", step["best"])
+        self.assertNotIn("histograms_by_op", step["worst"])
+        self.assertEqual(len(step["notes"]), 2)
+        self.assertIn(
+            "this step recorded no per-op latencies, so there are "
+            "no histograms to show.", step["notes"][0])
+
+    def test_trend_json_step_malformed_histograms_has_note(self):
+        entries = [self._step_record(40000.0,
+                                     histograms="malformed"),
+                   self._step_record(50000.0,
+                                     histograms="malformed")]
+        step = trend_comparison(entries)["backends"][0]["sweeps"][0]
+        self.assertNotIn("histograms_by_op", step["best"])
+        self.assertNotIn("histograms_by_op", step["worst"])
+        self.assertEqual(len(step["notes"]), 2)
+        self.assertIn(
+            "the recorded per-op histograms for this step are "
+            "malformed, so no histograms are shown.",
+            step["notes"][0])
+
+    def test_trend_json_records_without_sweeps_have_empty_sweeps(self):
+        # History written before 0.37.0 has no "sweeps" key: the
+        # trend JSON carries an empty sweeps list, not no key.
+        workload = _make_workload()
+        entries = [
+            build_record(_make_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(_make_result(ops_per_sec=50000.0),
+                         workload, "kvbench"),
+        ]
+        for entry in entries:
+            self.assertNotIn("sweeps", entry)
+        backend = trend_comparison(entries)["backends"][0]
+        self.assertEqual(backend["sweeps"], [])
+
+    def test_trend_json_sweeps_agree_with_best_worst_json(self):
+        # Both views build their per-step sections from the same
+        # shared helper, so the trend JSON's sweeps are exactly
+        # the best/worst JSON's sweeps for the same runs.
+        entries = [
+            self._step_record(40000.0, set_count=500),
+            self._step_record(60000.0, set_count=300),
+        ]
+        self.assertEqual(
+            trend_comparison(entries)["backends"][0]["sweeps"],
+            best_worst_comparison(entries)["backends"][0]["sweeps"])
+
+    def test_trend_json_latest_run_histograms(self):
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(_make_mixed_result(ops_per_sec=50000.0),
+                         workload, "kvbench"),
+        ]
+        backend = trend_comparison(entries)["backends"][0]
+        self.assertEqual(backend["histograms_by_op"]["SET"],
+                         [{"upper_ms": 0.1, "count": 500}])
+        self.assertEqual(backend["histograms_by_op"]["GET"],
+                         [{"upper_ms": 0.1, "count": 400}])
+        self.assertEqual(backend["notes"], [])
+
+    def test_trend_json_latest_run_before_0_43_has_note(self):
+        # The latest run was recorded before 0.43.0 and carries
+        # no "histograms_by_op" key: a note naming that instead
+        # of a histogram map — the same reason the Markdown view
+        # renders.
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(_make_mixed_result(ops_per_sec=50000.0),
+                         workload, "kvbench"),
+        ]
+        del entries[1]["histograms_by_op"]
+        backend = trend_comparison(entries)["backends"][0]
+        self.assertIsNone(backend["histograms_by_op"])
+        self.assertEqual(len(backend["notes"]), 1)
+        self.assertIn("recorded before 0.43.0, so this run carries "
+                      "no per-op histograms.", backend["notes"][0])
+
+    def test_trend_json_latest_run_no_per_op_latencies_has_note(self):
+        workload = _make_workload()
+        entries = [
+            build_record(_make_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(_make_result(ops_per_sec=50000.0),
+                         workload, "kvbench"),
+        ]
+        backend = trend_comparison(entries)["backends"][0]
+        self.assertIsNone(backend["histograms_by_op"])
+        self.assertEqual(len(backend["notes"]), 1)
+        self.assertIn("this run recorded no per-op latencies, so "
+                      "there are no histograms to show.",
+                      backend["notes"][0])
+
+    def test_trend_json_latest_run_malformed_histograms_has_note(self):
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(_make_mixed_result(ops_per_sec=50000.0),
+                         workload, "kvbench"),
+        ]
+        entries[1]["histograms_by_op"] = {"SET": {}}
+        backend = trend_comparison(entries)["backends"][0]
+        self.assertIsNone(backend["histograms_by_op"])
+        self.assertEqual(len(backend["notes"]), 1)
+        self.assertIn("the recorded per-op histograms are "
+                      "malformed, so no histograms are shown.",
+                      backend["notes"][0])
+
+    def test_trend_json_histogram_comparison_first_vs_last(self):
+        # The core of the JSON side of the comparison: each op's
+        # p50/p99 in the first and last runs, the p99 change and
+        # the bucket drift — the same numbers the Markdown table
+        # shows, so the two views cannot disagree.
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(
+                _make_result(
+                    ops=1000, ops_per_sec=50000.0,
+                    latencies_by_op={
+                        "SET": [200_000] * 500,
+                        "GET": [20_000] * 400,
+                        "INCR": [20_000] * 100,
+                    }),
+                workload, "kvbench"),
+        ]
+        comparison = trend_comparison(entries)["backends"][0][
+            "histogram_comparison"]
+        self.assertEqual(comparison["from"], "first")
+        self.assertEqual(comparison["to"], "last")
+        self.assertEqual(comparison["notes"], [])
+        by_op = {row["op"]: row for row in comparison["rows"]}
+        self.assertEqual(by_op["SET"]["p50_from_ms"], 0.020)
+        self.assertEqual(by_op["SET"]["p50_to_ms"], 0.200)
+        self.assertEqual(by_op["SET"]["p99_from_ms"], 0.020)
+        self.assertEqual(by_op["SET"]["p99_to_ms"], 0.200)
+        self.assertAlmostEqual(by_op["SET"]["p99_change_pct"], 900.0)
+        self.assertAlmostEqual(by_op["SET"]["bucket_drift_pp"], -100.0)
+        self.assertEqual(by_op["SET"]["bucket_drift_bucket"],
+                         "<= 0.1 ms")
+        self.assertAlmostEqual(by_op["GET"]["p99_change_pct"], 0.0)
+        self.assertAlmostEqual(by_op["GET"]["bucket_drift_pp"], 0.0)
+        # The Markdown view renders the same row from the same
+        # shared helper.
+        self.assertIn(
+            "| SET | 0.020 | 0.200 | 0.020 | 0.200 | +900.0% | "
+            "-100.0 pp (<= 0.1 ms) |", format_trend(entries))
+
+    def test_trend_json_histogram_comparison_single_run_has_note(self):
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(), workload, "kvbench"),
+        ]
+        comparison = trend_comparison(entries)["backends"][0][
+            "histogram_comparison"]
+        self.assertIsNone(comparison["rows"])
+        self.assertEqual(len(comparison["notes"]), 1)
+        self.assertIn("Only one run in the trend window, so there "
+                      "is no first-to-last histogram comparison.",
+                      comparison["notes"][0])
+
+    def test_trend_json_histogram_comparison_before_0_43_has_note(self):
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(_make_mixed_result(ops_per_sec=50000.0),
+                         workload, "kvbench"),
+        ]
+        del entries[0]["histograms_by_op"]
+        comparison = trend_comparison(entries)["backends"][0][
+            "histogram_comparison"]
+        self.assertIsNone(comparison["rows"])
+        self.assertEqual(len(comparison["notes"]), 1)
+        self.assertIn("recorded before 0.43.0", comparison["notes"][0])
+        self.assertIn("no first-to-last histogram comparison is "
+                      "shown", comparison["notes"][0])
+
+    def test_trend_json_empty_history(self):
+        self.assertEqual(trend_comparison([]), {"backends": []})
+
+    def test_trend_json_limit_window(self):
+        # Only the most recent runs in the window are compared:
+        # with limit 1 the single run in the window is both
+        # first and last, and the step's best and worst are that
+        # run too.
+        entries = [
+            self._step_record(40000.0, set_count=500),
+            self._step_record(60000.0, set_count=300),
+        ]
+        backend = trend_comparison(entries, limit=1)["backends"][0]
+        self.assertEqual(len(backend["runs"]), 1)
+        self.assertEqual(backend["runs"][0]["ops_per_sec"], 60000.0)
+        self.assertIsNone(
+            backend["first_to_last"]["ops_per_sec"])
+        self.assertIsNone(backend["first_to_last"]["p99_ms"])
+        step = backend["sweeps"][0]
+        self.assertEqual(step["best"]["ops_per_sec"], 60000.0)
+        self.assertEqual(step["worst"]["ops_per_sec"], 60000.0)
+
+    def test_trend_json_file_round_trip(self):
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(_make_mixed_result(ops_per_sec=50000.0),
+                         workload, "kvbench"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "reports", "trend.json")
+            comparison = write_trend_json(path, entries)
+            with open(path, encoding="utf-8") as f:
+                parsed = json.load(f)
+            self.assertEqual(parsed, comparison)
+            self.assertEqual(
+                parsed["backends"][0]["runs"][1]["ops_per_sec"],
+                50000.0)
+
+    def test_trend_json_writes_file_and_still_prints(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            history = os.path.join(tmp, "history.jsonl")
+            record_run(history, [_make_result(ops_per_sec=40000.0),
+                                 _make_result(ops_per_sec=50000.0)],
+                       _make_workload(), "kvbench")
+            json_path = os.path.join(tmp, "trend.json")
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = main(["--trend", "--history-file", history,
+                             "--trend-json", json_path])
+            self.assertEqual(code, 0)
+            stdout = out.getvalue()
+            self.assertIn("ops/sec trend", stdout)
+            self.assertIn("+25.0%", stdout)
+            self.assertIn(f"Trend JSON written to {json_path}", stdout)
+            with open(json_path, encoding="utf-8") as f:
+                parsed = json.load(f)
+            self.assertEqual(
+                parsed["backends"][0]["runs"][1]["ops_per_sec"],
+                50000.0)
+            self.assertEqual(
+                parsed["backends"][0]["sweeps"], [])
+
+    def test_trend_json_without_trend_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = os.path.join(tmp, "trend.json")
+            err = io.StringIO()
+            with redirect_stdout(io.StringIO()):
+                from contextlib import redirect_stderr
+                with redirect_stderr(err):
+                    code = main(["--trend-json", out_path])
+            self.assertEqual(code, 2)
+            self.assertIn("--trend-json needs --trend",
+                          err.getvalue())
+            self.assertFalse(os.path.exists(out_path))
+
+    def test_trend_json_with_empty_history_exits_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            history = os.path.join(tmp, "history.jsonl")
+            json_path = os.path.join(tmp, "trend.json")
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = main(["--trend", "--history-file", history,
+                             "--trend-json", json_path])
+            self.assertEqual(code, 0)
+            self.assertIn("No runs recorded yet", out.getvalue())
+            self.assertIn(f"Trend JSON written to {json_path}",
+                          out.getvalue())
+            with open(json_path, encoding="utf-8") as f:
+                self.assertEqual(json.load(f), {"backends": []})
 
 
 class TestBestWorstComparison(unittest.TestCase):

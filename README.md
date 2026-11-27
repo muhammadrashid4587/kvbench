@@ -249,6 +249,12 @@ python -m kvbench.cli --history-import history.json
 # can be committed or attached to a report
 python -m kvbench.cli --trend --trend-out trend.md
 
+# same trend chart, written as JSON as well, so a script can
+# read the trend — the runs, the sparkline, the first-to-last
+# change, the per-op sections and the per-step sweep sections —
+# without parsing the Markdown chart
+python -m kvbench.cli --trend --trend-json trend.json
+
 # compare this run against a previous run's JSON report, side by
 # side, and fail the run when it regressed past 5%
 python -m kvbench.cli --ops 20000 --clients 4 \
@@ -408,6 +414,9 @@ recorded run history and exit, no benchmark is run),
 `--trend-out PATH` (with `--trend`, also write the trend chart to
 a Markdown file — the same text printed to stdout — so it can be
 committed or attached to a report; needs `--trend`),
+`--trend-json PATH` (with `--trend`, also write the trend chart
+as JSON to this file, so a script can read the trend without
+parsing the Markdown chart; needs `--trend`),
 `--best-worst` (print a best-run vs worst-run comparison per
 backend from the recorded run history and exit, no benchmark is
 run — ops/sec and p99 for the best and worst runs, overall and
@@ -649,6 +658,28 @@ being re-rendered from the history file each time. The parent
 directory is created when needed, and `--trend-out` without
 `--trend` is rejected (exit 2), since there is no chart to
 write without it.
+
+With `--trend-json PATH` the same trend is also written as JSON
+— one entry per backend under `backends`, with the runs in the
+window (timestamp, ops/sec, the change versus the previous run,
+and p99), the sparkline, the first-to-last change in ops/sec and
+in p99, the same table per operation type that ran under
+`per_op`, the latest run's per-operation latency histograms under
+`histograms_by_op` (or a note under `notes` naming why there are
+none), and the per-op histogram comparison between the first and
+last runs under `histogram_comparison` — plus one per-step sweep
+section per sweep step that ran in the window under `sweeps`:
+the step's best and worst runs by the step's own ops/sec, the
+percentage changes between them, and the step's per-op latency
+histograms from both runs — or notes naming why a pick has none
+— plus the step's per-op histogram comparison under
+`histogram_comparison` on each sweep entry, with `rows` carrying
+the same per-op numbers or `notes` naming why there is none —
+the same per-step sections `--best-worst-json` carries, built
+from the same shared helper, so a script reading the trend JSON
+sees what the best/worst views show for the same step. Like
+`--trend-out`, `--trend-json` without `--trend` is rejected
+(exit 2).
 
 With `--best-worst` the same history renders as a best-run vs
 worst-run comparison, one section per backend: a table with the
@@ -1164,6 +1195,28 @@ make test
 
 ## Roadmap
 
+- Per-sweep-step sections in the `--trend-json` output: each
+  backend's `sweeps` list carries one entry per sweep step that
+  ran in the trend window — the step's best and worst runs by
+  the step's own ops/sec, the percentage changes between them,
+  and the step's per-op latency histograms from both runs —
+  built from the same shared helper as the `--best-worst-json`
+  per-step sections, so the JSON and Markdown views cannot
+  disagree and a script reading the trend JSON sees what the
+  best/worst views show for the same step. Each sweep entry also
+  carries the step's per-op histogram comparison under
+  `histogram_comparison` (each op's p50/p99 in the worst and
+  best runs' steps, the p99 change, and the bucket drift, or
+  notes naming why there is none), and the trend JSON carries
+  the rest of the chart too — the runs table, the sparkline, the
+  first-to-last change in ops/sec and in p99, the per-op
+  sections, the latest run's per-op histograms (or a note naming
+  why there are none), and the first-to-last histogram
+  comparison — so a script can read the trend without parsing
+  the Markdown chart. A step recorded before 0.49.0, one
+  recorded with no per-op latencies, or one whose recorded
+  histograms are malformed contributes a note naming the reason
+  instead of a histogram map. Done in 0.53.0.
 - Per-sweep-step histogram comparisons in the `--best-worst`
   output: each sweep step's section ends with a per-op table
   comparing the step's best and worst runs — each op's p50 and
