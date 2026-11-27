@@ -252,13 +252,25 @@ def _result_dict(result, top_n=5):
         # and ``slowest_histograms_by_op``; the repeat section
         # already draws every run's per-op block, so the two
         # shapes are visible there without a dedicated block.
+        # Its ``per_op`` carries one fastest-vs-slowest
+        # comparison per op that ran — the op's own fastest and
+        # slowest runs by that op's ops/sec, with the op's own
+        # histogram comparison table — the same dicts the
+        # Markdown per-op sections render, so a repeat run
+        # where one op's runs swing while the overall winner
+        # stays steady still names the op.
+        comparison = _repeat_fastest_slowest_histogram_comparison(result)
+        comparison["per_op"] = {
+            op: _per_op_fastest_slowest_histogram_comparison(
+                result.repeat_runs, op)
+            for op in _repeat_run_ops(result.repeat_runs)
+        }
         doc["repeat"] = {
             "runs": result.repeat_runs,
             "median_ops_per_sec": result.median_ops_per_sec,
             "median_p99_ms": result.median_p99_ms,
             "median_per_op": result.median_per_op,
-            "histogram_comparison": (
-                _repeat_fastest_slowest_histogram_comparison(result)),
+            "histogram_comparison": comparison,
         }
         if result.repeat_spread:
             # Only a run repeated more than once carries a spread:
@@ -1358,22 +1370,23 @@ def _fastest_slowest_histogram_block_lines(comparison, label):
 def _per_op_fastest_slowest_lines(runs, label):
     """Per-op fastest-vs-slowest repeat-run comparison lines, or [].
 
-    ``runs`` is one sweep step's ``repeat.runs`` and ``label``
-    formats the step (e.g. ``"5 keys"``). One section per op
-    that ran in the step: the op's own fastest and slowest runs
-    by that op's ops/sec, their p50/p99 and the p99 change
-    between them, then the op's own histogram comparison table —
-    that op's p50/p99 in both runs, the p99 change and the
-    bucket drift — drawn by the shared
+    ``runs`` is one repeat's ``repeat.runs`` — a sweep step's, or
+    the main run's — and ``label`` formats the section (e.g.
+    ``"5 keys"`` for a step, the result name for the main repeat
+    section). One section per op that ran: the op's own fastest
+    and slowest runs by that op's ops/sec, their p50/p99 and the
+    p99 change between them, then the op's own histogram
+    comparison table — that op's p50/p99 in both runs, the p99
+    change and the bucket drift — drawn by the shared
     :func:`_histogram_comparison_table_lines` helper, from the
     same :func:`_per_op_fastest_slowest_histogram_comparison`
     dict the JSON report carries under
     ``repeat.histogram_comparison.per_op[OP]``, so the two
-    views cannot disagree and a step where one op's runs swing
-    while the overall winner stays steady still names the op.
-    When nothing is comparable for an op — it ran in only one
-    run, its runs' ops/sec are all identical, or a picked run
-    carries no usable histogram for it — a note names the
+    views cannot disagree and a repeat run where one op's runs
+    swing while the overall winner stays steady still names the
+    op. When nothing is comparable for an op — it ran in only
+    one run, its runs' ops/sec are all identical, or a picked
+    run carries no usable histogram for it — a note names the
     reason instead of a table.
     """
     lines = []
@@ -1426,19 +1439,27 @@ def _repeat_fastest_slowest_lines(result):
     and best/worst views use, from the same rows the JSON report
     carries under ``repeat.histogram_comparison``, so the two
     views cannot disagree and a noisy repeat run shows which op's
-    latency shape moved. When nothing is comparable — a single
-    repeat run, identical runs, or a picked run with no usable
-    histograms — a note names the reason instead of a table.
+    latency shape moved — and then a per-op fastest-vs-slowest
+    section for each op that ran: the op's own fastest and
+    slowest runs by that op's ops/sec, with the op's own
+    histogram comparison table, so a repeat run where one op's
+    runs swing while the overall winner stays steady still names
+    the op. When nothing is comparable — a single repeat run,
+    identical runs, or a picked run with no usable histograms —
+    a note names the reason instead of a table.
     Empty for a result with no repeat runs.
     """
     if not result.repeat_runs:
         return []
     comparison = _repeat_fastest_slowest_histogram_comparison(result)
-    return _fastest_slowest_comparison_lines(
+    lines = _fastest_slowest_comparison_lines(
         comparison,
         f"### Fastest vs slowest repeat run — {result.name}",
         f"#### {result.name} — fastest vs slowest repeat run "
         "histogram comparison")
+    lines += _per_op_fastest_slowest_lines(result.repeat_runs,
+                                           result.name)
+    return lines
 
 
 def _repeat_lines(result):
@@ -1453,7 +1474,10 @@ def _repeat_lines(result):
     run — the same shared helper the sweep sections use, so a
     run where one op type slows down names the op — and then by
     the fastest-vs-slowest repeat-run histogram comparison, so a
-    noisy repeat run shows which op's latency shape moved.
+    noisy repeat run shows which op's latency shape moved — and
+    then by a per-op fastest-vs-slowest section for each op that
+    ran, so a repeat run where one op's runs swing while the
+    overall winner stays steady still names the op.
     Runs recorded before 0.34.0 carry no ``histograms_by_op`` and
     render the table only.
     """

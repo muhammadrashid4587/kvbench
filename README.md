@@ -340,7 +340,12 @@ python -m kvbench.cli --ops 20000 --clients 4 \
 # slowest runs' per-op histograms under
 # fastest_histograms_by_op and slowest_histograms_by_op, the
 # same runs the Repeat runs section already draws a per-op
-# block for; a single repeat run renders a note naming the
+# block for — plus a per-op fastest-vs-slowest comparison for
+# each op that ran, under repeat.histogram_comparison.per_op in
+# JSON and as a section per op in the Repeat runs section in
+# Markdown, so a repeat run where one op's runs swing while the
+# overall winner stays steady still names the op; a single
+# repeat run renders a note naming the
 # reason instead of a comparison
 python -m kvbench.cli --ops 20000 --clients 4 --repeat 3
 
@@ -1286,11 +1291,18 @@ the p99 change and the bucket drift, built from the same shared
 rows the trend and best/worst views use, so a noisy repeat run
 shows which op's latency shape moved; a single repeat run, or
 runs whose ops/sec are all identical, renders a note naming
-the reason instead of a comparison. The JSON report carries the
-same rows per result under `repeat.runs`, with the per-op
-buckets per run under `histograms_by_op`, the spread summary
-under `repeat.spread`, and the comparison under
-`repeat.histogram_comparison`.
+the reason instead of a comparison. Below the comparison each
+op that ran gets its own fastest-vs-slowest section — the op's
+own fastest and slowest runs by that op's ops/sec, with the
+op's own histogram comparison table, so a repeat run where one
+op's runs swing while the overall winner stays steady still
+names the op; an op whose runs are not comparable renders a
+note naming the reason instead of a table. The JSON report
+carries the same rows per result under `repeat.runs`, with the
+per-op buckets per run under `histograms_by_op`, the spread
+summary under `repeat.spread`, and the comparison under
+`repeat.histogram_comparison`, with the per-op comparisons
+under `repeat.histogram_comparison.per_op`.
 
 Below the table, each backend gets a per-operation stats table:
 ops, ops/sec, mean, p50, p95 and p99 latency split by SET, GET,
@@ -1497,7 +1509,17 @@ make test
   comparison in the main repeat section — each op's own fastest
   and slowest runs by that op's ops/sec, with its own histogram
   comparison table, so a repeat run where one op's runs swing
-  while the overall winner stays steady still names the op.
+  while the overall winner stays steady still names the op. Done
+  in 0.70.0.
+  Next: the fastest and slowest runs' histogram blocks for that
+  op next to each per-op fastest-vs-slowest section — in the
+  main repeat section and in each sweep-step repeat block — the
+  two runs' latency shapes for the op alone, drawn with the
+  same shared helper as the per-op blocks, from the bucket
+  lists the comparison already carries under
+  `fastest_histogram` and `slowest_histogram` for the op, so
+  the shape move reads as bars as well as numbers next to the
+  per-op table.
 - `--compare-file-json PATH`: with `--compare-file`, also
   write the comparison as a standalone JSON file — the exact
   dict `compare_results` returns (the same one the run's JSON
