@@ -88,7 +88,13 @@ change, and the bucket drift — in both the Markdown chart and
 under ``histogram_comparison`` in each trend-JSON
 ``sweep_trends`` entry, built from the same shared sweep-step
 rows the best/worst view already uses, so the two views cannot
-disagree.
+disagree. Since 0.63.0 each sweep-step trend section also
+carries the first run's per-op histogram block next to the
+comparison table — drawn with the same shared helper as the
+latest run's block, so the two shapes can be read side by
+side — and the trend JSON carries the same first run's
+histograms under ``first_histograms_by_op`` in each
+``sweep_trends`` entry.
 """
 
 import json
@@ -621,10 +627,17 @@ def _sweep_step_trend_comparison_lines(label, step_label, window,
     each op's p50/p99 in the first and last runs' steps, the
     p99 change, and the bucket drift, so a p99 move in the
     step shows how each op's latency shape moved between the
-    first and last runs. A step recorded in only one run in
+    first and last runs. The table is followed by the first
+    run's per-op histogram block, drawn with the same shared
+    helper as the latest run's block just above, so the two
+    shapes can be read side by side next to the comparison
+    table — like the overall trend's first-run block sits next
+    to its comparison. A step recorded in only one run in
     the window, or a step recorded before 0.49.0, with no
     per-op latencies, or with malformed histograms, renders a
-    note naming the reason instead of a table. The returned
+    note naming the reason instead of a table, and no first-run
+    block — a single run's first shape is the latest run's
+    block just above, so there is nothing more to show. The returned
     lines carry no trailing blank line; the caller adds the
     section separator.
     """
@@ -643,6 +656,18 @@ def _sweep_step_trend_comparison_lines(label, step_label, window,
             f"#### {label} — {step_label} — per-op histogram "
             "comparison — first vs last run",
             "first", "last", comparison["rows"])
+        # The first run's shapes, next to the latest run's block
+        # just above — the same shared helper draws both, so the
+        # views cannot disagree. The comparison rendered, so
+        # both runs carry usable histograms and the block draws
+        # instead of a note. The table's trailing blank line
+        # stays, so the block's heading does not run into the
+        # last table row.
+        lines.extend(_sweep_step_histogram_block(
+            label, step_label, first_entry,
+            _sweep_step_entry(first_entry, kind, step_key,
+                              step_value),
+            "first"))
         while lines and lines[-1] == "":
             lines.pop()
         return lines
@@ -677,7 +702,13 @@ def _sweep_trend_lines(runs, window):
     the step, so a p99 move in a step shows how each op's
     latency shape moved between the first and last runs — or a
     note naming why there is none (a step recorded in only one
-    run in the window, or steps without usable histograms).
+    run in the window, or steps without usable histograms) —
+    and with the first run's per-op histogram block next to the
+    comparison table, drawn with the same shared helper as the
+    latest run's block, so the two shapes can be read side by
+    side — or no block, when there is no comparison to sit next
+    to: a single run's first shape is the latest run's block just
+    above, so there is nothing more to show.
     """
     lines = []
     for kind, step_key, label, unit in _SWEEP_KINDS:
@@ -1218,7 +1249,9 @@ def format_trend(entries, limit=20):
     drift, built from the same shared rows the trend JSON
     carries for the step, or a note naming why there is none —
     so a p99 move in a step shows how each op's latency shape
-    moved between the first and last runs,
+    moved between the first and last runs, and with the first
+    run's per-op histogram block next to the comparison table,
+    so the two shapes can be read side by side,
     and the latest run's per-operation latency histograms, so a
     p99 move in the trend names the op whose latency shape moved,
     plus a per-op histogram comparison between the first and
@@ -1446,7 +1479,12 @@ def _sweep_trend_entries(runs, window):
     recorded with no per-op latencies, or one whose recorded
     histograms are malformed contributes a note naming the
     reason instead of a histogram map, built from the same
-    shared helper as the Markdown view's note.
+    shared helper as the Markdown view's note. Each entry also
+    carries the first run's per-op histograms under
+    ``first_histograms_by_op`` — the same shapes the Markdown
+    chart draws next to the comparison table — present exactly
+    when the chart shows a first-run block, so a step recorded
+    in only one run in the window carries none.
     """
     entries = []
     for kind, step_key, label, unit in _SWEEP_KINDS:
@@ -1515,13 +1553,32 @@ def _sweep_trend_entries(runs, window):
                                               step_value)
                          is not None]
             first_run, last_run = step_runs[0], step_runs[-1]
+            first_step = _sweep_step_entry(first_run, kind, step_key,
+                                           step_value)
             entry["histogram_comparison"] = \
                 _trend_sweep_step_histogram_comparison(
                     label, step_label, first_run, last_run,
-                    _sweep_step_entry(first_run, kind, step_key,
-                                      step_value),
+                    first_step,
                     _sweep_step_entry(last_run, kind, step_key,
                                       step_value))
+            # The first run's per-op histograms, next to the
+            # latest run's under ``histograms_by_op`` — the same
+            # shapes the Markdown chart draws side by side
+            # next to the comparison table, cleaned by the same
+            # shared helper, so a script reading the JSON sees
+            # what the chart shows. Only present when the
+            # comparison rendered — the first and last runs
+            # that recorded the step are different runs with
+            # usable histograms — so the field is absent exactly
+            # when the chart shows no first-run block: a step
+            # recorded in only one run in the window has the
+            # latest run's histograms as its first run's, and a
+            # step without usable histograms has the comparison
+            # notes naming why instead.
+            if entry["histogram_comparison"]["rows"] is not None:
+                cleaned, _reason = _sweep_step_histograms(first_step)
+                if cleaned is not None:
+                    entry["first_histograms_by_op"] = cleaned
             entries.append(entry)
     return entries
 
@@ -1551,8 +1608,11 @@ def trend_comparison(entries, limit=20):
     first-to-last per-op histogram comparison under
     ``histogram_comparison`` on each entry, with ``rows``
     carrying the same per-op numbers the Markdown table
-    shows or ``notes`` naming why there is none. Each backend also
-    carries a ``sweeps`` list — one entry per sweep step
+    shows or ``notes`` naming why there is none, plus the
+    first run's per-op histograms under
+    ``first_histograms_by_op`` on each entry, the same shapes
+    the Markdown chart draws next to the comparison table.
+    Each backend also carries a ``sweeps`` list — one entry per sweep step
     that ran in the window, with the step's best and worst
     runs by the step's own ops/sec, the percentage changes
     between them, and the step's per-op latency histograms
@@ -1643,7 +1703,10 @@ def write_trend_json(path, entries, limit=20):
     the step's per-op histograms from the latest run that
     recorded it, and the step's first-to-last per-op histogram
     comparison under ``histogram_comparison`` — the same
-    sections the Markdown ``--trend`` chart renders.
+    sections the Markdown ``--trend`` chart renders, plus the
+    first run's per-op histograms under
+    ``first_histograms_by_op`` in each sweep-step entry, the
+    same shapes the chart draws next to the comparison table.
     """
     comparison = trend_comparison(entries, limit=limit)
     directory = os.path.dirname(os.path.abspath(path))

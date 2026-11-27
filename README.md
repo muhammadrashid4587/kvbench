@@ -665,7 +665,10 @@ with the same shared helper as the latest run's block, and the
 step's first-to-last per-op histogram comparison — each op's
 p50/p99 in the first and last runs that recorded the step, the
 p99 change, and the bucket drift, built from the same shared
-sweep-step rows the best/worst view already uses — a keyspace
+sweep-step rows the best/worst view already uses, and the first
+run's per-op histogram block next to the comparison table,
+drawn with the same shared helper as the latest run's block, so
+the two shapes can be read side by side — a keyspace
 step's ops/sec at 100 keys is only ever compared with the same
 step in other runs, so a step that slows down reads at a glance
 even when the overall ops/sec moved the other way, and a step
@@ -680,7 +683,9 @@ latencies carries an empty mapping, and a step whose recorded
 histograms are malformed carries something else — each renders a
 note naming the reason instead of a histogram block or a
 comparison table, and a step recorded in only one run in the
-window renders a note instead of a comparison table.
+window renders a note instead of a comparison table, and no
+first-run block — a single run's first shape is the latest
+run's block just above, so there is nothing more to show.
 
 With `--trend-out PATH` the same chart is also written to a
 Markdown file — the exact text printed to stdout — so the trend
@@ -712,7 +717,10 @@ histograms from the latest run that recorded it (or a note under
 per-op histogram comparison under `histogram_comparison` (each
 op's p50/p99 in the first and last runs that recorded the step,
 the p99 change, and the bucket drift, or a note naming why there
-is none) — the same per-step trend sections the Markdown chart
+is none), and the first run's per-op histograms under
+`first_histograms_by_op` — the same shapes the Markdown chart
+draws next to the comparison table, present exactly when the
+chart shows a first-run block — the same per-step trend sections the Markdown chart
 renders, built from the same shared helper, so a script reading
 the trend JSON sees what the chart shows for the same step — plus one per-step sweep section per sweep step that ran in the window under `sweeps`:
 the step's best and worst runs by the step's own ops/sec, the
@@ -1340,12 +1348,23 @@ make test
   instead of a table. The step's p50 and p99 are read off its
   histogram buckets (the upper edge of the bucket holding the
   percentile rank), and the JSON flags that with
-  `percentiles_from_histograms`. Done in 0.62.0. Next: the first
-  run's per-op histogram block in each sweep-step trend section,
-  drawn with the same shared helper as the latest run's block, so
-  the two shapes can be read side by side next to the comparison
-  table, like the overall trend's first-run block sits next to
-  its comparison.
+  `percentiles_from_histograms`. Done in 0.62.0. Each sweep-step
+  trend section also carries the first run's per-op histogram
+  block next to the comparison table, drawn with the same shared
+  helper as the latest run's block, so the two shapes can be read
+  side by side next to the comparison table, like the overall
+  trend's first-run block sits next to its comparison — and the
+  trend JSON carries the same first run's histograms under
+  `first_histograms_by_op` in each `sweep_trends` entry, present
+  exactly when the chart shows a first-run block, so a script
+  reading the JSON sees what the chart shows. A step recorded in
+  only one run in the window carries no first-run block and no
+  field — its first shape is the latest run's block just above.
+  Done in 0.63.0. Next: the first run's per-op histogram block in
+  each per-op trend section, drawn with the same shared helper as
+  the comparison table's rows, so that op's two shapes can be read
+  side by side next to its comparison, like each sweep-step
+  section's first-run block sits next to its own comparison.
 - `--compare-file-json PATH`: with `--compare-file`, also
   write the comparison as a standalone JSON file — the exact
   dict `compare_results` returns (the same one the run's JSON

@@ -1167,9 +1167,14 @@ class TestSweepStepHistograms(unittest.TestCase):
         self.assertIn("SET (300 ops)", text)
         self.assertIn("GET (400 ops)", text)
         self.assertIn("- <= 0.1 ms: 300 (100.0%)", text)
-        # The first run's shape is not drawn — only the latest
-        # run's is.
-        self.assertNotIn("SET (500 ops)", text)
+        # Since 0.63.0 the first run's shape is drawn too — in
+        # its own block next to the comparison table, not in
+        # the latest-run block above: the first run's SET
+        # count (500 ops) reads in the first-run block.
+        self.assertIn(
+            "#### Keyspace sweep — 100 keys — per-op latency "
+            "histogram — first run (", text)
+        self.assertIn("SET (500 ops)", text)
 
     def test_step_histogram_uses_last_run_that_recorded_it(self):
         # A step that stopped running still shows the shape it
@@ -1526,6 +1531,174 @@ class TestSweepStepTrendComparison(unittest.TestCase):
         rows = {row["op"]: row
                 for row in step["histogram_comparison"]["rows"]}
         self.assertEqual(rows["SET"]["p99_change_pct"], -60.0)
+
+
+class TestSweepStepTrendFirstRunHistogram(unittest.TestCase):
+    def _step_record(self, ops_per_sec, set_count=500,
+                     get_count=400, keys=100, clients=None,
+                     value_size=None, pipeline=None, mix=None,
+                     histograms="real"):
+        # One recorded run whose sweep step(s) carry per-op
+        # histograms: SET set_count samples and GET get_count
+        # samples, all in the <= 0.1 ms bucket — the counts
+        # differ per run, so the first run's block reads
+        # separately from the latest run's. ``histograms``
+        # picks the shape under test: "real" (valid bucket
+        # lists) or "missing" (no key at all — a run recorded
+        # before 0.49.0).
+        result = _make_result(ops_per_sec=ops_per_sec)
+        step = {"keys": keys, "ops": 1000,
+                "ops_per_sec": ops_per_sec,
+                "mean_ms": 0.020, "p99_ms": 0.020}
+        if histograms == "real":
+            step["histograms_by_op"] = {
+                "SET": [{"upper_ms": 0.1, "count": set_count}],
+                "GET": [{"upper_ms": 0.1, "count": get_count}],
+            }
+        result.sweep = [step]
+        if clients is not None:
+            client_step = dict(step)
+            client_step["clients"] = clients
+            del client_step["keys"]
+            result.client_sweep = [client_step]
+        if value_size is not None:
+            value_step = dict(step)
+            value_step["value_size"] = value_size
+            del value_step["keys"]
+            result.value_sweep = [value_step]
+        if pipeline is not None:
+            pipeline_step = dict(step)
+            pipeline_step["pipeline"] = pipeline
+            del pipeline_step["keys"]
+            result.pipeline_sweep = [pipeline_step]
+        if mix is not None:
+            mix_step = dict(step)
+            mix_step["mix"] = mix
+            del mix_step["keys"]
+            result.mix_sweep = [mix_step]
+        return build_record(result, _make_workload(), "kvbench")
+
+    def _two_runs(self):
+        # The first run's SET shape is 400 samples, the last
+        # run's 600 — the same op, different counts, so the
+        # first-run block and the latest-run block cannot be
+        # mistaken for each other.
+        return [
+            self._step_record(40000.0, set_count=400, get_count=300),
+            self._step_record(60000.0, set_count=600, get_count=700),
+        ]
+
+    def test_first_run_block_follows_comparison_table(self):
+        # The core of the feature: each sweep-step trend
+        # section ends with the first run's per-op histogram
+        # block next to the comparison table — drawn with the
+        # same shared helper as the latest run's block, so the
+        # two shapes can be read side by side. The first-run
+        # block shows the first run's counts (SET 400 ops),
+        # the latest-run block the last run's (SET 600 ops),
+        # and the block sits after the comparison table.
+        text = format_trend(self._two_runs())
+        self.assertIn(
+            "#### Keyspace sweep — 100 keys — per-op latency "
+            "histogram — first run (", text)
+        self.assertIn("SET (400 ops)", text)
+        self.assertIn("SET (600 ops)", text)
+        self.assertLess(
+            text.index("per-op histogram comparison — first vs "
+                       "last run"),
+            text.index("per-op latency histogram — first run"))
+
+    def test_first_run_histograms_in_trend_json(self):
+        # The trend JSON carries the same first run's
+        # histograms under first_histograms_by_op on the
+        # step's sweep_trends entry — the same shapes the
+        # Markdown chart draws, cleaned by the same shared
+        # helper, so a script reading the JSON sees what the
+        # chart shows.
+        entries = self._two_runs()
+        step = trend_comparison(entries)["backends"][0][
+            "sweep_trends"][0]
+        self.assertEqual(step["first_histograms_by_op"], {
+            "SET": [{"upper_ms": 0.1, "count": 400}],
+            "GET": [{"upper_ms": 0.1, "count": 300}],
+        })
+        self.assertEqual(step["histograms_by_op"], {
+            "SET": [{"upper_ms": 0.1, "count": 600}],
+            "GET": [{"upper_ms": 0.1, "count": 700}],
+        })
+
+    def test_first_run_block_all_five_kinds(self):
+        # Every sweep kind's trend section carries its own
+        # first-run block — the helper is shared across kinds,
+        # not special-cased per kind — and the JSON carries
+        # the first run's histograms for each.
+        entries = [
+            self._step_record(40000.0, keys=100, clients=4,
+                              value_size=128, pipeline=5,
+                              mix="90:10", set_count=400),
+            self._step_record(50000.0, keys=100, clients=4,
+                              value_size=128, pipeline=5,
+                              mix="90:10", set_count=600),
+        ]
+        text = format_trend(entries)
+        self.assertEqual(
+            text.count("per-op latency histogram — first run ("),
+            5)
+        trends = trend_comparison(entries)["backends"][0][
+            "sweep_trends"]
+        self.assertEqual(len(trends), 5)
+        for step in trends:
+            self.assertEqual(
+                step["first_histograms_by_op"]["SET"],
+                [{"upper_ms": 0.1, "count": 400}])
+
+    def test_single_run_has_no_first_run_block(self):
+        # One run recorded the step, so its first run is its
+        # latest run: the latest block just above already shows
+        # that shape, so the section carries no first-run block
+        # and the JSON carries no first-run field.
+        entries = [self._step_record(50000.0, set_count=500)]
+        text = format_trend(entries)
+        self.assertNotIn(
+            "per-op latency histogram — first run (", text)
+        step = trend_comparison(entries)["backends"][0][
+            "sweep_trends"][0]
+        self.assertNotIn("first_histograms_by_op", step)
+
+    def test_before_0_49_has_no_first_run_block(self):
+        # Both runs' steps were recorded before 0.49.0 and
+        # carry no histograms_by_op key: the section names
+        # that instead of a first-run block, in both views.
+        entries = [self._step_record(40000.0, histograms="missing"),
+                   self._step_record(50000.0, histograms="missing")]
+        text = format_trend(entries)
+        self.assertNotIn(
+            "per-op latency histogram — first run (", text)
+        step = trend_comparison(entries)["backends"][0][
+            "sweep_trends"][0]
+        self.assertNotIn("first_histograms_by_op", step)
+
+    def test_first_run_is_first_run_that_recorded_the_step(self):
+        # The middle run recorded no sweep at all, so the
+        # first-run block shows the first run's shape — SET
+        # 400 ops — not the middle run's, and the JSON carries
+        # the same first run's histograms.
+        entries = [
+            self._step_record(40000.0, set_count=400),
+            build_record(_make_result(ops_per_sec=50000.0),
+                         _make_workload(), "kvbench"),
+            self._step_record(60000.0, set_count=600),
+        ]
+        text = format_trend(entries)
+        self.assertIn("SET (400 ops)", text)
+        self.assertIn(
+            "#### Keyspace sweep — 100 keys — per-op latency "
+            "histogram — first run (", text)
+        step = trend_comparison(entries)["backends"][0][
+            "sweep_trends"][0]
+        self.assertEqual(
+            step["first_histograms_by_op"]["SET"],
+            [{"upper_ms": 0.1, "count": 400}])
 
 
 class TestWriteTrend(unittest.TestCase):
