@@ -671,7 +671,8 @@ class TestCompareResults(unittest.TestCase):
         comparison = compare_results(
             [_result_with_ops()],
             _baseline_doc(ops_per_sec=8_000, p99_ms=0.12,
-                          per_op=_baseline_per_op()),
+                          per_op=_baseline_per_op(),
+                          histograms_by_op=_baseline_histograms()),
             _workload_dict(_workload()), "prev.json")
         best_worst = comparison["entries"][0]["best_worst"]
         self.assertEqual(best_worst["best_by_ops_sec"]["op"], "SET")
@@ -687,6 +688,44 @@ class TestCompareResults(unittest.TestCase):
         self.assertAlmostEqual(
             best_worst["worst_by_p99"]["p99_delta_pct"], 100.0)
         self.assertEqual(best_worst["notes"], [])
+        # Each pick carries its op's latency histogram from both
+        # runs: SET ran at 0.1 ms in both, so its two shapes
+        # match; GET ran at 0.2 ms now and 0.4 ms before, so its
+        # two shapes differ — the test can tell them apart.
+        self.assertEqual(
+            best_worst["best_by_ops_sec"]["histogram"],
+            histogram([100_000] * 50))
+        self.assertEqual(
+            best_worst["best_by_ops_sec"]["baseline_histogram"],
+            histogram([100_000] * 50))
+        self.assertEqual(
+            best_worst["worst_by_p99"]["histogram"],
+            histogram([200_000] * 50))
+        self.assertEqual(
+            best_worst["worst_by_p99"]["baseline_histogram"],
+            histogram([400_000] * 50))
+
+    def test_best_worst_without_baseline_histograms(self):
+        # A baseline with per-op stats but no histograms — a
+        # report written before 0.32.0, or a history baseline —
+        # still picks best/worst ops, but each pick carries only
+        # this run's histogram and None for the baseline's.
+        comparison = compare_results(
+            [_result_with_ops()],
+            _baseline_doc(ops_per_sec=8_000, p99_ms=0.12,
+                          per_op=_baseline_per_op()),
+            _workload_dict(_workload()), "prev.json")
+        best_worst = comparison["entries"][0]["best_worst"]
+        self.assertEqual(
+            best_worst["best_by_ops_sec"]["histogram"],
+            histogram([100_000] * 50))
+        self.assertIsNone(
+            best_worst["best_by_ops_sec"]["baseline_histogram"])
+        self.assertEqual(
+            best_worst["worst_by_p99"]["histogram"],
+            histogram([200_000] * 50))
+        self.assertIsNone(
+            best_worst["worst_by_p99"]["baseline_histogram"])
 
     def test_best_worst_single_op(self):
         # Only SET ran: the best and worst op are the same op,
@@ -1044,7 +1083,8 @@ class TestComparisonInReports(unittest.TestCase):
         comparison = compare_results(
             [_result_with_ops()],
             _baseline_doc(ops_per_sec=8_000, p99_ms=0.12,
-                          per_op=_baseline_per_op()),
+                          per_op=_baseline_per_op(),
+                          histograms_by_op=_baseline_histograms()),
             _workload_dict(_workload()), "prev.json")
         text = render_markdown([_result_with_ops()], _workload(),
                                "kvbench", comparison)
@@ -1055,6 +1095,40 @@ class TestComparisonInReports(unittest.TestCase):
             "previous run", text)
         self.assertIn("| Ops/sec Δ | SET (+25.0%) | GET (+0.0%) |", text)
         self.assertIn("| p99 Δ | SET (-50.0%) | GET (+100.0%) |", text)
+        # Each best/worst op's latency histogram from both runs,
+        # drawn under the table: SET is best on both measures
+        # and GET worst on both, so each op renders once, with
+        # a now block and a prev block.
+        for op in ("SET", "GET"):
+            self.assertIn(
+                f"##### cinder (127.0.0.1:6379) — {op} latency "
+                "histogram (now)", text)
+            self.assertIn(
+                f"##### cinder (127.0.0.1:6379) — {op} latency "
+                "histogram (prev)", text)
+        self.assertEqual(
+            text.count("— SET latency histogram (now)"), 1)
+        self.assertEqual(
+            text.count("— GET latency histogram (now)"), 1)
+
+    def test_markdown_best_worst_without_baseline_histograms(self):
+        # A baseline with per-op stats but no histograms renders
+        # only this run's shape for each best/worst op — no prev
+        # block, and no crash on the missing shape.
+        comparison = compare_results(
+            [_result_with_ops()],
+            _baseline_doc(ops_per_sec=8_000, p99_ms=0.12,
+                          per_op=_baseline_per_op()),
+            _workload_dict(_workload()), "prev.json")
+        text = render_markdown([_result_with_ops()], _workload(),
+                               "kvbench", comparison)
+        self.assertIn(
+            "##### cinder (127.0.0.1:6379) — SET latency "
+            "histogram (now)", text)
+        self.assertIn(
+            "##### cinder (127.0.0.1:6379) — GET latency "
+            "histogram (now)", text)
+        self.assertNotIn("latency histogram (prev)", text)
 
     def test_markdown_best_worst_identical_runs_notes_it(self):
         identical_per_op = {
@@ -1089,7 +1163,8 @@ class TestComparisonInReports(unittest.TestCase):
             compare_results(
                 [_result_with_ops()],
                 _baseline_doc(ops_per_sec=8_000, p99_ms=0.12,
-                              per_op=_baseline_per_op()),
+                              per_op=_baseline_per_op(),
+                              histograms_by_op=_baseline_histograms()),
                 _workload_dict(_workload()), "prev.json")))
         best_worst = parsed["comparison"]["entries"][0]["best_worst"]
         # The JSON carries the same picks the Markdown table
@@ -1101,6 +1176,21 @@ class TestComparisonInReports(unittest.TestCase):
         self.assertAlmostEqual(
             best_worst["worst_by_p99"]["p99_delta_pct"], 100.0)
         self.assertEqual(best_worst["notes"], [])
+        # ... and the same picks' latency histograms from both
+        # runs, so a script reading the JSON sees what the
+        # Markdown blocks draw.
+        self.assertEqual(
+            best_worst["best_by_ops_sec"]["histogram"],
+            histogram([100_000] * 50))
+        self.assertEqual(
+            best_worst["best_by_ops_sec"]["baseline_histogram"],
+            histogram([100_000] * 50))
+        self.assertEqual(
+            best_worst["worst_by_p99"]["histogram"],
+            histogram([200_000] * 50))
+        self.assertEqual(
+            best_worst["worst_by_p99"]["baseline_histogram"],
+            histogram([400_000] * 50))
 
     def test_json_carries_per_op_histograms(self):
         parsed = json.loads(render_json(

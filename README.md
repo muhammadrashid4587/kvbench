@@ -861,7 +861,14 @@ most and the op whose p99 fell most, and the other end of each —
 under `comparison.entries[].best_worst` in JSON and as a table
 under the per-op table in Markdown, built from the same per-op
 deltas, so the two views cannot disagree and the op that moved
-most reads at a glance. A comparison with a single op, or two
+most reads at a glance. Each best/worst op also carries its
+per-operation latency histogram from both runs — the current
+run's buckets under `histogram` and the baseline run's under
+`baseline_histogram` on each pick — drawn as now/prev blocks
+under the table in Markdown, so the op that moved most also
+shows how its latency shape moved; the same op picked on both
+measures renders once, and a baseline that carries no per-op
+histograms renders only this run's shape. A comparison with a single op, or two
 identical runs, carries a note saying so instead of a spread, and
 a baseline that carries no per-op stats carries a note saying
 there is no best or worst op. A history baseline
@@ -1265,9 +1272,20 @@ make test
   spread, an op the baseline never ran is left out of the picks
   with a note naming it, and a baseline that carries no per-op
   stats carries a note saying there is no best or worst op.
-  Done in 0.58.0. Next: the best and worst ops' per-op latency
-  histograms from both runs, so the op that moved most also
-  shows how its latency shape moved.
+  Done in 0.58.0. Each best/worst op also carries its
+  per-operation latency histogram from both runs — the current
+  run's buckets under `histogram` and the baseline run's under
+  `baseline_histogram` on each pick, drawn as now/prev blocks
+  under the best/worst table in Markdown, built by the same
+  shared helper so the JSON and Markdown views cannot disagree
+  and the op that moved most also shows how its latency shape
+  moved; the same op picked on both measures renders once, and
+  a baseline that carries no per-op histograms (a report before
+  0.32.0, or a history baseline) renders only this run's shape.
+  Done in 0.59.0. Next: a per-op histogram comparison table for
+  the best/worst ops — p50/p99 in both runs, the p99 change and
+  the bucket drift, like the trend view's histogram comparison
+  — so the shape move reads as numbers as well as bars.
 - `--compare-file-json PATH`: with `--compare-file`, also
   write the comparison as a standalone JSON file — the exact
   dict `compare_results` returns (the same one the run's JSON

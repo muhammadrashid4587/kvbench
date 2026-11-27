@@ -8,9 +8,11 @@ plus a per-operation breakdown — each op's p99 and ops/sec delta
 versus the baseline — and a best/worst op section per backend —
 the op whose ops/sec rose most and the op whose p99 fell most,
 and the other end of each, with a note when a comparison has a
-single op or identical runs — and the per-operation latency
-histograms of both runs, so a p99 move names the op whose latency
-shape moved.
+single op or identical runs — and each best/worst op carries its
+per-operation latency histogram from both runs, so the op that
+moved most also shows how its latency shape moved — and the
+per-operation latency histograms of both runs, so a p99 move
+names the op whose latency shape moved.
 ``--regression-threshold PCT`` turns the comparison into a gate:
 the run exits non-zero when any backend's ops/sec fell by more than
 PCT, or its p99 rose by more than PCT, versus the baseline file.
@@ -291,7 +293,8 @@ def _per_op_deltas(current_per_op, baseline_per_op):
     return deltas
 
 
-def _best_worst_per_op(per_op):
+def _best_worst_per_op(per_op, current_histograms=None,
+                       baseline_histograms=None):
     """Best and worst op of a comparison, by ops/sec and p99 delta.
 
     ``per_op`` is the per-op delta rows :func:`_per_op_deltas`
@@ -302,7 +305,18 @@ def _best_worst_per_op(per_op):
     ran carry deltas, so the picks only cover those; ties keep
     the earliest op in SET/GET/INCR/DEL order, so the pick is
     stable. Each pick carries the op and both of its deltas, so
-    a script reading it sees the pick's full story.
+    a script reading it sees the pick's full story — and that
+    op's latency histogram from both runs, so the op that moved
+    most also shows how its latency shape moved: the current
+    run's buckets under ``histogram`` (from
+    ``current_histograms``, the run's ``histograms_by_op``) and
+    the baseline run's under ``baseline_histogram`` (from
+    ``baseline_histograms``, the validated baseline mapping —
+    a history baseline or an older report carries none, so the
+    field is None and only the current run's shape renders).
+    An op with no histogram in a run reads as None for that run
+    instead of crashing the comparison on a shape it cannot
+    draw.
 
     Returns a JSON-serializable dict with ``best_by_ops_sec``,
     ``worst_by_ops_sec``, ``best_by_p99`` and ``worst_by_p99``
@@ -315,11 +329,15 @@ def _best_worst_per_op(per_op):
                 if row.get("ops_sec_delta_pct") is not None]
     p99_rows = [row for row in per_op
                 if row.get("p99_delta_pct") is not None]
+    current = _histograms_or_none(current_histograms)
+    baseline = _histograms_or_none(baseline_histograms)
 
     def _pick(row):
         return {"op": row["op"],
                 "ops_sec_delta_pct": row["ops_sec_delta_pct"],
-                "p99_delta_pct": row["p99_delta_pct"]}
+                "p99_delta_pct": row["p99_delta_pct"],
+                "histogram": (current or {}).get(row["op"]),
+                "baseline_histogram": (baseline or {}).get(row["op"])}
 
     best_by_ops_sec = None
     worst_by_ops_sec = None
@@ -439,7 +457,10 @@ def compare_results(results, baseline_doc, current_workload,
     each, built by the shared :func:`_best_worst_per_op` helper
     the Markdown view renders from too, so the two views cannot
     disagree — with notes when a comparison has a single op or
-    identical runs, or the baseline carries no per-op stats.
+    identical runs, or the baseline carries no per-op stats —
+    and each pick carries that op's latency histogram from both
+    runs, so the op that moved most also shows how its latency
+    shape moved.
     Each entry also carries the per-operation latency histograms
     of both runs — the current run's under
     ``histograms_by_op`` (the same log-spaced buckets as the
@@ -491,6 +512,8 @@ def compare_results(results, baseline_doc, current_workload,
         per_op = _per_op_deltas(
             result.per_op_summary,
             _per_op_or_none(baseline.get("per_op")))
+        baseline_hists = _histograms_or_none(
+            baseline.get("histograms_by_op"))
         entries.append({
             "name": result.name,
             "ops_per_sec": result.ops_per_sec,
@@ -507,11 +530,13 @@ def compare_results(results, baseline_doc, current_workload,
             # The best/worst picks are built from the entry's own
             # per-op rows, so the section cannot disagree with the
             # table just above it — and the Markdown view renders
-            # from this same dict.
-            "best_worst": _best_worst_per_op(per_op),
+            # from this same dict. Each pick also carries its op's
+            # latency histogram from both runs, so the op that
+            # moved most shows how its latency shape moved.
+            "best_worst": _best_worst_per_op(
+                per_op, result.per_op_histograms, baseline_hists),
             "histograms_by_op": result.per_op_histograms,
-            "baseline_histograms_by_op": _histograms_or_none(
-                baseline.get("histograms_by_op")),
+            "baseline_histograms_by_op": baseline_hists,
         })
     differences = workload_differences(
         current_workload, baseline_doc.get("workload"))

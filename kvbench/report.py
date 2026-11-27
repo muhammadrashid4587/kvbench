@@ -861,8 +861,11 @@ def _best_worst_op_lines(name, best_worst):
     the op whose ops/sec rose most and the op whose p99 fell
     most, and the other end of each — so the Markdown renders
     from the same picks the JSON report carries, and the two
-    views cannot disagree. A comparison built before 0.58.0
-    carries no ``best_worst`` dict and renders nothing. A pick
+    views cannot disagree. Each pick also carries its op's
+    latency histogram from both runs, so the section draws the
+    now and prev shapes for the op that moved most, right under
+    the table. A comparison built before 0.59.0 carries picks
+    with no histograms and renders only the table. A pick
     with no delta for a measure shows n/a for that measure.
     """
     if not best_worst:
@@ -898,6 +901,32 @@ def _best_worst_op_lines(name, best_worst):
         lines.append(f"- {note}")
     if best_worst.get("notes"):
         lines.append("")
+    # Each best/worst op's latency histogram from both runs, so
+    # the op that moved most also shows how its latency shape
+    # moved — rendered from the same pick dicts the JSON report
+    # carries, so the two views cannot disagree. The same op
+    # can be best on one measure and worst on another, so each
+    # op renders once, in pick order. A baseline that carries no
+    # per-op histograms renders only this run's shape; the
+    # comparison section below already notes why the baseline's
+    # are missing.
+    seen = set()
+    for key in ("best_by_ops_sec", "worst_by_ops_sec",
+                "best_by_p99", "worst_by_p99"):
+        pick = best_worst.get(key)
+        if not pick or pick["op"] in seen:
+            continue
+        seen.add(pick["op"])
+        if pick.get("histogram"):
+            lines += _per_op_histogram_block(
+                f"##### {name} — {pick['op']} latency histogram "
+                "(now)",
+                {pick["op"]: pick["histogram"]})
+        if pick.get("baseline_histogram"):
+            lines += _per_op_histogram_block(
+                f"##### {name} — {pick['op']} latency histogram "
+                "(prev)",
+                {pick["op"]: pick["baseline_histogram"]})
     return lines
 
 
@@ -911,7 +940,8 @@ def _comparison_lines(comparison):
     — one row per op that ran — and a best/worst op section per
     compared backend — the op whose ops/sec rose most and the
     op whose p99 fell most, and the other end of each, with a
-    note when a comparison has a single op or identical runs —
+    note when a comparison has a single op or identical runs,
+    and each best/worst op's latency histogram from both runs —
     both built from the same dicts the JSON report carries, so
     the views cannot disagree — and then by a per-operation
     latency histogram per compared backend — the
