@@ -1305,13 +1305,23 @@ make test
   before 0.32.0, or a history baseline) renders a note naming
   the reason instead of a table. The `--compare-file-json`
   export carries it too, since it writes the same comparison
-  dict. Done in 0.60.0. Next: a per-op histogram comparison
-  table in the Markdown per-op trend sections — the trend JSON
-  already carries each op's first-to-last comparison since
-  0.55.0, but the Markdown per-op sections render no table,
-  so a reader of the chart sees the per-op numbers only in
-  JSON; render the same shared rows under each per-op section
-  with the same helper the trend and compare views use.
+  dict. Done in 0.60.0. A per-op histogram comparison table in
+  the Markdown per-op trend sections — each op's section ends
+  with its first-to-last comparison, that op's p50/p99 in the
+  first and last runs that ran it, the p99 change and the bucket
+  drift, rendered from the same shared rows the trend JSON
+  carries for the op, so a reader of the chart sees the per-op
+  numbers without parsing JSON and the two views cannot
+  disagree; a section whose op ran in only one run in the
+  window, or whose first or last run that ran the op was
+  recorded before 0.43.0, recorded no per-op latencies, or
+  carries malformed histograms, renders a note naming the
+  reason instead of a table. Done in 0.61.0. Next: the same
+  first-to-last per-op histogram comparison for each
+  sweep-step trend section — in the Markdown chart and under
+  `histogram_comparison` in each trend-JSON `sweep_trends`
+  entry, built from the same shared sweep-step rows the
+  best/worst view already uses.
 - `--compare-file-json PATH`: with `--compare-file`, also
   write the comparison as a standalone JSON file — the exact
   dict `compare_results` returns (the same one the run's JSON
@@ -1352,7 +1362,8 @@ make test
   the op was recorded before 0.43.0, recorded no per-op
   latencies, or carries malformed histograms, carries a note
   naming the reason instead of rows. The Markdown per-op
-  trend sections carry no comparison table. Done in 0.55.0.
+  trend sections render the same comparison table since
+  0.61.0. Done in 0.55.0.
 - Per-sweep-step trend sections in the `--trend-json` output:
   each backend's `sweep_trends` list carries one entry per sweep
   step that ran in the trend window — the step's runs table

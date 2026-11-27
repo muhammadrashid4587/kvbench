@@ -765,6 +765,125 @@ class TestFormatTrend(unittest.TestCase):
             "+0.0 pp (<= 0.1 ms) |",
             text)
 
+    def test_per_op_trend_sections_carry_histogram_comparison(self):
+        # Two mixed runs; the latest run's SET latencies are
+        # slower (200_000 ns lands in the 0.25 ms bucket, the
+        # first run's 20_000 ns in the 0.1 ms bucket), while GET
+        # and INCR stay put — each per-op section ends with its
+        # own first-to-last comparison table, one row for that
+        # op, from the same shared rows the trend JSON carries,
+        # so the chart and the JSON cannot disagree.
+        workload = _make_workload()
+        first = _make_mixed_result(ops_per_sec=40000.0)
+        latest = _make_result(
+            ops=1000, ops_per_sec=50000.0,
+            latencies_by_op={
+                "SET": [200_000] * 500,
+                "GET": [20_000] * 400,
+                "INCR": [20_000] * 100,
+            })
+        entries = [
+            build_record(first, workload, "kvbench"),
+            build_record(latest, workload, "kvbench"),
+        ]
+        text = format_trend(entries)
+        self.assertIn(
+            "#### SET histogram comparison — first vs last run",
+            text)
+        self.assertIn(
+            "#### GET histogram comparison — first vs last run",
+            text)
+        self.assertIn(
+            "#### INCR histogram comparison — first vs last run",
+            text)
+        self.assertEqual(
+            text.count("#### SET histogram comparison"), 1)
+        # SET p50/p99 0.020 -> 0.200 ms (+900.0%); its whole
+        # share moved out of the <= 0.1 ms bucket.
+        self.assertIn(
+            "| SET | 0.020 | 0.200 | 0.020 | 0.200 | +900.0% | "
+            "-100.0 pp (<= 0.1 ms) |",
+            text)
+        # GET did not move at all: +0.0% and no bucket drift.
+        self.assertIn(
+            "| GET | 0.020 | 0.020 | 0.020 | 0.020 | +0.0% | "
+            "+0.0 pp (<= 0.1 ms) |",
+            text)
+        # The JSON view carries the same row for SET.
+        comparison = trend_comparison(entries)
+        set_rows = comparison["backends"][0]["per_op"]["SET"][
+            "histogram_comparison"]["rows"]
+        self.assertEqual(len(set_rows), 1)
+        self.assertEqual(set_rows[0]["p99_change_pct"], 900.0)
+        self.assertEqual(set_rows[0]["bucket_drift_pp"], -100.0)
+
+    def test_per_op_trend_comparison_with_single_run_names_no_comparison(self):
+        # One run in the window ran SET, so there is nothing to
+        # compare for it: the SET section says so instead of
+        # rendering a comparison table.
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(), workload, "kvbench"),
+        ]
+        text = format_trend(entries)
+        self.assertIn(
+            "Only one run in the trend window ran SET, so there "
+            "is no first-to-last histogram comparison for SET.",
+            text)
+        self.assertNotIn(
+            "#### SET histogram comparison — first vs last run",
+            text)
+
+    def test_per_op_trend_comparison_without_histograms_names_the_reason(self):
+        # The first run was recorded before 0.43.0 and carries no
+        # "histograms_by_op" key: the per-op sections render a
+        # note naming that instead of a comparison table.
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(_make_mixed_result(ops_per_sec=50000.0),
+                         workload, "kvbench"),
+        ]
+        del entries[0]["histograms_by_op"]
+        text = format_trend(entries)
+        self.assertIn("recorded before 0.43.0", text)
+        self.assertIn(
+            "no first-to-last histogram comparison is shown", text)
+        self.assertNotIn(
+            "#### SET histogram comparison — first vs last run",
+            text)
+
+    def test_per_op_trend_comparison_skips_runs_without_that_op(self):
+        # A read-only last run never ran SET, so only the first
+        # run ran it: the SET section carries a note, while the
+        # GET section — which both runs ran — still renders its
+        # comparison table.
+        workload = _make_workload()
+        entries = [
+            build_record(_make_mixed_result(ops_per_sec=40000.0),
+                         workload, "kvbench"),
+            build_record(_make_result(
+                ops_per_sec=50000.0,
+                latencies_by_op={"GET": [20_000] * 1000}),
+                workload, "kvbench"),
+        ]
+        text = format_trend(entries)
+        self.assertIn(
+            "Only one run in the trend window ran SET, so there "
+            "is no first-to-last histogram comparison for SET.",
+            text)
+        self.assertNotIn(
+            "#### SET histogram comparison — first vs last run",
+            text)
+        self.assertIn(
+            "#### GET histogram comparison — first vs last run",
+            text)
+        self.assertIn(
+            "| GET | 0.020 | 0.020 | 0.020 | 0.020 | +0.0% | "
+            "+0.0 pp (<= 0.1 ms) |",
+            text)
+
     def test_each_backend_gets_its_own_latest_histogram(self):
         workload = _make_workload()
         entries = [
