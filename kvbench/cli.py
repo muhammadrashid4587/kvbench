@@ -634,6 +634,13 @@ def build_parser():
                         "(the same comparison the run's JSON report "
                         "carries under 'comparison'), so a script can "
                         "read it without parsing the report")
+    parser.add_argument("--compare-file-json", default=None,
+                        metavar="PATH",
+                        help="with --compare-file, also write the "
+                        "comparison as standalone JSON to this file "
+                        "(the same comparison the run's JSON report "
+                        "carries under 'comparison'), so a script can "
+                        "read it without parsing the report")
     parser.add_argument("--compare-same-workload", action="store_true",
                         help="with --compare-history, only consider "
                         "recorded runs whose workload matches this "
@@ -745,6 +752,13 @@ def main(argv=None):
               "--compare-history: it writes the comparison against "
               "a history run to a file, and there is no comparison "
               "without --compare-history",
+              file=sys.stderr)
+        return 2
+    if args.compare_file_json and args.compare_file is None:
+        print("kvbench: --compare-file-json needs "
+              "--compare-file: it writes the comparison against "
+              "a previous run's JSON report to a file, and there "
+              "is no comparison without --compare-file",
               file=sys.stderr)
         return 2
     if not args.prune:
@@ -1288,6 +1302,9 @@ def main(argv=None):
     if args.compare_history_json and comparison is not None:
         write_comparison_json(args.compare_history_json, comparison)
         print(f"Comparison JSON written to {args.compare_history_json}")
+    if args.compare_file_json and comparison is not None:
+        write_comparison_json(args.compare_file_json, comparison)
+        print(f"Comparison JSON written to {args.compare_file_json}")
     if args.csv:
         write_csv(results, args.csv)
         print(f"CSV written to {args.csv}")

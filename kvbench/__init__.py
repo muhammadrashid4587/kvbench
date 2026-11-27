@@ -1,3 +1,3 @@
 """kvbench — benchmark CLI for Redis-compatible key-value stores."""
 
-__version__ = "0.56.0"
+__version__ = "0.57.0"

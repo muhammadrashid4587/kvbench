@@ -1100,6 +1100,32 @@ class TestCompareFileCli(unittest.TestCase):
                     for bucket in buckets)
                 self.assertEqual(total, 100)
 
+    def test_compare_file_json_end_to_end(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            baseline_json = self._run_baseline(tmp)
+            out = os.path.join(tmp, "run.md")
+            export = os.path.join(tmp, "nested", "comparison.json")
+            code = main(self._argv(["--ops", "100", "--clients", "1",
+                                    "--output", out,
+                                    "--compare-file", baseline_json,
+                                    "--compare-file-json", export]))
+            self.assertEqual(code, 0)
+            with open(export, encoding="utf-8") as f:
+                exported = json.load(f)
+            parsed = json.loads(open(os.path.join(tmp, "run.json"),
+                                     encoding="utf-8").read())
+            # The export is the exact comparison the JSON report
+            # carries, so the two cannot disagree.
+            self.assertEqual(exported, parsed["comparison"])
+            self.assertEqual(exported["source"], "report")
+            self.assertEqual(len(exported["entries"]), 1)
+
+    def test_compare_file_json_without_compare_file(self):
+        code = main(self._argv(["--ops", "10",
+                                "--compare-file-json",
+                                "comparison.json"]))
+        self.assertEqual(code, 2)
+
     def test_regression_threshold_exits_3(self):
         with tempfile.TemporaryDirectory() as tmp:
             # A baseline with absurdly fast numbers, so the real run
