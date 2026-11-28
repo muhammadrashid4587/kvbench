@@ -108,7 +108,14 @@ def load_history_baseline(path, selector, workload=None):
     unchanged. Records since 0.22.0 also carry per-op ops/sec
     and p99 under ``per_op``, which is passed through so the
     per-op comparison works the same way as for a report
-    baseline; older records carry none.
+    baseline; older records carry none. Records since 0.43.0
+    also carry per-op latency histograms under
+    ``histograms_by_op``, which is passed through the same way,
+    so the baseline's histogram blocks and both histogram
+    comparison tables render for a history baseline too —
+    records before 0.43.0 carry none, and a malformed mapping
+    is ignored downstream by :func:`compare_results`, so those
+    comparisons still render the notes naming the reason.
 
     Raises ValueError when the file does not exist, holds no runs,
     the selector is invalid, an index is out of range for a
@@ -187,6 +194,13 @@ def load_history_baseline(path, selector, workload=None):
         # comparison as a report baseline, so a history baseline
         # still names the op that moved.
         "per_op": record.get("per_op"),
+        # Per-op latency histograms, when the record carries them
+        # (records since 0.43.0 do): the same baseline shapes as
+        # a report baseline, so the prev histogram blocks and
+        # both histogram comparison tables render for a history
+        # baseline too. Records before 0.43.0 carry none, and a
+        # malformed mapping is ignored downstream.
+        "histograms_by_op": record.get("histograms_by_op"),
     } for record in chosen]
     generated = max(
         (record.get("timestamp") or "" for record in chosen),
@@ -683,9 +697,10 @@ def compare_results(results, baseline_doc, current_workload,
     single-run report's, from the same helper, so the comparison
     cannot disagree with it) and the baseline run's under
     ``baseline_histograms_by_op`` when the baseline report
-    carries them (JSON reports since 0.32.0 do); a history
-    baseline or an older report carries none, so the field is
-    None and only the current run's histograms render. Backends
+    carries them (JSON reports since 0.32.0 do, and history
+    records since 0.43.0 do); a history baseline recorded
+    before 0.43.0 or an older report carries none, so the field
+    is None and only the current run's histograms render. Backends
     present in only one of the two runs are listed as unmatched
     instead of being silently dropped.
     ``source`` is ``"report"`` for a baseline loaded from a JSON
@@ -787,11 +802,12 @@ def write_comparison_json(path, comparison):
     ``comparison`` — so the file cannot disagree with the
     report: same entries, same per-op deltas, same per-op
     histograms of both runs, same workload-match verdict, same
-    regression flags. A history baseline carries no per-op
-    histograms, and a baseline recorded before 0.22.0 carries
-    no per-op stats, so those fields read exactly as they do in
-    the report (``None`` histograms, per-op deltas with ``None``
-    baseline fields) instead of being filled in here.
+    regression flags. A history baseline recorded before 0.43.0
+    carries no per-op histograms, and a baseline recorded
+    before 0.22.0 carries no per-op stats, so those fields
+    read exactly as they do in the report (``None`` histograms,
+    per-op deltas with ``None`` baseline fields) instead of
+    being filled in here.
 
     Creates the parent directory when needed. Returns the
     comparison dict.

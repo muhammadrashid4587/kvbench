@@ -450,12 +450,14 @@ class TestSweepStepFastestSlowestComparison(unittest.TestCase):
         result = run_workload(DictClient, workload, "baseline (dict)")
         result.sweep = self._steps_with_distinct_speeds()
         text = render_markdown([result], workload, "kvbench")
-        runs = {run["run"]: run
-                for run in result.sweep[0]["repeat"]["runs"]}
-        for label in ("5 keys", "20 keys"):
+        for label, step in zip(("5 keys", "20 keys"), result.sweep):
             # One fastest block and one slowest block per step,
             # drawn with the same shared helper as the step's own
-            # per-op blocks — fastest first, then slowest.
+            # per-op blocks — fastest first, then slowest — from
+            # that step's own runs, since each step measured its
+            # own latencies.
+            runs = {run["run"]: run
+                    for run in step["repeat"]["runs"]}
             fastest_block = _per_op_histogram_block(
                 f"##### {label} — fastest repeat run (run 2) "
                 "per-op latency histogram",

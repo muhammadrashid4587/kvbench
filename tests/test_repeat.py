@@ -24,7 +24,8 @@ from kvbench.report import (_histogram_comparison_rows_from,
                             _per_op_fastest_slowest_histogram_comparison,
                             _repeat_fastest_slowest_histogram_comparison,
                             render_json, render_markdown, to_json_dict)
-from kvbench.stats import histogram, median, spread_summary
+from kvbench.stats import HISTOGRAM_EDGES_MS, histogram, median, \
+    spread_summary
 
 try:
     from test_cli import _start_server
@@ -146,12 +147,21 @@ class TestRepeatedWorkload(unittest.TestCase):
                     entry["per_op"][op]["ops"])
                 # The bucket edges are the same fixed log-spaced
                 # edges as the main run's histogram, whatever the
-                # samples: compare against a histogram built from
-                # any sample set.
-                self.assertEqual(
-                    [b["upper_ms"] for b in buckets],
-                    [b["upper_ms"]
-                     for b in histogram(result.latencies_ns)])
+                # samples — a prefix of HISTOGRAM_EDGES_MS, with
+                # an overflow bucket (upper None) when a sample
+                # passed the largest edge. histogram() drops empty
+                # trailing buckets, and each repeat run measured
+                # its own latencies, so a run's edges are compared
+                # against the fixed edge list — not against the
+                # median run's edges, which a slower repeat run
+                # can exceed.
+                uppers = [b["upper_ms"] for b in buckets]
+                fixed = list(HISTOGRAM_EDGES_MS)
+                if uppers and uppers[-1] is None:
+                    self.assertEqual(uppers[:-1],
+                                     fixed[:len(uppers) - 1])
+                else:
+                    self.assertEqual(uppers, fixed[:len(uppers)])
                 self.assertTrue(all(b["count"] >= 0 for b in buckets))
 
     def test_repeat_histograms_render_in_markdown_and_json(self):

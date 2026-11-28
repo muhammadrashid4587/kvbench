@@ -983,8 +983,9 @@ compares per op the same way when its record carries per-op stats
 shows this run's per-op numbers with n/a deltas, and a note
 saying why the baseline's are missing. Each compared
 backend also carries its per-operation latency histograms — the
-current run's, and the baseline run's when the baseline report
-carries them (JSON reports since 0.32.0 do) — under
+current run's, and the baseline run's when the baseline carries
+them (JSON reports since 0.32.0 do, and history records since
+0.43.0 do) — under
 `comparison.entries[].histograms_by_op` and
 `baseline_histograms_by_op` in JSON, and as blocks under the
 comparison table in Markdown, so a p99 move names the op whose
@@ -1428,7 +1429,7 @@ make test
   and the op that moved most also shows how its latency shape
   moved; the same op picked on both measures renders once, and
   a baseline that carries no per-op histograms (a report before
-  0.32.0, or a history baseline) renders only this run's shape.
+  0.32.0, or a history record before 0.43.0) renders only this run's shape.
   Done in 0.59.0. A per-op histogram comparison table for the
   best/worst ops — each picked op's p50/p99 in both runs, the
   p99 change and the bucket drift, like the trend view's
@@ -1440,7 +1441,7 @@ make test
   per-op delta rows also carry each side's p50 now, so the
   table's numbers agree with the delta table just above it,
   and a baseline that carries no per-op histograms (a report
-  before 0.32.0, or a history baseline) renders a note naming
+  before 0.32.0, or a history record before 0.43.0) renders a note naming
   the reason instead of a table. The `--compare-file-json`
   export carries it too, since it writes the same comparison
   dict. Done in 0.60.0. A per-op histogram comparison table in
@@ -1560,6 +1561,20 @@ make test
   it writes the same comparison dict. A baseline that carries
   no per-op stats, or no per-op histograms, renders a note
   naming the reason instead of a table. Done in 0.72.0.
+  Next: the history baseline carries the recorded run's
+  per-op histograms too — history records carry
+  `histograms_by_op` since 0.43.0, but the history baseline
+  loader dropped them, so every `--compare-history` run
+  rendered the notes saying the history file carries no
+  per-op histograms even when the record had them; passing
+  them through the same shared helper lights up the
+  baseline's histogram blocks, the best/worst picks'
+  baseline shapes, and both histogram comparison tables for
+  a history baseline, in both Markdown and JSON, with the
+  `--compare-history-json` export carrying them too, since it
+  writes the same comparison dict. A record before 0.43.0,
+  or one whose recorded histograms are malformed, still
+  renders a note naming the reason instead. Done in 0.73.0.
 - `--compare-file-json PATH`: with `--compare-file`, also
   write the comparison as a standalone JSON file — the exact
   dict `compare_results` returns (the same one the run's JSON
@@ -1579,10 +1594,11 @@ make test
   shared helper in `compare.py`, so the file cannot disagree
   with the report: same entries, same per-op deltas, same
   per-op histograms of both runs, same workload-match verdict
-  and regression flags. A history baseline carries no per-op
-  histograms, and a baseline recorded before 0.22.0 carries no
-  per-op stats, so those fields read exactly as they do in the
-  report instead of being filled in by the export. Like
+  and regression flags. A history baseline recorded before
+  0.43.0 carries no per-op histograms, and a baseline
+  recorded before 0.22.0 carries no per-op stats, so those
+  fields read exactly as they do in the report instead of
+  being filled in by the export. Like
   `--trend-json` and `--best-worst-json`, the flag needs its
   mode (exit 2 without `--compare-history`). Done in 0.56.0.
 - Per-operation histogram comparisons in the `--trend-json`
@@ -1831,10 +1847,11 @@ make test
   histogram-block helper so the comparison can't disagree
   with the single-run output — so a p99 move names the op
   whose latency shape moved, not just that the p99 moved. A
-  history baseline carries no per-op histograms, and reports
-  written before 0.32.0 carry none either, so those
-  comparisons show the current run's histograms only, with a
-  note saying why the baseline's are missing. Done in 0.41.0.
+  history baseline recorded before 0.43.0 carries no per-op
+  histograms, and reports written before 0.32.0 carry none
+  either, so those comparisons show the current run's
+  histograms only, with a note saying why the baseline's are
+  missing. Done in 0.41.0.
 - `--sweep-mix` mode: a sweep mode that varies the read:write
   mix across steps — `--sweep-mix 100:0,90:10,50:50,10:90`
   re-runs the same workload once per ratio, like the existing

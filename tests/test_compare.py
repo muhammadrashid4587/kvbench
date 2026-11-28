@@ -216,7 +216,7 @@ class TestLoadHistoryBaseline(unittest.TestCase):
         return path
 
     def _record(self, backend, ops_per_sec, p99_ms, timestamp,
-                errors=0, workload=None, per_op=None):
+                errors=0, workload=None, per_op=None, histograms=None):
         record = {
             "tool": "kvbench",
             "version": "0.18.0",
@@ -236,6 +236,8 @@ class TestLoadHistoryBaseline(unittest.TestCase):
         }
         if per_op is not None:
             record["per_op"] = per_op
+        if histograms is not None:
+            record["histograms_by_op"] = histograms
         return record
 
     def _other_workload(self):
@@ -447,6 +449,98 @@ class TestLoadHistoryBaseline(unittest.TestCase):
                 self.assertIsNone(row["baseline_ops_per_sec"])
                 self.assertIsNone(row["ops_sec_delta_pct"])
                 self.assertIsNone(row["p99_delta_pct"])
+
+    def test_history_baseline_passes_through_per_op_histograms(self):
+        # A record since 0.43.0 carries per-op latency
+        # histograms, so the history baseline carries them the
+        # same way a report baseline does — and the comparison
+        # renders the baseline's shapes instead of the notes
+        # saying the history file carries none.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_history(tmp, [
+                self._record("cinder (127.0.0.1:6379)", 8_000, 0.12,
+                             "2026-11-23T10:00:00+00:00",
+                             per_op=_baseline_per_op(),
+                             histograms=_baseline_histograms()),
+            ])
+            doc = load_history_baseline(path, "latest")
+            self.assertEqual(doc["results"][0]["histograms_by_op"],
+                             _baseline_histograms())
+            comparison = compare_results(
+                [_result_with_ops()], doc,
+                _workload_dict(_workload()),
+                "history.jsonl (history run -1)", source="history")
+            entry = comparison["entries"][0]
+            self.assertEqual(entry["baseline_histograms_by_op"],
+                             _baseline_histograms())
+            self.assertEqual(
+                entry["best_worst"]["best_by_ops_sec"]
+                ["baseline_histogram"],
+                _baseline_histograms()["SET"])
+            # The per-op histogram comparison has rows with real
+            # bucket drift now, not a note about missing
+            # histograms.
+            per_op_comparison = entry["per_op_histogram_comparison"]
+            self.assertIsNotNone(per_op_comparison["rows"])
+            self.assertEqual(per_op_comparison["notes"], [])
+            self.assertEqual(
+                [row["op"] for row in per_op_comparison["rows"]],
+                ["SET", "GET"])
+            self.assertIsNotNone(
+                per_op_comparison["rows"][1]["bucket_drift_pp"])
+            text = render_markdown(
+                [_result_with_ops()], _workload(), "kvbench",
+                comparison)
+            self.assertIn("per-op latency histogram (prev)", text)
+            self.assertIn("per-op histogram comparison", text)
+            self.assertNotIn("carries no per-op histograms", text)
+
+    def test_history_record_without_histograms_has_none(self):
+        # A record before 0.43.0 carries no histograms_by_op —
+        # even when it carries per-op stats, the baseline field
+        # is None and the comparison still renders the notes
+        # naming the reason.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_history(tmp, [
+                self._record("cinder (127.0.0.1:6379)", 8_000, 0.12,
+                             "2026-11-23T10:00:00+00:00",
+                             per_op=_baseline_per_op()),
+            ])
+            doc = load_history_baseline(path, "latest")
+            self.assertIsNone(
+                doc["results"][0].get("histograms_by_op"))
+            comparison = compare_results(
+                [_result_with_ops()], doc,
+                _workload_dict(_workload()),
+                "history.jsonl (history run -1)", source="history")
+            entry = comparison["entries"][0]
+            self.assertIsNone(entry["baseline_histograms_by_op"])
+            self.assertIsNone(
+                entry["per_op_histogram_comparison"]["rows"])
+            self.assertIn(
+                "The baseline run carries no per-op histograms",
+                entry["per_op_histogram_comparison"]["notes"][0])
+
+    def test_malformed_history_histograms_are_ignored(self):
+        # A hand-edited record may carry something that is not
+        # a histogram mapping: the loader passes it through raw
+        # and the comparison ignores it instead of crashing.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_history(tmp, [
+                self._record("cinder (127.0.0.1:6379)", 8_000, 0.12,
+                             "2026-11-23T10:00:00+00:00",
+                             per_op=_baseline_per_op(),
+                             histograms={"SET": "not-a-list"}),
+            ])
+            doc = load_history_baseline(path, "latest")
+            comparison = compare_results(
+                [_result_with_ops()], doc,
+                _workload_dict(_workload()),
+                "history.jsonl (history run -1)", source="history")
+            entry = comparison["entries"][0]
+            self.assertIsNone(entry["baseline_histograms_by_op"])
+            self.assertIsNone(
+                entry["per_op_histogram_comparison"]["rows"])
 
     def test_same_workload_latest_skips_newer_mismatched_runs(self):
         # The two newest runs used a different workload (4
@@ -1802,6 +1896,42 @@ class TestCompareHistoryCli(unittest.TestCase):
             self.assertEqual(
                 comparison["entries"][0]["name"],
                 f"cinder (127.0.0.1:{self.port})")
+
+    def test_compare_history_uses_recorded_per_op_histograms(self):
+        # A run recorded with --history carries per-op
+        # histograms, so comparing against it draws the
+        # baseline's shapes: the (prev) histogram blocks, the
+        # best/worst picks' baseline shapes, and the per-op
+        # histogram comparison table with real bucket drift.
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._run_with_history(tmp)
+            out = os.path.join(tmp, "run.md")
+            code = main(self._argv(["--ops", "100", "--clients", "1",
+                                    "--output", out,
+                                    "--compare-history", "-1",
+                                    "--history-file", history]))
+            self.assertEqual(code, 0)
+            with open(out, encoding="utf-8") as f:
+                text = f.read()
+            self.assertIn("per-op latency histogram (prev)", text)
+            self.assertIn("per-op histogram comparison", text)
+            self.assertNotIn("carries no per-op histograms", text)
+            parsed = json.loads(open(os.path.join(tmp, "run.json"),
+                                     encoding="utf-8").read())
+            entry = parsed["comparison"]["entries"][0]
+            self.assertIsNotNone(entry["baseline_histograms_by_op"])
+            # The baseline's per-op histograms cover the same
+            # ops this run measured.
+            self.assertEqual(
+                sorted(entry["baseline_histograms_by_op"]),
+                sorted(parsed["results"][0]["histograms_by_op"]))
+            self.assertIsNotNone(
+                entry["per_op_histogram_comparison"]["rows"])
+            self.assertEqual(
+                entry["per_op_histogram_comparison"]["notes"], [])
+            self.assertIsNotNone(
+                entry["best_worst"]["best_by_ops_sec"]
+                ["baseline_histogram"])
 
     def test_compare_history_json_end_to_end(self):
         with tempfile.TemporaryDirectory() as tmp:
