@@ -496,8 +496,11 @@ class TestSweepStepFastestSlowestComparison(unittest.TestCase):
                     step["repeat"]["runs"]))
 
     def test_no_blocks_when_runs_not_comparable(self):
-        # Identical runs: no comparison, so no fastest/slowest
-        # blocks either — the note names the reason instead.
+        # Identical runs: no overall comparison, so no overall
+        # fastest/slowest blocks either — the note names the
+        # reason instead. The per-op comparisons still compare,
+        # since the per-op ops/sec differ, so the per-op sections
+        # draw their own blocks for the op.
         sweep = self._steps_with_distinct_speeds()
         for entry in sweep:
             for run in entry["repeat"]["runs"]:
@@ -506,17 +509,28 @@ class TestSweepStepFastestSlowestComparison(unittest.TestCase):
         result = run_workload(DictClient, workload, "baseline (dict)")
         result.sweep = sweep
         text = render_markdown([result], workload, "kvbench")
-        self.assertNotIn("fastest repeat run (run", text)
-        self.assertNotIn("slowest repeat run (run", text)
-        # The fastest run loses its histograms: same — a note,
-        # and no blocks.
+        for label in ("5 keys", "20 keys"):
+            self.assertNotIn(
+                f"##### {label} — fastest repeat run (run", text)
+            self.assertNotIn(
+                f"##### {label} — slowest repeat run (run", text)
+        self.assertIn("SET fastest repeat run (run", text)
+        self.assertIn("SET slowest repeat run (run", text)
+        # The fastest run loses its histograms: same for the
+        # overall comparison — a note, and no overall blocks.
         sweep = self._steps_with_distinct_speeds()
         for entry in sweep:
             del entry["repeat"]["runs"][1]["histograms_by_op"]
         result.sweep = sweep
         text = render_markdown([result], workload, "kvbench")
-        self.assertNotIn("fastest repeat run (run", text)
-        self.assertNotIn("slowest repeat run (run", text)
+        for label in ("5 keys", "20 keys"):
+            self.assertNotIn(
+                f"##### {label} — fastest repeat run (run", text)
+            self.assertNotIn(
+                f"##### {label} — slowest repeat run (run", text)
+        self.assertIn("Repeat run 2 (the fastest run) carries no "
+                      "per-op histograms, so there is no "
+                      "fastest-vs-slowest histogram comparison.", text)
 
     def test_comparison_covers_all_sweep_types(self):
         # Every sweep type's per-step repeat block carries the
@@ -747,6 +761,19 @@ class TestSweepStepPerOpFastestSlowestComparison(unittest.TestCase):
                     "repeat run histogram comparison", text)
         self.assertIn("Fastest run 3 vs slowest run 1 for SET", text)
         self.assertIn("Fastest run 1 vs slowest run 3 for GET", text)
+        # Each per-op section also draws the fastest and slowest
+        # runs' histogram blocks for that op alone, next to its
+        # table — fastest first, then slowest — from the bucket
+        # lists the comparison already carries.
+        for label in ("5 keys", "20 keys"):
+            for op, fastest_run, slowest_run in (
+                    ("SET", 3, 1), ("GET", 1, 3)):
+                self.assertIn(
+                    f"##### {label} — {op} fastest repeat run "
+                    f"(run {fastest_run}) latency histogram", text)
+                self.assertIn(
+                    f"##### {label} — {op} slowest repeat run "
+                    f"(run {slowest_run}) latency histogram", text)
         parsed = json.loads(render_json([result], workload, "kvbench"))
         for entry, step in zip(parsed["results"][0]["keyspace_sweep"],
                                result.sweep):

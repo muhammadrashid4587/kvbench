@@ -255,10 +255,13 @@ def _result_dict(result, top_n=5):
         # Its ``per_op`` carries one fastest-vs-slowest
         # comparison per op that ran — the op's own fastest and
         # slowest runs by that op's ops/sec, with the op's own
-        # histogram comparison table — the same dicts the
-        # Markdown per-op sections render, so a repeat run
-        # where one op's runs swing while the overall winner
-        # stays steady still names the op.
+        # histogram comparison table and the picked runs' bucket
+        # lists for the op under ``fastest_histogram`` and
+        # ``slowest_histogram`` — the same dicts the
+        # Markdown per-op sections render, and the same bucket
+        # lists the per-op histogram blocks next to them draw,
+        # so a repeat run where one op's runs swing while the
+        # overall winner stays steady still names the op.
         comparison = _repeat_fastest_slowest_histogram_comparison(result)
         comparison["per_op"] = {
             op: _per_op_fastest_slowest_histogram_comparison(
@@ -804,10 +807,12 @@ def _sweep_repeat_lines(label, entries):
     as well as numbers — and then by a per-op fastest-vs-slowest
     section for each op that ran: the op's own fastest and
     slowest runs by that op's ops/sec, with the op's own
-    histogram comparison table, so a step where one op's runs
-    swing while the overall winner stays steady still names
-    the op; a step whose runs are not comparable
-    renders a note naming the reason instead, and no blocks.
+    histogram comparison table, and the fastest and slowest
+    runs' histogram blocks for that op alone next to the table,
+    so a step where one op's runs swing while the overall winner
+    stays steady still names the op; a step whose runs are not
+    comparable renders a note naming the reason instead, and no
+    blocks.
     The full per-run detail (mean, p50, per-op values, per-op
     histograms) lives in the JSON report under the step's
     ``repeat.runs``, and the comparison under the step's
@@ -1367,6 +1372,41 @@ def _fastest_slowest_histogram_block_lines(comparison, label):
     )
 
 
+def _per_op_fastest_slowest_histogram_block_lines(comparison, label):
+    """Fastest/slowest runs' histogram blocks for one op, or [].
+
+    ``comparison`` is a
+    :func:`_per_op_fastest_slowest_histogram_comparison` dict and
+    ``label`` formats the section (e.g. ``"5 keys"`` for a step,
+    the result name for the main repeat section). The op's fastest
+    and slowest runs' latency shapes for that op alone are drawn
+    with the shared :func:`_per_op_histogram_block` helper the
+    per-op blocks use, from the bucket lists the comparison
+    already carries under ``fastest_histogram`` and
+    ``slowest_histogram`` — fastest first, then slowest — so
+    the shape move reads as bars as well as the numbers in the
+    comparison table just above. Empty when the comparison
+    carries no histograms for the op — a single repeat run,
+    identical runs, or a picked run with no usable histogram —
+    since the note above already names the reason.
+    """
+    op = comparison["op"]
+    fastest = comparison.get("fastest_histogram")
+    slowest = comparison.get("slowest_histogram")
+    if not fastest or not slowest:
+        return []
+    return (
+        _per_op_histogram_block(
+            f"##### {label} — {op} fastest repeat run "
+            f"(run {comparison['fastest_run']}) latency histogram",
+            {op: fastest})
+        + _per_op_histogram_block(
+            f"##### {label} — {op} slowest repeat run "
+            f"(run {comparison['slowest_run']}) latency histogram",
+            {op: slowest})
+    )
+
+
 def _per_op_fastest_slowest_lines(runs, label):
     """Per-op fastest-vs-slowest repeat-run comparison lines, or [].
 
@@ -1384,10 +1424,16 @@ def _per_op_fastest_slowest_lines(runs, label):
     ``repeat.histogram_comparison.per_op[OP]``, so the two
     views cannot disagree and a repeat run where one op's runs
     swing while the overall winner stays steady still names the
-    op. When nothing is comparable for an op — it ran in only
-    one run, its runs' ops/sec are all identical, or a picked
-    run carries no usable histogram for it — a note names the
-    reason instead of a table.
+    op — and then the fastest and slowest runs' histogram
+    blocks for that op alone, drawn by the shared
+    :func:`_per_op_histogram_block` helper from the bucket
+    lists the same dict carries under ``fastest_histogram``
+    and ``slowest_histogram``, so the shape move reads as bars
+    as well as numbers next to the table. When nothing is
+    comparable for an op — it ran in only one run, its runs'
+    ops/sec are all identical, or a picked run carries no
+    usable histogram for it — a note names the reason instead
+    of a table, and no blocks.
     """
     lines = []
 
@@ -1420,6 +1466,8 @@ def _per_op_fastest_slowest_lines(runs, label):
                 f"##### {label} — {op} fastest vs slowest repeat "
                 "run histogram comparison",
                 "slowest", "fastest", rows)
+            lines += _per_op_fastest_slowest_histogram_block_lines(
+                comparison, label)
         for note in comparison.get("notes") or []:
             lines.append(f"- {note}")
         if comparison.get("notes"):
@@ -1442,9 +1490,10 @@ def _repeat_fastest_slowest_lines(result):
     latency shape moved — and then a per-op fastest-vs-slowest
     section for each op that ran: the op's own fastest and
     slowest runs by that op's ops/sec, with the op's own
-    histogram comparison table, so a repeat run where one op's
-    runs swing while the overall winner stays steady still names
-    the op. When nothing is comparable — a single repeat run,
+    histogram comparison table, and the fastest and slowest
+    runs' histogram blocks for that op alone next to the table,
+    so a repeat run where one op's runs swing while the
+    overall winner stays steady still names the op. When nothing is comparable — a single repeat run,
     identical runs, or a picked run with no usable histograms —
     a note names the reason instead of a table.
     Empty for a result with no repeat runs.

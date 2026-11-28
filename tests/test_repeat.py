@@ -472,6 +472,18 @@ class TestRepeatPerOpFastestSlowestComparison(unittest.TestCase):
                 "repeat run histogram comparison", text)
         self.assertIn("Fastest run 3 vs slowest run 1 for SET", text)
         self.assertIn("Fastest run 1 vs slowest run 3 for GET", text)
+        # Each per-op section also draws the fastest and slowest
+        # runs' histogram blocks for that op alone, next to its
+        # table — fastest first, then slowest — from the bucket
+        # lists the comparison already carries.
+        for op, fastest_run, slowest_run in (
+                ("SET", 3, 1), ("GET", 1, 3)):
+            self.assertIn(
+                f"##### baseline (dict) — {op} fastest repeat run "
+                f"(run {fastest_run}) latency histogram", text)
+            self.assertIn(
+                f"##### baseline (dict) — {op} slowest repeat run "
+                f"(run {slowest_run}) latency histogram", text)
         parsed = json.loads(render_json([result], workload, "kvbench"))
         per_op = parsed["results"][0]["repeat"][
             "histogram_comparison"]["per_op"]
@@ -509,6 +521,10 @@ class TestRepeatPerOpFastestSlowestComparison(unittest.TestCase):
                       "are the same run, so there is no "
                       "fastest-vs-slowest histogram comparison for "
                       "SET.", text)
+        # No comparison table means no histogram blocks for SET
+        # either — the note already names the reason.
+        self.assertNotIn("SET fastest repeat run", text)
+        self.assertNotIn("SET slowest repeat run", text)
         parsed = json.loads(render_json([result], workload, "kvbench"))
         self.assertEqual(
             parsed["results"][0]["repeat"]["histogram_comparison"]

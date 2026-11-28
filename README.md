@@ -344,7 +344,13 @@ python -m kvbench.cli --ops 20000 --clients 4 \
 # each op that ran, under repeat.histogram_comparison.per_op in
 # JSON and as a section per op in the Repeat runs section in
 # Markdown, so a repeat run where one op's runs swing while the
-# overall winner stays steady still names the op; a single
+# overall winner stays steady still names the op — plus the
+# fastest and slowest runs' histogram blocks for that op next to
+# each per-op section, the two runs' latency shapes for the op
+# alone drawn with the same shared helper as the per-op blocks,
+# from the bucket lists the comparison already carries under
+# fastest_histogram and slowest_histogram for the op, so the
+# shape move reads as bars as well as numbers; a single
 # repeat run renders a note naming the
 # reason instead of a comparison
 python -m kvbench.cli --ops 20000 --clients 4 --repeat 3
@@ -370,8 +376,13 @@ python -m kvbench.cli --ops 20000 --clients 4 --repeat 3
 # repeat.histogram_comparison.per_op in JSON and as a section per
 # op in the per-step repeat block in Markdown, so a step where
 # one op's runs swing while the overall winner stays steady still
-# names the op; a step whose runs are not comparable renders a
-# note naming the reason instead, and no blocks
+# names the op — plus the fastest and slowest runs' histogram
+# blocks for that op next to each per-op section, the two runs'
+# latency shapes for the op alone drawn with the same shared
+# helper, from the bucket lists under fastest_histogram and
+# slowest_histogram for the op; a step whose runs are not
+# comparable renders a note naming the reason instead, and no
+# blocks
 python -m kvbench.cli --ops 20000 --clients 4 --repeat 3 \
     --sweep-keyspace 100,1000,10000
 
@@ -1267,8 +1278,10 @@ comparison table, so a step where one op's runs swing while the
 overall winner stays steady still names the op — under
 `repeat.histogram_comparison.per_op` in JSON, with the picked
 runs' bucket lists for the op under `fastest_histogram` and
-`slowest_histogram`; an op whose runs are not comparable renders
-a note naming the reason instead of a table.
+`slowest_histogram`, and the Markdown per-op section draws the
+two runs' histogram blocks for the op next to the table from
+those same bucket lists; an op whose runs are not comparable renders
+a note naming the reason instead of a table, and no blocks.
 A sweep with `--repeat 1` keeps the old shape exactly — no
 `repeat` key on any step.
 
@@ -1296,8 +1309,13 @@ op that ran gets its own fastest-vs-slowest section — the op's
 own fastest and slowest runs by that op's ops/sec, with the
 op's own histogram comparison table, so a repeat run where one
 op's runs swing while the overall winner stays steady still
-names the op; an op whose runs are not comparable renders a
-note naming the reason instead of a table. The JSON report
+names the op — plus the fastest and slowest runs' histogram
+blocks for that op alone next to the table, drawn with the same
+shared helper from the bucket lists the comparison carries under
+`fastest_histogram` and `slowest_histogram` for the op, so the
+shape move reads as bars as well as numbers; an op whose runs are
+not comparable renders a note naming the reason instead of a
+table, and no blocks. The JSON report
 carries the same rows per result under `repeat.runs`, with the
 per-op buckets per run under `histograms_by_op`, the spread
 summary under `repeat.spread`, and the comparison under
@@ -1519,7 +1537,7 @@ make test
   lists the comparison already carries under
   `fastest_histogram` and `slowest_histogram` for the op, so
   the shape move reads as bars as well as numbers next to the
-  per-op table.
+  per-op table. Done in 0.71.0.
 - `--compare-file-json PATH`: with `--compare-file`, also
   write the comparison as a standalone JSON file — the exact
   dict `compare_results` returns (the same one the run's JSON
