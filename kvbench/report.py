@@ -1827,10 +1827,14 @@ def _comparison_lines(comparison):
     baseline ops/sec and p99 and the percentage change of each,
     plus a verdict line per backend. The table is followed by a
     per-operation p99 / ops-sec delta table per compared backend
-    — one row per op that ran — and a best/worst op section per
-    compared backend — the op whose ops/sec rose most and the
-    op whose p99 fell most, and the other end of each, with a
-    note when a comparison has a single op or identical runs,
+    — one row per op that ran — and a per-op histogram
+    comparison table for every op that ran — each op's p50/p99
+    in both runs, the p99 change, and the bucket drift, built
+    from the same dicts the JSON report carries — and a
+    best/worst op section per compared backend — the op whose
+    ops/sec rose most and the op whose p99 fell most, and the
+    other end of each, with a note when a comparison has a
+    single op or identical runs,
     and each best/worst op's latency histogram from both runs,
     and a per-op histogram comparison table for the picked ops
     (each op's p50/p99 in both runs, the p99 change, and the
@@ -1941,6 +1945,27 @@ def _comparison_lines(comparison):
                     "deltas are n/a."
                 )
                 lines.append("")
+            # A per-op histogram comparison table for every op
+            # that ran — not just the best/worst picks — rendered
+            # from the entry's own ``per_op_histogram_comparison``
+            # dict, the same one the JSON report carries, so the
+            # two views cannot disagree. A comparison built
+            # before 0.72.0 carries no such dict and renders no
+            # table; when the baseline carries no per-op
+            # histograms the notes name the reason instead.
+            per_op_comparison = entry.get(
+                "per_op_histogram_comparison")
+            if per_op_comparison:
+                rows = per_op_comparison.get("rows")
+                if rows:
+                    lines += _histogram_comparison_table_lines(
+                        f"#### {entry['name']} — per-op histogram "
+                        "comparison",
+                        "prev", "now", rows)
+                for note in per_op_comparison.get("notes") or []:
+                    lines.append(f"- {note}")
+                if per_op_comparison.get("notes"):
+                    lines.append("")
             # Best/worst op vs the baseline: the op whose ops/sec
             # rose most and the op whose p99 fell most, and the
             # other end of each — rendered from the entry's own

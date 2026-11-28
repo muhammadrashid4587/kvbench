@@ -965,7 +965,16 @@ built from the same shared pick dicts, so the shape move reads
 as numbers as well as bars; a baseline that carries no per-op
 histograms renders a note naming the reason instead of a table,
 and the per-op delta rows carry each side's p50 as well, so the
-table's numbers agree with the delta table just above it. A comparison with a single op, or two
+table's numbers agree with the delta table just above it. Each
+compared backend also carries a per-op histogram comparison table
+for every op that ran — one row per op, with each op's p50 and p99
+in both runs, the p99 change, and the bucket drift — under
+`comparison.entries[].per_op_histogram_comparison` in JSON and as
+a table under the per-op delta table in Markdown, built from the
+same per-op rows and both runs' histograms, so an op that moved
+while another op moved more still shows how its latency shape
+moved; a baseline that carries no per-op histograms renders a
+note naming the reason instead of a table. A comparison with a single op, or two
 identical runs, carries a note saying so instead of a spread, and
 a baseline that carries no per-op stats carries a note saying
 there is no best or worst op. A history baseline
@@ -1538,6 +1547,19 @@ make test
   `fastest_histogram` and `slowest_histogram` for the op, so
   the shape move reads as bars as well as numbers next to the
   per-op table. Done in 0.71.0.
+  Next: a per-op histogram comparison table for every op that
+  ran in the `--compare` output — one row per op, each op's
+  p50/p99 in both runs, the p99 change and the bucket drift,
+  under `comparison.entries[].per_op_histogram_comparison` in
+  JSON and as a table under the per-op delta table in Markdown,
+  built by one shared helper in `compare.py` from the entry's
+  own per-op rows and both runs' histograms, so the JSON and
+  Markdown views cannot disagree and an op that moved while
+  another op moved more still shows how its latency shape
+  moved; the `--compare-file-json` export carries it too, since
+  it writes the same comparison dict. A baseline that carries
+  no per-op stats, or no per-op histograms, renders a note
+  naming the reason instead of a table. Done in 0.72.0.
 - `--compare-file-json PATH`: with `--compare-file`, also
   write the comparison as a standalone JSON file — the exact
   dict `compare_results` returns (the same one the run's JSON

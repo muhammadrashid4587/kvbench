@@ -513,6 +513,88 @@ def _best_worst_histogram_comparison(per_op, picks):
     }
 
 
+def _per_op_histogram_comparison(per_op, current_histograms=None,
+                                 baseline_histograms=None):
+    """Per-op histogram comparison table for every op that ran.
+
+    ``per_op`` is the per-op delta rows :func:`_per_op_deltas`
+    returns. One row per op that ran, in SET/GET/INCR/DEL
+    order: each op's p50 and p99 in the previous and current
+    runs — the same numbers the per-op delta table shows, so
+    the two tables cannot disagree — the p99 percentage change,
+    and the bucket drift (the largest single-bucket share move,
+    in percentage points, with the bucket it moved in — see
+    :func:`kvbench.history._bucket_drift`) between the op's
+    baseline and current histograms. An op whose baseline
+    carries no histogram shows None for the previous side and
+    no drift, like the trend view's rows for an op that ran on
+    only one side. Unlike
+    :func:`_best_worst_histogram_comparison`, this covers every
+    op, not just the best/worst picks, so an op that moved
+    while another op moved more still shows its shape move.
+
+    Returns a JSON-serializable dict with ``"from": "prev"``
+    and ``"to": "now"``: ``rows`` with ``notes`` empty, or
+    ``rows`` None and ``notes`` naming why there is no
+    comparison: the baseline carries no per-operation stats,
+    or no op carries a latency histogram from both runs.
+    """
+    current = _histograms_or_none(current_histograms)
+    baseline = _histograms_or_none(baseline_histograms)
+    if not any(row.get("baseline_p99_ms") is not None
+               for row in per_op):
+        return {
+            "from": "prev",
+            "to": "now",
+            "rows": None,
+            "notes": ["The baseline carries no per-operation "
+                      "stats, so there is no per-op histogram "
+                      "comparison."],
+        }
+    both = [row["op"] for row in per_op
+            if (current or {}).get(row["op"])
+            and (baseline or {}).get(row["op"])]
+    if not both:
+        if not any((current or {}).get(row["op"])
+                   for row in per_op):
+            reason = "This run carries no per-op histograms"
+        elif not any((baseline or {}).get(row["op"])
+                     for row in per_op):
+            reason = ("The baseline run carries no per-op "
+                      "histograms")
+        else:
+            reason = ("No op carries a latency histogram from "
+                      "both runs")
+        return {
+            "from": "prev",
+            "to": "now",
+            "rows": None,
+            "notes": [f"{reason}, so there is no per-op "
+                      "histogram comparison."],
+        }
+    rows = []
+    for row in per_op:
+        drift_pp = None
+        drift_bucket = None
+        current_hist = (current or {}).get(row["op"])
+        baseline_hist = (baseline or {}).get(row["op"])
+        if current_hist and baseline_hist:
+            moved = _bucket_drift(baseline_hist, current_hist)
+            if moved is not None:
+                drift_pp, drift_bucket = moved
+        rows.append({
+            "op": row["op"],
+            "p50_from_ms": row.get("baseline_p50_ms"),
+            "p50_to_ms": row.get("p50_ms"),
+            "p99_from_ms": row.get("baseline_p99_ms"),
+            "p99_to_ms": row.get("p99_ms"),
+            "p99_change_pct": row.get("p99_delta_pct"),
+            "bucket_drift_pp": drift_pp,
+            "bucket_drift_bucket": drift_bucket,
+        })
+    return {"from": "prev", "to": "now", "rows": rows, "notes": []}
+
+
 def _delta_pct(current, baseline):
     """Percentage change of ``current`` versus ``baseline``.
 
@@ -589,7 +671,12 @@ def compare_results(results, baseline_doc, current_workload,
     the picked ops under ``best_worst.histogram_comparison`` —
     each op's p50/p99 in both runs, the p99 change, and the
     bucket drift, built from the same pick dicts, so the shape
-    move reads as numbers as well as bars.
+    move reads as numbers as well as bars — and a per-op
+    histogram comparison table for every op that ran under
+    ``per_op_histogram_comparison`` — the same columns, one row
+    per op, built from the entry's own per-op rows and both
+    runs' histograms, so an op that moved while another op
+    moved more still shows its shape move.
     Each entry also carries the per-operation latency histograms
     of both runs — the current run's under
     ``histograms_by_op`` (the same log-spaced buckets as the
@@ -664,6 +751,14 @@ def compare_results(results, baseline_doc, current_workload,
             # moved most shows how its latency shape moved.
             "best_worst": _best_worst_per_op(
                 per_op, result.per_op_histograms, baseline_hists),
+            # A per-op histogram comparison table for every op
+            # that ran — not just the best/worst picks — built
+            # from the same per-op rows and the same histograms,
+            # so an op that moved while another op moved more
+            # still shows how its latency shape moved.
+            "per_op_histogram_comparison":
+                _per_op_histogram_comparison(
+                    per_op, result.per_op_histograms, baseline_hists),
             "histograms_by_op": result.per_op_histograms,
             "baseline_histograms_by_op": baseline_hists,
         })

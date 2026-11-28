@@ -815,6 +815,111 @@ class TestCompareResults(unittest.TestCase):
         self.assertAlmostEqual(rows[1]["p50_to_ms"], 0.2)
         self.assertAlmostEqual(rows[1]["p99_change_pct"], 100.0)
 
+    def test_entries_carry_per_op_histogram_comparison(self):
+        # The same fixture as test_entries_carry_best_worst:
+        # SET +25.0% ops/sec and -50.0% p99, GET +0.0% and
+        # +100.0% — so the all-ops table carries one row per op
+        # that ran, with the same numbers as the per-op delta
+        # table and the best/worst comparison's rows for those
+        # ops, and the bucket drift from both runs' histograms.
+        comparison = compare_results(
+            [_result_with_ops()],
+            _baseline_doc(ops_per_sec=8_000, p99_ms=0.12,
+                          per_op=_baseline_per_op(),
+                          histograms_by_op=_baseline_histograms()),
+            _workload_dict(_workload()), "prev.json")
+        per_op_comparison = (
+            comparison["entries"][0]["per_op_histogram_comparison"])
+        self.assertEqual(per_op_comparison["from"], "prev")
+        self.assertEqual(per_op_comparison["to"], "now")
+        self.assertEqual(per_op_comparison["notes"], [])
+        rows = per_op_comparison["rows"]
+        self.assertEqual([row["op"] for row in rows],
+                         ["SET", "GET"])
+        set_row, get_row = rows
+        self.assertAlmostEqual(set_row["p50_from_ms"], 0.2)
+        self.assertAlmostEqual(set_row["p50_to_ms"], 0.1)
+        self.assertAlmostEqual(set_row["p99_from_ms"], 0.2)
+        self.assertAlmostEqual(set_row["p99_to_ms"], 0.1)
+        self.assertAlmostEqual(set_row["p99_change_pct"], -50.0)
+        self.assertAlmostEqual(set_row["bucket_drift_pp"], 0.0)
+        self.assertEqual(set_row["bucket_drift_bucket"], "<= 0.1 ms")
+        self.assertAlmostEqual(get_row["p50_from_ms"], 0.1)
+        self.assertAlmostEqual(get_row["p50_to_ms"], 0.2)
+        self.assertAlmostEqual(get_row["p99_from_ms"], 0.1)
+        self.assertAlmostEqual(get_row["p99_to_ms"], 0.2)
+        self.assertAlmostEqual(get_row["p99_change_pct"], 100.0)
+        self.assertAlmostEqual(get_row["bucket_drift_pp"], 100.0)
+        self.assertEqual(get_row["bucket_drift_bucket"], "<= 0.25 ms")
+
+    def test_per_op_histogram_comparison_without_baseline_histograms(
+            self):
+        # A baseline with per-op stats but no histograms — a
+        # report written before 0.32.0, or a history baseline —
+        # still gets per-op deltas, but there is no per-op
+        # histogram comparison table: a note names the reason
+        # instead.
+        comparison = compare_results(
+            [_result_with_ops()],
+            _baseline_doc(ops_per_sec=8_000, p99_ms=0.12,
+                          per_op=_baseline_per_op()),
+            _workload_dict(_workload()), "prev.json")
+        per_op_comparison = (
+            comparison["entries"][0]["per_op_histogram_comparison"])
+        self.assertEqual(per_op_comparison["from"], "prev")
+        self.assertEqual(per_op_comparison["to"], "now")
+        self.assertIsNone(per_op_comparison["rows"])
+        self.assertEqual(per_op_comparison["notes"], [
+            "The baseline run carries no per-op histograms, so "
+            "there is no per-op histogram comparison."])
+
+    def test_per_op_histogram_comparison_without_baseline_per_op(
+            self):
+        # A baseline with no per-op stats has no previous-side
+        # percentiles at all, so there is no per-op histogram
+        # comparison table even when the current run carries
+        # histograms.
+        comparison = compare_results(
+            [_result_with_ops()], _baseline_doc(),
+            _workload_dict(_workload()), "prev.json")
+        per_op_comparison = (
+            comparison["entries"][0]["per_op_histogram_comparison"])
+        self.assertIsNone(per_op_comparison["rows"])
+        self.assertEqual(per_op_comparison["notes"], [
+            "The baseline carries no per-operation stats, so "
+            "there is no per-op histogram comparison."])
+
+    def test_per_op_histogram_comparison_baseline_without_p50(
+            self):
+        # A baseline whose per-op stats carry no p50 — a history
+        # record carries only ops/sec and p99 — still gets a
+        # table: the previous p50 reads as None, and the p99
+        # change and drift still compute from the histograms.
+        baseline_per_op = {
+            "SET": {"count": 50, "ops_per_sec": 4_000,
+                    "p99_ms": 0.2},
+            "GET": {"count": 50, "ops_per_sec": 5_000,
+                    "p99_ms": 0.1},
+        }
+        comparison = compare_results(
+            [_result_with_ops()],
+            _baseline_doc(ops_per_sec=8_000, p99_ms=0.12,
+                          per_op=baseline_per_op,
+                          histograms_by_op=_baseline_histograms()),
+            _workload_dict(_workload()), "prev.json")
+        per_op_comparison = (
+            comparison["entries"][0]["per_op_histogram_comparison"])
+        self.assertEqual(per_op_comparison["notes"], [])
+        rows = per_op_comparison["rows"]
+        self.assertEqual([row["op"] for row in rows],
+                         ["SET", "GET"])
+        self.assertIsNone(rows[0]["p50_from_ms"])
+        self.assertAlmostEqual(rows[0]["p50_to_ms"], 0.1)
+        self.assertAlmostEqual(rows[0]["p99_change_pct"], -50.0)
+        self.assertIsNone(rows[1]["p50_from_ms"])
+        self.assertAlmostEqual(rows[1]["p50_to_ms"], 0.2)
+        self.assertAlmostEqual(rows[1]["p99_change_pct"], 100.0)
+
     def test_best_worst_without_baseline_histograms(self):
         # A baseline with per-op stats but no histograms — a
         # report written before 0.32.0, or a history baseline —
@@ -1252,6 +1357,59 @@ class TestComparisonInReports(unittest.TestCase):
             "The baseline run carries no per-op histograms, so "
             "there is no histogram comparison for the best/worst "
             "ops.", text)
+
+    def test_markdown_per_op_histogram_comparison(self):
+        # The all-ops histogram comparison table renders under
+        # the per-op delta table, before the best/worst section:
+        # one row per op that ran, with the same numbers the
+        # best/worst table shows for those ops.
+        comparison = compare_results(
+            [_result_with_ops()],
+            _baseline_doc(ops_per_sec=8_000, p99_ms=0.12,
+                          per_op=_baseline_per_op(),
+                          histograms_by_op=_baseline_histograms()),
+            _workload_dict(_workload()), "prev.json")
+        text = render_markdown([_result_with_ops()], _workload(),
+                               "kvbench", comparison)
+        self.assertIn(
+            "#### cinder (127.0.0.1:6379) — per-op histogram "
+            "comparison", text)
+        self.assertIn(
+            "| Op | p50 prev (ms) | p50 now (ms) | p99 prev (ms) | "
+            "p99 now (ms) | p99 change | Bucket drift |", text)
+        self.assertIn(
+            "| SET | 0.200 | 0.100 | 0.200 | 0.100 | -50.0% | "
+            "+0.0 pp (<= 0.1 ms) |", text)
+        self.assertIn(
+            "| GET | 0.100 | 0.200 | 0.100 | 0.200 | +100.0% | "
+            "+100.0 pp (<= 0.25 ms) |", text)
+        # It sits between the per-op delta table and the
+        # best/worst section, so a reader meets the all-ops
+        # numbers before the picks.
+        self.assertLess(
+            text.index("— per-op histogram comparison"),
+            text.index("— best/worst op vs previous run"))
+        self.assertLess(
+            text.index("— per-op p99 / ops-sec deltas"),
+            text.index("— per-op histogram comparison"))
+
+    def test_markdown_per_op_histogram_comparison_no_baseline_hists(
+            self):
+        # A baseline with per-op stats but no histograms renders
+        # no all-ops comparison table: a note names the reason
+        # instead, and the best/worst section still renders its
+        # own note.
+        comparison = compare_results(
+            [_result_with_ops()],
+            _baseline_doc(ops_per_sec=8_000, p99_ms=0.12,
+                          per_op=_baseline_per_op()),
+            _workload_dict(_workload()), "prev.json")
+        text = render_markdown([_result_with_ops()], _workload(),
+                               "kvbench", comparison)
+        self.assertNotIn("— per-op histogram comparison", text)
+        self.assertIn(
+            "The baseline run carries no per-op histograms, so "
+            "there is no per-op histogram comparison.", text)
 
     def test_markdown_best_worst_without_baseline_histograms(self):
         # A baseline with per-op stats but no histograms renders
